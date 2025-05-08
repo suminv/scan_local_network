@@ -1,0 +1,17 @@
+.idea
+.vscode
+venv/
+.venv
+__pycache__
+*.msg
+.DS_Store
+*.png
+*.jpg
+*.json
+*.csv
+*.txt
+
+*.json
+
+*.db
+*.sqlite
