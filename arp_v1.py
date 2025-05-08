@@ -19,7 +19,8 @@ def update_vendor_database():
     """
     try:
         # Путь к файлу-маркеру с датой последнего обновления
-        update_marker_file = os.path.expanduser("~/.mac_vendor_update")
+        current_dir = os.path.dirname(os.path.abspath(__file__))  
+        update_marker_file = os.path.join(current_dir, "mac_vendor_update")
         need_update = True
 
         # Проверяем, нужно ли обновлять базу
