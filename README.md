@@ -22,7 +22,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 
 1.  **Clone the repository:**
     ```bash
-    git clone <repository-url>
+    git clone https://github.com/suminv/scan_local_network.git
     cd network_scan
     ```
 
