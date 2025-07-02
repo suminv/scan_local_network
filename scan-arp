@@ -1,0 +1,17 @@
+#!/bin/bash
+# This script runs the ARP scanner with the correct Python interpreter from the venv.
+
+# Get the absolute path of the script's directory.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+VENV_PYTHON="$SCRIPT_DIR/venv/bin/python3"
+
+# Check if the Python interpreter exists.
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Python interpreter not found at $VENV_PYTHON"
+    echo "Please ensure the virtual environment 'venv' is set up correctly."
+    exit 1
+fi
+
+# Run the ARP scan script using sudo.
+echo "--- Running ARP Scanner ---"
+sudo "$VENV_PYTHON" "$SCRIPT_DIR/arp_scanner.py" "$@"

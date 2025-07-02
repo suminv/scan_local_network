@@ -9,6 +9,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 - **Vendor Information**: Fetches MAC address vendor details for identified devices.
 - **New Device Tracking**: Uses a local SQLite database to track new devices over time.
 - **Multi-threaded Port Scanning**: Quickly scans devices for open TCP ports.
+- **Service & Version Detection**: Identifies services (e.g., HTTP, SSH) running on open ports and attempts to grab their banners.
 - **Customizable Port Selection**: Allows specifying ports or port ranges to scan via command-line arguments.
 - **Rich Console Output**: Displays results in a clean, color-coded, tabular format.
 - **Data Export**: Saves full scan results to a JSON file.
@@ -39,86 +40,40 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 
 ## 🚀 Usage
 
-All scripts must be run with `sudo` because they require elevated privileges for network operations.
+Helper scripts are provided for convenience. They ensure that the tools are run with the correct Python interpreter from the virtual environment and with the necessary `sudo` privileges.
 
-### 1. ARP Scanner (`arp_scanner.py`)
+### 1. ARP Scanner (`scan-arp`)
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, and tracks new devices.
 
 **To run a scan:**
 
 ```bash
-sudo python3 arp_scanner.py
+./scan-arp
 ```
 
-**Example Output:**
+### 2. Port Scanner (`scan-ports`)
 
-```
-ARP Network Scanner starting...
-
-=== Vendor Database ===
-Vendor database is up-to-date (last updated 0 days ago).
-======================
-
-=== Network Setup ===
-Interface: en0
-IP Range: 192.168.1.100/24
-====================
-
-=== Database Operations ===
-Initializing database...
-Loading known devices...
-Found 15 devices in database.
-=========================
-
-=== Scanning Network ===
-Starting ARP scan...
-ARP scan completed. Found 15 devices.
-======================
-
-=== Scan Results ===
-IP               MAC                Vendor
----------------  -----------------  ------------------------
-192.168.1.1      a1:b2:c3:d4:e5:f6  Ubiquiti Networks Inc.
-192.168.1.10     b1:c2:d3:e4:f5:a6  Apple, Inc.
-...
-
-Total devices found: 15
-Results saved to arp_scan_result.json
-
-=== New Devices ===
-No new devices detected since last scan.
-===================
-
-ARP Network Scanner completed.
-```
-
-### 2. Port Scanner (`port_scan.py`)
-
-This tool first discovers all devices on the network (using an ARP scan) and then scans them for open TCP ports.
+This tool discovers devices and then scans them for open TCP ports and running services.
 
 **To run a scan with default ports (22, 23, 80, 443, 8080):**
 
 ```bash
-sudo python3 port_scan.py
+./scan-ports
 ```
 
 **To specify custom ports or ranges, use the `-p` or `--ports` flag:**
 
 -   Scan specific ports:
     ```bash
-    sudo python3 port_scan.py -p 80,443,8080
+    ./scan-ports -p 80,443,8080
     ```
 -   Scan a range of ports:
     ```bash
-    sudo python3 port_scan.py -p 1-1024
-    ```
--   Scan a combination:
-    ```bash
-    sudo python3 port_scan.py -p 22,80,1000-2000
+    ./scan-ports -p 1-1024
     ```
 
-**Example Output:**
+**Example Output with Service Detection:**
 
 ```
 --- Port Scanner ---
@@ -126,15 +81,19 @@ Using interface: en0
 Scanning IP range: 192.168.1.100/24
 
 Discovering devices on the network...
-Found 15 devices. Now scanning for open ports...
+Found 15 devices. Now scanning ports and services...
 
-Overall Progress: 100%|██████████| 15/15 [00:10<00:00,  1.48it/s]
+Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00it/s]
 
 --- Scan Results ---
   Device: 192.168.1.1 (Ubiquiti Networks Inc.) (a1:b2:c3:d4:e5:f6)
-    Open Ports: 80, 443
+    Open Ports:
+      80/tcp         HTTP (Server: nginx)
+      443/tcp        HTTP
+
   Device: 192.168.1.50 (Raspberry Pi Foundation) (d1:e2:f3:a4:b5:c6)
-    Open Ports: 22
+    Open Ports:
+      22/tcp         SSH (SSH-2.0-OpenSSH_8.2p1)
 ```
 
 ## ⚙️ Configuration
