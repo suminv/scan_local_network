@@ -24,7 +24,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 1.  **Clone the repository:**
     ```bash
     git clone https://github.com/suminv/scan_local_network.git
-    cd network_scan
+    cd scan_local_network
     ```
 
 2.  **Create and activate a virtual environment (recommended):**
