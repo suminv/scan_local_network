@@ -62,6 +62,18 @@ This tool discovers devices and then scans them for open TCP ports and running s
 ./scan-ports
 ```
 
+**To scan a specific IP address, use the `-t` or `--target` flag:**
+
+```bash
+./scan-ports -t 192.168.1.101
+```
+
+This will skip the network discovery phase and scan only the specified host. You can combine this with the `-p` flag to scan for specific ports on that host:
+
+```bash
+./scan-ports -t 192.168.1.101 -p 80,443,22
+```
+
 **To specify custom ports or ranges, use the `-p` or `--ports` flag:**
 
 -   Scan specific ports:

@@ -160,6 +160,7 @@ def main():
     """Main function to run the port scanner."""
     init(autoreset=True)
     parser = argparse.ArgumentParser(description="Network Port Scanner with Service Detection")
+    parser.add_argument("-t", "--target", type=str, help="A specific IP address to scan.")
     parser.add_argument("-p", "--ports", type=str, help=f"Ports to scan (e.g., '22,80,443' or '1-1024'). Defaults to scanning popular ports.")
     args = parser.parse_args()
     try:
@@ -169,26 +170,33 @@ def main():
         sys.exit(1)
     print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
     mac_lookup = update_vendor_database()
-    try:
-        interface, ip_range = get_default_interface_and_ip_range()
-        print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
-        print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
-    except RuntimeError as e:
-        print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
-        sys.exit(1)
-    print("\nDiscovering devices on the network...")
-    devices = arp_scan(ip_range, interface)
-    if not devices:
-        print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
-        return
-    print("Looking up vendor information...")
-    for device in devices:
-        device['vendor'] = get_vendor(device['mac'], mac_lookup)
-    print(f"Found {len(devices)} devices. Now scanning ports and services...")
+    devices_to_scan = []
+    if args.target:
+        print(f"Scanning target IP: {Fore.YELLOW}{args.target}{Style.RESET_ALL}")
+        # When a specific target is given, we don't have a MAC, so we invent one.
+        devices_to_scan.append({"ip": args.target, "mac": "00:00:00:00:00:00", "vendor": "N/A"})
+    else:
+        try:
+            interface, ip_range = get_default_interface_and_ip_range()
+            print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
+            print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
+            print("\nDiscovering devices on the network...")
+            discovered_devices = arp_scan(ip_range, interface)
+            if not discovered_devices:
+                print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
+                return
+            print("Looking up vendor information...")
+            for device in discovered_devices:
+                device['vendor'] = get_vendor(device['mac'], mac_lookup)
+            devices_to_scan = discovered_devices
+        except RuntimeError as e:
+            print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
+            sys.exit(1)
+    print(f"Found {len(devices_to_scan)} devices. Now scanning ports and services...")
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_device = {executor.submit(scan_ports_for_device, device, ports_to_scan): device for device in devices}
-        for future in tqdm(as_completed(future_to_device), total=len(devices), desc="Scanning Devices"):
+        future_to_device = {executor.submit(scan_ports_for_device, device, ports_to_scan): device for device in devices_to_scan}
+        for future in tqdm(as_completed(future_to_device), total=len(devices_to_scan), desc="Scanning Devices"):
             results.append(future.result())
     print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
     found_any_ports = False
