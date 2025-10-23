@@ -1,15 +1,89 @@
-import netifaces
-import sqlite3
-from scapy.all import ARP, Ether, srp
-from mac_vendor_lookup import MacLookup
-from tabulate import tabulate
 import json
-from datetime import datetime
 import os
+import sqlite3
 import sys
+from datetime import datetime
+
+import netifaces
+from mac_vendor_lookup import MacLookup
+from scapy.layers.l2 import ARP, Ether
+from scapy.sendrecv import srp
+from tabulate import tabulate
 
 DB_FILE = "arp_scan_v1.db"
 VENDOR_DB_CACHE_DAYS = 7
+
+class LocalMacVendorLookup:
+    """Offline fallback that resolves MAC prefixes using Scapy's bundled manuf data."""
+
+    _prefix_map = {}
+    _prefix_lengths = []
+    _loaded = False
+
+    def __init__(self):
+        if not self.__class__._loaded:
+            self.__class__._load_data()
+
+    @classmethod
+    def _load_data(cls):
+        try:
+            from scapy.libs import manuf
+        except ImportError as exc:
+            raise RuntimeError("Failed to import scapy.manuf data for offline vendor lookup") from exc
+        prefix_map = {}
+        prefix_lengths = set()
+        for raw_line in manuf.DATA.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            columns = [col.strip() for col in raw_line.split("\t") if col.strip()]
+            if not columns:
+                continue
+            prefix_token = columns[0]
+            vendor = columns[-1]
+            prefix_part, bit_length = cls._extract_prefix(prefix_token)
+            if not prefix_part or not vendor:
+                continue
+            prefix_map[(bit_length, prefix_part)] = vendor
+            prefix_lengths.add(bit_length)
+        cls._prefix_map = prefix_map
+        cls._prefix_lengths = sorted(prefix_lengths, reverse=True)
+        cls._loaded = True
+
+    @staticmethod
+    def _sanitise(mac):
+        clean = mac.replace(":", "").replace("-", "").replace(".", "").upper()
+        if not clean:
+            raise ValueError("Empty MAC address provided")
+        return clean
+
+    @classmethod
+    def _extract_prefix(cls, token):
+        if "/" in token:
+            prefix, bit_str = token.split("/", 1)
+            try:
+                bit_length = int(bit_str)
+            except ValueError:
+                return None, None
+        else:
+            prefix = token
+            bit_length = len(cls._sanitise(prefix)) * 4
+        hex_prefix = cls._sanitise(prefix)
+        hex_length = bit_length // 4
+        if not hex_prefix or hex_length == 0:
+            return None, None
+        return hex_prefix[:hex_length], hex_length
+
+    def lookup(self, mac):
+        clean = self._sanitise(mac)
+        for length in self._prefix_lengths:
+            if len(clean) < length:
+                continue
+            candidate = clean[:length]
+            vendor = self._prefix_map.get((length, candidate))
+            if vendor:
+                return vendor
+        raise KeyError(mac)
 
 def update_vendor_database():
     """Updates the MAC address vendor database if necessary and returns a MacLookup instance."""
@@ -26,18 +100,61 @@ def update_vendor_database():
                 print(f"Vendor database is up-to-date (last updated {int(days_since_update)} days ago).")
                 need_update = False
         mac_lookup = MacLookup()
+        cache_path = getattr(mac_lookup, "cache_path", "")
+        cache_exists = os.path.exists(cache_path)
+        cache_non_empty = False
+        if cache_exists:
+            try:
+                cache_non_empty = os.path.getsize(cache_path) > 0
+            except OSError as size_error:
+                print(f"Warning: Unable to read vendor cache file: {size_error}", file=sys.stderr)
+        if not cache_exists:
+            print("Vendor cache file is missing; forcing update.")
+        elif not cache_non_empty:
+            print("Vendor cache file is empty; forcing update.")
+        if not cache_non_empty:
+            need_update = True
         if need_update:
             print("Updating vendor database... This may take a few moments...")
             mac_lookup.update_vendors()
-            with open(update_marker_file, "w") as f:
+            with open(update_marker_file, "w", encoding="utf-8") as f:
                 f.write(datetime.now().isoformat())
             print("Vendor database updated successfully!")
+        prefixes_loaded = False
+        try:
+            mac_lookup.load_vendors()
+            prefixes_loaded = bool(getattr(mac_lookup.async_lookup, "prefixes", {}))
+        except Exception as load_error:
+            print(f"Warning: Failed to load vendor database: {load_error}", file=sys.stderr)
+        if not prefixes_loaded:
+            if not need_update:
+                print("Vendor database appears empty; attempting a refresh...")
+                try:
+                    mac_lookup.update_vendors()
+                    mac_lookup.load_vendors()
+                    prefixes_loaded = bool(getattr(mac_lookup.async_lookup, "prefixes", {}))
+                    with open(update_marker_file, "w", encoding="utf-8") as f:
+                        f.write(datetime.now().isoformat())
+                    print("Vendor database refreshed successfully!")
+                except Exception as refresh_error:
+                    print(f"Warning: Failed to refresh vendor database: {refresh_error}", file=sys.stderr)
+                    prefixes_loaded = False
+        if not prefixes_loaded:
+            print("Warning: Vendor database is empty; falling back to offline vendor list.", file=sys.stderr)
+            try:
+                mac_lookup = LocalMacVendorLookup()
+                print("Offline vendor database loaded successfully.")
+            except Exception as fallback_error:
+                print(f"Warning: Failed to load offline vendor database: {fallback_error}", file=sys.stderr)
         print("======================\n")
         return mac_lookup
     except Exception as e:
         print(f"Warning: Failed to update vendor database: {e}", file=sys.stderr)
         print("======================\n")
-        return MacLookup()
+        try:
+            return LocalMacVendorLookup()
+        except Exception:
+            return MacLookup()
 
 def get_vendor(mac_address, mac_lookup):
     """Gets vendor information for a given MAC address.\n\n    Args:\n        mac_address (str): The MAC address to look up.\n        mac_lookup (MacLookup): An instance of the MacLookup class.\n\n    Returns:\n        str: The vendor name, or 'Unknown' if not found.\n    """

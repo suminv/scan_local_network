@@ -1,13 +1,18 @@
 import argparse
-import sys
-import socket
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from scapy.all import sr1, TCP, IP, Ether, srp, ARP
-from colorama import Fore, Style, init
-from tqdm import tqdm
-import netifaces
 import os
-from arp_scanner import update_vendor_database, get_vendor
+import socket
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import netifaces
+from colorama import Fore, Style, init
+from scapy.layers.l2 import ARP, Ether
+from scapy.layers.inet import IP, TCP
+from scapy.sendrecv import sr1, srp
+from scapy.error import Scapy_Exception
+from tqdm import tqdm
+
+from arp_scanner import get_vendor, update_vendor_database
 
 DEFAULT_PORTS = [22, 23, 80, 443, 8080]
 MAX_WORKERS = 20
@@ -24,8 +29,6 @@ def arp_scan(ip_range, interface):
     except Exception as e:
         print(f"{Fore.RED}Error during ARP scan: {e}{Style.RESET_ALL}", file=sys.stderr)
         return []
-
-
 def scan_single_port(ip, port):
     """Scans a single port on a given IP using a SYN scan.
 
@@ -50,8 +53,11 @@ def scan_single_port(ip, port):
             )
             sr1(rst_packet, timeout=1, verbose=False)
             return port
-    except Exception:
+    except (Scapy_Exception, socket.timeout, OSError):
+        # Handle known network-related and Scapy errors explicitly
         return None
+    return None
+    return None
     return None
 
 
