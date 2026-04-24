@@ -60,6 +60,7 @@ class ArpScannerTests(unittest.TestCase):
             self.assertIn("last_seen", column_names)
             self.assertIn(("scan_runs",), tables)
             self.assertIn(("scan_run_devices",), tables)
+            self.assertIn(("scan_run_ports",), tables)
         finally:
             os.remove(path)
 
@@ -158,6 +159,100 @@ class ArpScannerTests(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_save_scan_run_ports_persists_open_port_snapshot(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                run_id = arp_scanner.create_scan_run(
+                    conn,
+                    interface="en0",
+                    ip_range="192.168.2.0/24",
+                    scan_type="port",
+                )
+                arp_scanner.save_scan_run_ports(
+                    conn,
+                    run_id,
+                    [
+                        {
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "ip": "192.168.2.10",
+                            "open_ports": [
+                                {"port": 22, "service": "SSH"},
+                                {"port": 80, "service": "HTTP"},
+                            ],
+                        },
+                        {
+                            "mac": "bb:bb:bb:bb:bb:bb",
+                            "ip": "192.168.2.20",
+                            "open_ports": [],
+                        },
+                    ],
+                )
+                rows = conn.execute(
+                    """
+                    SELECT mac, ip, port, service
+                    FROM scan_run_ports
+                    WHERE scan_run_id = ?
+                    ORDER BY ip, port
+                    """,
+                    (run_id,),
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(
+                rows,
+                [
+                    ("aa:aa:aa:aa:aa:aa", "192.168.2.10", 22, "SSH"),
+                    ("aa:aa:aa:aa:aa:aa", "192.168.2.10", 80, "HTTP"),
+                ],
+            )
+        finally:
+            os.remove(path)
+
+    def test_load_previous_scan_ports_returns_last_successful_port_snapshot(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                run1 = arp_scanner.create_scan_run(
+                    conn, "en0", "192.168.2.0/24", scan_type="port"
+                )
+                arp_scanner.save_scan_run_ports(
+                    conn,
+                    run1,
+                    [
+                        {
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "ip": "192.168.2.10",
+                            "open_ports": [{"port": 22, "service": "SSH"}],
+                        }
+                    ],
+                )
+                arp_scanner.finalize_scan_run(conn, run1, "success", 1, 0)
+
+                run2 = arp_scanner.create_scan_run(
+                    conn, "en0", "192.168.2.0/24", scan_type="port"
+                )
+                previous_ports = arp_scanner.load_previous_scan_ports(conn, run2)
+                conn.close()
+
+            self.assertEqual(
+                previous_ports,
+                [
+                    {
+                        "mac": "aa:aa:aa:aa:aa:aa",
+                        "ip": "192.168.2.10",
+                        "port": 22,
+                        "service": "SSH",
+                    }
+                ],
+            )
+        finally:
+            os.remove(path)
+
     def test_build_scan_diff_detects_new_missing_and_ip_changes(self):
         diff = arp_scanner.build_scan_diff(
             [
@@ -186,6 +281,73 @@ class ArpScannerTests(unittest.TestCase):
                     "vendor": "Vendor A",
                     "old_ip": "192.168.2.10",
                     "new_ip": "192.168.2.11",
+                }
+            ],
+        )
+
+    def test_build_port_scan_diff_detects_new_closed_and_service_changes(self):
+        diff = arp_scanner.build_port_scan_diff(
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 22,
+                    "service": "SSH",
+                },
+                {
+                    "mac": "bb:bb:bb:bb:bb:bb",
+                    "ip": "192.168.2.20",
+                    "port": 80,
+                    "service": "HTTP",
+                },
+            ],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 22,
+                    "service": "OpenSSH",
+                },
+                {
+                    "mac": "cc:cc:cc:cc:cc:cc",
+                    "ip": "192.168.2.30",
+                    "port": 443,
+                    "service": "HTTPS",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            diff["new_ports"],
+            [
+                {
+                    "mac": "cc:cc:cc:cc:cc:cc",
+                    "ip": "192.168.2.30",
+                    "port": 443,
+                    "service": "HTTPS",
+                }
+            ],
+        )
+        self.assertEqual(
+            diff["closed_ports"],
+            [
+                {
+                    "mac": "bb:bb:bb:bb:bb:bb",
+                    "ip": "192.168.2.20",
+                    "port": 80,
+                    "service": "HTTP",
+                }
+            ],
+        )
+        self.assertEqual(
+            diff["service_changes"],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 22,
+                    "old_service": "SSH",
+                    "new_service": "OpenSSH",
                 }
             ],
         )
@@ -261,13 +423,19 @@ class ArpScannerTests(unittest.TestCase):
                         }
                     ],
                     [],
+                    {
+                        "new_devices": [],
+                        "missing_devices": [],
+                        "ip_changes": [],
+                    },
                 )
                 conn.close()
 
             with open(json_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
 
-            self.assertEqual(payload[0]["ip"], "192.168.2.10")
+            self.assertEqual(payload["devices"][0]["ip"], "192.168.2.10")
+            self.assertEqual(payload["arp_diff_summary"]["new_devices"], [])
 
 
 if __name__ == "__main__":

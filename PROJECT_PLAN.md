@@ -202,9 +202,9 @@ Focus:
 
 ## Immediate Next Tasks
 
-1. Start designing port-history tracking for later diff expansion.
-2. Continue cleanup of `port_scan.py` structure and noisy network behavior.
-3. Add port scan snapshots on top of the shared `scan_runs` mechanism.
+1. Continue cleanup of `port_scan.py` structure and noisy network behavior.
+2. Decide how to represent host identity across ARP and port snapshots.
+3. Expand the shared model layer to cover more scan result assembly and persistence paths.
 
 ## Progress Snapshot
 
@@ -216,8 +216,15 @@ Completed:
 - SQLite schema extended with `last_seen`.
 - `scan_runs` is the shared run-history mechanism for the project.
 - ARP scan snapshots are persisted per run.
+- Port scan snapshots are now persisted per run.
+- Port scan diffing is available for new ports, closed ports, and service changes.
+- Port scan JSON export includes both the full snapshot and the diff summary.
 - Minimal ARP diff summary added for new devices, missing devices, and IP changes.
 - ARP scanner supports explicit DB and JSON output paths.
+- ARP JSON export now includes both the full snapshot and the diff summary.
+- Shared reporting helpers are now used by both scanners for JSON report generation.
+- Shared reporting helpers are now also used for diff-style console summaries.
+- Shared model helpers are now used for scan context, device snapshots, and port snapshots.
 - Port parsing now validates bounds, malformed ranges, and empty entries explicitly.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.

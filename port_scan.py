@@ -5,6 +5,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from colorama import Fore, Style, init
+from models import build_device_snapshot, build_port_snapshot, build_scan_context
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
@@ -14,19 +15,23 @@ from tqdm import tqdm
 from arp_scanner import (
     create_scan_run,
     finalize_scan_run,
+    build_port_scan_diff,
     get_vendor,
     init_db,
+    load_previous_scan_ports,
     resolve_scan_target,
+    save_scan_run_ports,
+    SCAN_TYPE_PORT,
     update_vendor_database,
 )
+from reporting import build_report_payload, save_json_report
+from reporting import print_change_report
 
 DEFAULT_PORTS = [22, 23, 80, 443, 8080]
 MAX_WORKERS = 20
 MIN_PORT = 1
 MAX_PORT = 65535
-SCAN_TYPE_PORT = "port"
-
-
+JSON_OUTPUT_FILE = "port_scan_result.json"
 def arp_scan(ip_range, interface):
     """Performs an ARP scan to discover devices on the network."""
     try:
@@ -200,6 +205,151 @@ def parse_ports(port_string):
         ) from exc
     return sorted(list(ports))
 
+def flatten_port_results(devices):
+    """Flatten per-device port results into a comparable snapshot."""
+    rows = []
+    for device in devices:
+        for port_info in device.get("open_ports", []):
+            rows.append(
+                build_port_snapshot(
+                    mac=device["mac"],
+                    ip=device["ip"],
+                    port=port_info["port"],
+                    service=port_info.get("service", "Unknown"),
+                )
+            )
+    return rows
+
+def print_port_diff_summary(diff_summary):
+    """Print changes between the current and previous port scan."""
+    if diff_summary is None:
+        print_change_report(
+            title="=== Port Changes Since Last Scan ===",
+            border="===================================",
+            unavailable_message="No previous port scan snapshot available.",
+        )
+        return
+
+    new_ports = diff_summary["new_ports"]
+    closed_ports = diff_summary["closed_ports"]
+    service_changes = diff_summary["service_changes"]
+    if not any([new_ports, closed_ports, service_changes]):
+        print_change_report(
+            title="=== Port Changes Since Last Scan ===",
+            border="===================================",
+            empty_message="No port-level changes detected since last scan.",
+        )
+        return
+
+    print_change_report(
+        title="=== Port Changes Since Last Scan ===",
+        border="===================================",
+        summary_line=(
+            f"New ports: {len(new_ports)} | Closed ports: {len(closed_ports)} | Service changes: {len(service_changes)}"
+        ),
+        sections=[
+            {
+                "title": "New open ports",
+                "rows": new_ports,
+                "formatter": lambda rows: [
+                    f"  {row['ip']} ({row['mac']}) {row['port']}/tcp {row.get('service', 'Unknown')}"
+                    for row in rows
+                ],
+            },
+            {
+                "title": "Closed ports",
+                "rows": closed_ports,
+                "formatter": lambda rows: [
+                    f"  {row['ip']} ({row['mac']}) {row['port']}/tcp {row.get('service', 'Unknown')}"
+                    for row in rows
+                ],
+            },
+            {
+                "title": "Service changes",
+                "rows": service_changes,
+                "formatter": lambda rows: [
+                    f"  {row['ip']} ({row['mac']}) {row['port']}/tcp {row['old_service']} -> {row['new_service']}"
+                    for row in rows
+                ],
+            },
+        ],
+    )
+
+def save_port_scan_results(results, diff_summary, json_output_file):
+    """Save the port scan snapshot and diff summary to JSON."""
+    payload = build_report_payload("devices", results, "port_diff_summary", diff_summary)
+    save_json_report(json_output_file, payload, label="Port scan results")
+
+def discover_devices_to_scan(args, mac_lookup):
+    """Resolve scan context and discover or select devices to scan."""
+    scan_context = build_scan_context()
+    if args.target:
+        print(f"Scanning target IP: {Fore.YELLOW}{args.target}{Style.RESET_ALL}")
+        scan_context["cidr"] = args.target
+        return (
+            [build_device_snapshot(ip=args.target, mac="00:00:00:00:00:00", vendor="N/A")],
+            scan_context,
+        )
+
+    interface, ip_range = resolve_scan_target(args.iface, args.cidr)
+    scan_context["interface"] = interface
+    scan_context["cidr"] = ip_range
+    print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
+    print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
+    print("\nDiscovering devices on the network...")
+    discovered_devices = arp_scan(ip_range, interface)
+    if not discovered_devices:
+        return [], scan_context
+
+    print("Looking up vendor information...")
+    for device in discovered_devices:
+        device["vendor"] = get_vendor(device["mac"], mac_lookup)
+    return discovered_devices, scan_context
+
+def run_port_scan(devices_to_scan, ports_to_scan):
+    """Run port scanning for all selected devices."""
+    results = []
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_device = {
+            executor.submit(scan_ports_for_device, device, ports_to_scan): device
+            for device in devices_to_scan
+        }
+        for future in tqdm(
+            as_completed(future_to_device),
+            total=len(devices_to_scan),
+            desc="Scanning Devices",
+        ):
+            results.append(future.result())
+    return results
+
+def count_open_ports(results):
+    """Count open port observations across all scanned devices."""
+    return sum(len(device.get("open_ports", [])) for device in results)
+
+def print_port_scan_results(results):
+    """Print human-readable port scan results."""
+    print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
+    found_any_ports = False
+    for device in sorted(results, key=lambda x: x["ip"]):
+        if device["open_ports"]:
+            found_any_ports = True
+            vendor_str = f"({device.get('vendor', 'Unknown')})"
+            print(
+                f"  {Fore.GREEN}Device:{Style.RESET_ALL} {device['ip']} {Fore.CYAN}{vendor_str}{Style.RESET_ALL} ({device['mac']})"
+            )
+            print(f"    {Fore.GREEN}Open Ports:{Style.RESET_ALL}")
+            table_data = []
+            for port_info in device["open_ports"]:
+                port = port_info["port"]
+                service = port_info["service"]
+                table_data.append([f"      {port}/tcp", service])
+            for row in table_data:
+                print(f"{row[0]:<15} {Fore.YELLOW}{row[1]}{Style.RESET_ALL}")
+    if not found_any_ports:
+        print(
+            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
+        )
+
 
 def main():
     """Main function to run the port scanner."""
@@ -226,6 +376,11 @@ def main():
         type=str,
         help="Ports to scan (e.g., '22,80,443' or '1-1024'). Defaults to scanning popular ports.",
     )
+    parser.add_argument(
+        "--json-out",
+        type=str,
+        help="JSON report output path. Defaults to port_scan_result.json in the working directory.",
+    )
     args = parser.parse_args()
     if os.geteuid() != 0:
         print(
@@ -239,93 +394,51 @@ def main():
     except ValueError as e:
         print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
         sys.exit(1)
+    json_output_file = args.json_out or JSON_OUTPUT_FILE
     print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
     mac_lookup = update_vendor_database()
-    devices_to_scan = []
     db_conn = init_db()
-    scan_context = {
-        "interface": None,
-        "cidr": None,
-    }
-    if args.target:
-        print(f"Scanning target IP: {Fore.YELLOW}{args.target}{Style.RESET_ALL}")
-        # When a specific target is given, we don't have a MAC, so we invent one.
-        devices_to_scan.append(
-            {"ip": args.target, "mac": "00:00:00:00:00:00", "vendor": "N/A"}
-        )
-        scan_context["cidr"] = args.target
-    else:
+    try:
         try:
-            interface, ip_range = resolve_scan_target(args.iface, args.cidr)
-            scan_context["interface"] = interface
-            scan_context["cidr"] = ip_range
-            print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
-            print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
-            print("\nDiscovering devices on the network...")
-            discovered_devices = arp_scan(ip_range, interface)
-            if not discovered_devices:
-                print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
-                return
-            print("Looking up vendor information...")
-            for device in discovered_devices:
-                device["vendor"] = get_vendor(device["mac"], mac_lookup)
-            devices_to_scan = discovered_devices
+            devices_to_scan, scan_context = discover_devices_to_scan(args, mac_lookup)
         except RuntimeError as e:
             print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
             sys.exit(1)
-    scan_run_id = create_scan_run(
-        db_conn,
-        scan_context["interface"],
-        scan_context["cidr"],
-        scan_type=SCAN_TYPE_PORT,
-    )
-    try:
+
+        scan_run_id = create_scan_run(
+            db_conn,
+            scan_context["interface"],
+            scan_context["cidr"],
+            scan_type=SCAN_TYPE_PORT,
+        )
+        previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
+        if not devices_to_scan:
+            print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
+            print_port_diff_summary(build_port_scan_diff(previous_ports, []))
+            finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
+            print(f"\nScan run recorded with id: {scan_run_id}")
+            return
+
         print(f"Found {len(devices_to_scan)} devices. Now scanning ports and services...")
-        results = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            future_to_device = {
-                executor.submit(scan_ports_for_device, device, ports_to_scan): device
-                for device in devices_to_scan
-            }
-            for future in tqdm(
-                as_completed(future_to_device),
-                total=len(devices_to_scan),
-                desc="Scanning Devices",
-            ):
-                results.append(future.result())
-        print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
-        found_any_ports = False
-        for device in sorted(results, key=lambda x: x["ip"]):
-            if device["open_ports"]:
-                found_any_ports = True
-                vendor_str = f"({device.get('vendor', 'Unknown')})"
-                print(
-                    f"  {Fore.GREEN}Device:{Style.RESET_ALL} {device['ip']} {Fore.CYAN}{vendor_str}{Style.RESET_ALL} ({device['mac']})"
-                )
-                print(f"    {Fore.GREEN}Open Ports:{Style.RESET_ALL}")
-                table_data = []
-                for port_info in device["open_ports"]:
-                    port = port_info["port"]
-                    service = port_info["service"]
-                    table_data.append([f"      {port}/tcp", service])
-                for row in table_data:
-                    print(f"{row[0]:<15} {Fore.YELLOW}{row[1]}{Style.RESET_ALL}")
-        if not found_any_ports:
-            print(
-                f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-            )
+        results = run_port_scan(devices_to_scan, ports_to_scan)
+        print_port_scan_results(results)
+        save_scan_run_ports(db_conn, scan_run_id, results)
+        diff_summary = build_port_scan_diff(previous_ports, flatten_port_results(results))
+        print_port_diff_summary(diff_summary)
+        save_port_scan_results(results, diff_summary, json_output_file)
         finalize_scan_run(
             db_conn,
             scan_run_id,
             status="success",
             device_count=len(devices_to_scan),
         )
+        print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
-        finalize_scan_run(db_conn, scan_run_id, status="failed")
+        if "scan_run_id" in locals():
+            finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise
     finally:
         db_conn.close()
-    print(f"\nScan run recorded with id: {scan_run_id}")
 
 
 if __name__ == "__main__":

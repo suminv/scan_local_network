@@ -99,7 +99,7 @@ sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --d
 - device inventory in `devices`
 - scan metadata in `scan_runs`
 - device snapshots per run in `scan_run_devices`
-- full JSON export at the configured `--json-out` path
+- full JSON export at the configured `--json-out` path with `devices` and `arp_diff_summary`
 
 **What the ARP diff summary currently reports:**
 
@@ -161,6 +161,12 @@ This tool discovers devices and then scans them for open TCP ports and running s
 sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24
 ```
 
+**To save a machine-readable port scan report:**
+
+```bash
+./scan-ports --json-out data/reports/port_scan_result.json
+```
+
 **To scan a specific IP address, use the `-t` or `--target` flag:**
 
 ```bash
@@ -207,11 +213,24 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
       22/tcp         SSH (SSH-2.0-OpenSSH_8.2p1)
 ```
 
+**What gets stored after each port run:**
+
+- scan metadata in `scan_runs`
+- open-port snapshots in `scan_run_ports`
+- full JSON export at the configured `--json-out` path with `devices` and `port_diff_summary`
+
+**What the port diff summary currently reports:**
+
+- new open ports since the previous successful port scan
+- closed ports since the previous successful port scan
+- service label changes on the same `(MAC, port)`
+
 ## ⚙️ Configuration
 
 -   **`DB_FILE`**: `"arp_scan_v1.db"` - The filename for the SQLite database.
 -   **`JSON_OUTPUT_FILE`**: `"arp_scan_result.json"` - The default JSON report output path.
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
+-   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
 
 ## 📂 Suggested Data Layout
 
@@ -226,6 +245,7 @@ scan_local_network/
     arp_scan.db
     reports/
       arp_scan_result.json
+      port_scan_result.json
 ```
 
 ## ⚠️ Notes
@@ -233,7 +253,6 @@ scan_local_network/
 -   **Root Privileges**: These tools will not work without `sudo`.
 -   **Network Interface**: If you encounter issues, ensure the script is detecting the correct network interface. The automatic detection relies on the default gateway setting.
 -   **Synology**: Explicit interface selection such as `--iface ovs_eth0` is the most reliable mode on Synology NAS.
--   **ARP History Scope**: Change detection currently applies to ARP scan snapshots only. Port scan history and port-level diffing are not implemented yet.
 
 ## 📄 License
 

@@ -1,6 +1,5 @@
 import argparse
 import ipaddress
-import json
 import os
 import sqlite3
 import sys
@@ -12,9 +11,13 @@ from scapy.layers.l2 import ARP, Ether
 from scapy.sendrecv import srp
 from tabulate import tabulate
 
+from models import build_device_snapshot, build_port_snapshot
+from reporting import build_report_payload, print_change_report, save_json_report
+
 DB_FILE = "arp_scan_v1.db"
 JSON_OUTPUT_FILE = "arp_scan_result.json"
 SCAN_TYPE_ARP = "arp"
+SCAN_TYPE_PORT = "port"
 VENDOR_DB_CACHE_DAYS = 7
 
 class LocalMacVendorLookup:
@@ -310,6 +313,19 @@ def init_db():
     )
     '''
     )
+    cursor.execute(
+        '''
+    CREATE TABLE IF NOT EXISTS scan_run_ports (
+        scan_run_id INTEGER NOT NULL,
+        mac TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        port INTEGER NOT NULL,
+        service TEXT,
+        PRIMARY KEY (scan_run_id, mac, port),
+        FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
+    )
+    '''
+    )
     conn.commit()
     return conn
 
@@ -361,6 +377,60 @@ def save_scan_run_devices(conn, scan_run_id, devices):
     )
     conn.commit()
 
+def save_scan_run_ports(conn, scan_run_id, devices):
+    """Persist open-port observations for a port scan run."""
+    rows = []
+    for device in devices:
+        for port_info in device.get("open_ports", []):
+            rows.append(
+                (
+                    scan_run_id,
+                    device["mac"],
+                    device["ip"],
+                    port_info["port"],
+                    port_info.get("service", "Unknown"),
+                )
+            )
+    cursor = conn.cursor()
+    cursor.executemany(
+        """
+        INSERT OR REPLACE INTO scan_run_ports (scan_run_id, mac, ip, port, service)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+def load_previous_scan_ports(conn, current_scan_run_id):
+    """Load the most recent successful port-scan snapshot before the current run."""
+    cursor = conn.cursor()
+    row = cursor.execute(
+        """
+        SELECT id
+        FROM scan_runs
+        WHERE scan_type = ? AND status = 'success' AND id < ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (SCAN_TYPE_PORT, current_scan_run_id),
+    ).fetchone()
+    if row is None:
+        return []
+    previous_scan_run_id = row[0]
+    rows = cursor.execute(
+        """
+        SELECT mac, ip, port, service
+        FROM scan_run_ports
+        WHERE scan_run_id = ?
+        ORDER BY ip, mac, port
+        """,
+        (previous_scan_run_id,),
+    ).fetchall()
+    return [
+        build_port_snapshot(mac=mac, ip=ip, port=port, service=service)
+        for mac, ip, port, service in rows
+    ]
+
 def load_previous_scan_devices(conn, current_scan_run_id):
     """Load the most recent successful ARP scan snapshot before the current run."""
     cursor = conn.cursor()
@@ -386,7 +456,7 @@ def load_previous_scan_devices(conn, current_scan_run_id):
         """,
         (previous_scan_run_id,),
     ).fetchall()
-    return [{"mac": mac, "ip": ip, "vendor": vendor} for mac, ip, vendor in rows]
+    return [build_device_snapshot(ip=ip, mac=mac, vendor=vendor) for mac, ip, vendor in rows]
 
 def build_scan_diff(previous_devices, current_devices):
     """Compare two scan snapshots and return changes by device MAC."""
@@ -419,6 +489,40 @@ def build_scan_diff(previous_devices, current_devices):
         "new_devices": new_devices,
         "missing_devices": missing_devices,
         "ip_changes": ip_changes,
+    }
+
+def build_port_scan_diff(previous_ports, current_ports):
+    """Compare two port scan snapshots and return port-level changes."""
+    previous_by_key = {(row["mac"], row["port"]): row for row in previous_ports}
+    current_by_key = {(row["mac"], row["port"]): row for row in current_ports}
+
+    new_ports = [
+        current_by_key[key]
+        for key in sorted(current_by_key.keys() - previous_by_key.keys())
+    ]
+    closed_ports = [
+        previous_by_key[key]
+        for key in sorted(previous_by_key.keys() - current_by_key.keys())
+    ]
+    service_changes = []
+    for key in sorted(previous_by_key.keys() & current_by_key.keys()):
+        previous_port = previous_by_key[key]
+        current_port = current_by_key[key]
+        if previous_port.get("service") != current_port.get("service"):
+            service_changes.append(
+                {
+                    "mac": current_port["mac"],
+                    "ip": current_port["ip"],
+                    "port": current_port["port"],
+                    "old_service": previous_port.get("service", "Unknown"),
+                    "new_service": current_port.get("service", "Unknown"),
+                }
+            )
+
+    return {
+        "new_ports": new_ports,
+        "closed_ports": closed_ports,
+        "service_changes": service_changes,
     }
 
 def load_known_devices(conn):
@@ -473,7 +577,7 @@ def process_scan_results(devices, mac_lookup, known_macs, conn):
         mac = device["mac"]
         ip = device["ip"]
         vendor = get_vendor(mac, mac_lookup)
-        device_info = {"ip": ip, "mac": mac, "vendor": vendor}
+        device_info = build_device_snapshot(ip=ip, mac=mac, vendor=vendor)
         table_data.append([ip, mac, vendor])
         json_output.append(device_info)
         if mac not in known_macs:
@@ -486,57 +590,77 @@ def process_scan_results(devices, mac_lookup, known_macs, conn):
     print("========================\n")
     return table_data, json_output, new_devices
 
-def save_and_report_results(conn, json_output, new_devices):
-    """Saves results to a JSON file and the database.\n\n    Args:\n        conn (sqlite3.Connection): The database connection object.\n        json_output (list): A list of all discovered device dictionaries.\n        new_devices (list): A list of new device dictionaries.\n    """
-    ensure_parent_dir(JSON_OUTPUT_FILE)
-    with open(JSON_OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(json_output, f, indent=4)
-    print(f"Results saved to {JSON_OUTPUT_FILE}")
+def save_and_report_results(conn, json_output, new_devices, diff_summary):
+    """Save the ARP snapshot, diff summary, and any newly discovered devices."""
+    payload = build_report_payload("devices", json_output, "arp_diff_summary", diff_summary)
+    save_json_report(JSON_OUTPUT_FILE, payload, label="Results")
     if new_devices:
         save_new_devices(conn, new_devices)
         print(f"Saved {len(new_devices)} new device(s) to the database.")
 
 def print_diff_summary(diff_summary):
     """Print changes between the current and previous ARP scan."""
-    print("=== Changes Since Last Scan ===")
     if diff_summary is None:
-        print("No previous scan snapshot available.")
-        print("==============================")
+        print_change_report(
+            title="=== Changes Since Last Scan ===",
+            border="==============================",
+            unavailable_message="No previous scan snapshot available.",
+        )
         return
 
     new_devices = diff_summary["new_devices"]
     missing_devices = diff_summary["missing_devices"]
     ip_changes = diff_summary["ip_changes"]
     if not any([new_devices, missing_devices, ip_changes]):
-        print("No device-level changes detected since last scan.")
-        print("==============================")
+        print_change_report(
+            title="=== Changes Since Last Scan ===",
+            border="==============================",
+            empty_message="No device-level changes detected since last scan.",
+        )
         return
 
-    print(
-        f"New: {len(new_devices)} | Missing: {len(missing_devices)} | IP changes: {len(ip_changes)}"
+    print_change_report(
+        title="=== Changes Since Last Scan ===",
+        border="==============================",
+        summary_line=(
+            f"New: {len(new_devices)} | Missing: {len(missing_devices)} | IP changes: {len(ip_changes)}"
+        ),
+        sections=[
+            {
+                "title": "New devices",
+                "rows": new_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["IP", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "Missing devices",
+                "rows": missing_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["Last IP", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "IP changes",
+                "rows": ip_changes,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [
+                            [device["old_ip"], device["new_ip"], device["mac"], device.get("vendor", "Unknown")]
+                            for device in rows
+                        ],
+                        headers=["Previous IP", "Current IP", "MAC", "Vendor"],
+                    )
+                ],
+            },
+        ],
     )
-    if new_devices:
-        print("\nNew devices:")
-        print(tabulate(
-            [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in new_devices],
-            headers=["IP", "MAC", "Vendor"],
-        ))
-    if missing_devices:
-        print("\nMissing devices:")
-        print(tabulate(
-            [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in missing_devices],
-            headers=["Last IP", "MAC", "Vendor"],
-        ))
-    if ip_changes:
-        print("\nIP changes:")
-        print(tabulate(
-            [
-                [device["old_ip"], device["new_ip"], device["mac"], device.get("vendor", "Unknown")]
-                for device in ip_changes
-            ],
-            headers=["Previous IP", "Current IP", "MAC", "Vendor"],
-        ))
-    print("==============================")
 
 def print_summary(table_data, new_devices, diff_summary=None):
     """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
@@ -616,7 +740,7 @@ def main():
             )
             save_scan_run_devices(db_conn, scan_run_id, json_output)
             diff_summary = build_scan_diff(previous_devices, json_output)
-            save_and_report_results(db_conn, json_output, new_devices)
+            save_and_report_results(db_conn, json_output, new_devices, diff_summary)
             print_summary(table_data, new_devices, diff_summary)
             finalize_scan_run(
                 db_conn,
