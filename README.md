@@ -10,7 +10,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 - **Vendor Information**: Fetches MAC address vendor details for identified devices.
 - **Scan History**: Records each ARP scan run in SQLite, including interface, CIDR, status, and device counters.
 - **New Device Tracking**: Uses a local SQLite database to track new devices over time.
-- **Change Detection**: Compares ARP scan snapshots and reports new devices, missing devices, and IP changes since the previous successful scan.
+- **Change Detection**: Compares ARP scan snapshots and reports new devices, returned devices, missing devices, and IP changes since the previous successful scan.
 - **Multi-threaded Port Scanning**: Quickly scans devices for open TCP ports.
 - **Service & Version Detection**: Identifies services (e.g., HTTP, SSH) running on open ports and attempts to grab their banners.
 - **Customizable Port Selection**: Allows specifying ports or port ranges to scan via command-line arguments.
@@ -103,7 +103,8 @@ sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --d
 
 **What the ARP diff summary currently reports:**
 
-- new devices since the previous successful ARP scan
+- new devices never seen before in the local inventory
+- returned devices that were known earlier but absent from the previous successful ARP snapshot
 - missing devices since the previous successful ARP scan
 - IP address changes by MAC address
 

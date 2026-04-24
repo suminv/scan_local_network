@@ -95,6 +95,7 @@ Done when:
 
 - A repeated scan clearly reports what changed since the previous run.
 - “New device” is no longer the only tracked change type.
+- Known devices that disappear and later respond again are reported as returned devices, not as brand-new devices.
 
 ### Phase 4: Host Identity Improvements
 
@@ -203,8 +204,8 @@ Focus:
 ## Immediate Next Tasks
 
 1. Continue cleanup of `port_scan.py` structure and noisy network behavior.
-2. Decide how to represent host identity across ARP and port snapshots.
-3. Expand the shared model layer to cover more scan result assembly and persistence paths.
+2. Add hostname resolution as an optional enrichment step for ARP and later port results.
+3. Decide whether to add CSV/Markdown export before scheduled execution work.
 
 ## Progress Snapshot
 
@@ -219,7 +220,7 @@ Completed:
 - Port scan snapshots are now persisted per run.
 - Port scan diffing is available for new ports, closed ports, and service changes.
 - Port scan JSON export includes both the full snapshot and the diff summary.
-- Minimal ARP diff summary added for new devices, missing devices, and IP changes.
+- Minimal ARP diff summary added for new devices, returned devices, missing devices, and IP changes.
 - ARP scanner supports explicit DB and JSON output paths.
 - ARP JSON export now includes both the full snapshot and the diff summary.
 - Shared reporting helpers are now used by both scanners for JSON report generation.
@@ -256,4 +257,12 @@ sudo ./venv/bin/python arp_scanner.py
 sudo ./venv/bin/python port_scan.py
 ```
 
-On Synology, explicit interface selection should become the preferred stable mode once `--iface` is added.
+On Synology, explicit interface selection is the preferred stable mode:
+
+```bash
+sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24
+```
+
+```bash
+sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24
+```
