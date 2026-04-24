@@ -253,7 +253,7 @@ class ArpScannerTests(unittest.TestCase):
         finally:
             os.remove(path)
 
-    def test_build_scan_diff_detects_new_missing_and_ip_changes(self):
+    def test_build_scan_diff_detects_new_returned_missing_and_ip_changes(self):
         diff = arp_scanner.build_scan_diff(
             [
                 {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "vendor": "Vendor A"},
@@ -261,8 +261,11 @@ class ArpScannerTests(unittest.TestCase):
             ],
             [
                 {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.11", "vendor": "Vendor A"},
+                {"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"},
                 {"mac": "cc:cc:cc:cc:cc:cc", "ip": "192.168.2.30", "vendor": "Vendor C"},
+                {"mac": "dd:dd:dd:dd:dd:dd", "ip": "192.168.2.40", "vendor": "Vendor D"},
             ],
+            known_macs={"dd:dd:dd:dd:dd:dd"},
         )
 
         self.assertEqual(
@@ -270,8 +273,12 @@ class ArpScannerTests(unittest.TestCase):
             [{"mac": "cc:cc:cc:cc:cc:cc", "ip": "192.168.2.30", "vendor": "Vendor C"}],
         )
         self.assertEqual(
+            diff["returned_devices"],
+            [{"mac": "dd:dd:dd:dd:dd:dd", "ip": "192.168.2.40", "vendor": "Vendor D"}],
+        )
+        self.assertEqual(
             diff["missing_devices"],
-            [{"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"}],
+            [],
         )
         self.assertEqual(
             diff["ip_changes"],
@@ -283,6 +290,34 @@ class ArpScannerTests(unittest.TestCase):
                     "new_ip": "192.168.2.11",
                 }
             ],
+        )
+
+    def test_build_scan_diff_detects_missing_devices(self):
+        diff = arp_scanner.build_scan_diff(
+            [
+                {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "vendor": "Vendor A"},
+                {"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"},
+            ],
+            [
+                {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "vendor": "Vendor A"},
+            ],
+        )
+
+        self.assertEqual(
+            diff["missing_devices"],
+            [{"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"}],
+        )
+        self.assertEqual(
+            diff["new_devices"],
+            [],
+        )
+        self.assertEqual(
+            diff["returned_devices"],
+            [],
+        )
+        self.assertEqual(
+            diff["ip_changes"],
+            [],
         )
 
     def test_build_port_scan_diff_detects_new_closed_and_service_changes(self):
@@ -425,6 +460,7 @@ class ArpScannerTests(unittest.TestCase):
                     [],
                     {
                         "new_devices": [],
+                        "returned_devices": [],
                         "missing_devices": [],
                         "ip_changes": [],
                     },
@@ -436,6 +472,7 @@ class ArpScannerTests(unittest.TestCase):
 
             self.assertEqual(payload["devices"][0]["ip"], "192.168.2.10")
             self.assertEqual(payload["arp_diff_summary"]["new_devices"], [])
+            self.assertEqual(payload["arp_diff_summary"]["returned_devices"], [])
 
 
 if __name__ == "__main__":

@@ -458,15 +458,20 @@ def load_previous_scan_devices(conn, current_scan_run_id):
     ).fetchall()
     return [build_device_snapshot(ip=ip, mac=mac, vendor=vendor) for mac, ip, vendor in rows]
 
-def build_scan_diff(previous_devices, current_devices):
+def build_scan_diff(previous_devices, current_devices, known_macs=None):
     """Compare two scan snapshots and return changes by device MAC."""
+    known_macs = known_macs or set()
     previous_by_mac = {device["mac"]: device for device in previous_devices}
     current_by_mac = {device["mac"]: device for device in current_devices}
 
-    new_devices = [
-        current_by_mac[mac]
-        for mac in sorted(current_by_mac.keys() - previous_by_mac.keys())
-    ]
+    new_devices = []
+    returned_devices = []
+    for mac in sorted(current_by_mac.keys() - previous_by_mac.keys()):
+        device = current_by_mac[mac]
+        if mac in known_macs:
+            returned_devices.append(device)
+        else:
+            new_devices.append(device)
     missing_devices = [
         previous_by_mac[mac]
         for mac in sorted(previous_by_mac.keys() - current_by_mac.keys())
@@ -487,6 +492,7 @@ def build_scan_diff(previous_devices, current_devices):
 
     return {
         "new_devices": new_devices,
+        "returned_devices": returned_devices,
         "missing_devices": missing_devices,
         "ip_changes": ip_changes,
     }
@@ -609,9 +615,10 @@ def print_diff_summary(diff_summary):
         return
 
     new_devices = diff_summary["new_devices"]
+    returned_devices = diff_summary["returned_devices"]
     missing_devices = diff_summary["missing_devices"]
     ip_changes = diff_summary["ip_changes"]
-    if not any([new_devices, missing_devices, ip_changes]):
+    if not any([new_devices, returned_devices, missing_devices, ip_changes]):
         print_change_report(
             title="=== Changes Since Last Scan ===",
             border="==============================",
@@ -623,12 +630,29 @@ def print_diff_summary(diff_summary):
         title="=== Changes Since Last Scan ===",
         border="==============================",
         summary_line=(
-            f"New: {len(new_devices)} | Missing: {len(missing_devices)} | IP changes: {len(ip_changes)}"
+            " | ".join(
+                [
+                    f"New: {len(new_devices)}",
+                    f"Returned: {len(returned_devices)}",
+                    f"Missing: {len(missing_devices)}",
+                    f"IP changes: {len(ip_changes)}",
+                ]
+            )
         ),
         sections=[
             {
                 "title": "New devices",
                 "rows": new_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["IP", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "Returned devices",
+                "rows": returned_devices,
                 "formatter": lambda rows: [
                     tabulate(
                         [[device["ip"], device["mac"], device.get("vendor", "Unknown")] for device in rows],
@@ -739,7 +763,7 @@ def main():
                 scanned_devices, mac_lookup, known_macs, db_conn
             )
             save_scan_run_devices(db_conn, scan_run_id, json_output)
-            diff_summary = build_scan_diff(previous_devices, json_output)
+            diff_summary = build_scan_diff(previous_devices, json_output, known_macs)
             save_and_report_results(db_conn, json_output, new_devices, diff_summary)
             print_summary(table_data, new_devices, diff_summary)
             finalize_scan_run(
@@ -750,7 +774,7 @@ def main():
                 new_device_count=len(new_devices),
             )
         else:
-            diff_summary = build_scan_diff(previous_devices, [])
+            diff_summary = build_scan_diff(previous_devices, [], known_macs)
             print_summary([], [], diff_summary)
             finalize_scan_run(db_conn, scan_run_id, status="success")
     except Exception:
