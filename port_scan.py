@@ -4,18 +4,27 @@ import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import netifaces
 from colorama import Fore, Style, init
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
-from scapy.sendrecv import sr1, srp
 from scapy.error import Scapy_Exception
+from scapy.sendrecv import sr1, srp
 from tqdm import tqdm
 
-from arp_scanner import get_vendor, update_vendor_database
+from arp_scanner import (
+    create_scan_run,
+    finalize_scan_run,
+    get_vendor,
+    init_db,
+    resolve_scan_target,
+    update_vendor_database,
+)
 
 DEFAULT_PORTS = [22, 23, 80, 443, 8080]
 MAX_WORKERS = 20
+MIN_PORT = 1
+MAX_PORT = 65535
+SCAN_TYPE_PORT = "port"
 
 
 def arp_scan(ip_range, interface):
@@ -29,6 +38,7 @@ def arp_scan(ip_range, interface):
     except Exception as e:
         print(f"{Fore.RED}Error during ARP scan: {e}{Style.RESET_ALL}", file=sys.stderr)
         return []
+
 def scan_single_port(ip, port):
     """Scans a single port on a given IP using a SYN scan.
 
@@ -56,8 +66,6 @@ def scan_single_port(ip, port):
     except (Scapy_Exception, socket.timeout, OSError):
         # Handle known network-related and Scapy errors explicitly
         return None
-    return None
-    return None
     return None
 
 
@@ -145,26 +153,13 @@ def scan_ports_for_device(device, ports):
     device["open_ports"] = sorted(open_ports_info, key=lambda x: x["port"])
     return device
 
-
-def get_default_interface_and_ip_range():
-    """Automatically detects the default network interface and IP range.
-
-    Returns:
-        tuple: A tuple containing the interface name and the IP range in CIDR notation.
-    """
-    try:
-        gateways = netifaces.gateways()
-        default_gateway = gateways["default"][netifaces.AF_INET]
-        interface = default_gateway[1]
-        iface_info = netifaces.ifaddresses(interface)[netifaces.AF_INET][0]
-        ip = iface_info["addr"]
-        netmask = iface_info["netmask"]
-        netmask_bits = sum(bin(int(x)).count("1") for x in netmask.split("."))
-        ip_range = f"{ip}/{netmask_bits}"
-        return interface, ip_range
-    except Exception as e:
-        raise RuntimeError(f"Failed to detect network settings: {e}")
-
+def validate_port_number(port):
+    """Validate that a TCP port is within the valid numeric range."""
+    if not MIN_PORT <= port <= MAX_PORT:
+        raise ValueError(
+            f"Port {port} is out of range. Valid TCP ports are {MIN_PORT}-{MAX_PORT}."
+        )
+    return port
 
 def parse_ports(port_string):
     """Parses a comma-separated string of ports and ranges (e.g., '22,80,100-200').
@@ -178,19 +173,32 @@ def parse_ports(port_string):
     ports = set()
     if not port_string:
         return DEFAULT_PORTS
+    parts = [part.strip() for part in port_string.split(",")]
+    if any(not part for part in parts):
+        raise ValueError("Invalid port format. Empty port entries are not allowed.")
+
     try:
-        parts = port_string.split(",")
         for part in parts:
             if "-" in part:
-                start, end = map(int, part.split("-"))
+                bounds = [bound.strip() for bound in part.split("-")]
+                if len(bounds) != 2 or not bounds[0] or not bounds[1]:
+                    raise ValueError(
+                        f"Invalid port range '{part}'. Use ranges like '100-200'."
+                    )
+                start = validate_port_number(int(bounds[0]))
+                end = validate_port_number(int(bounds[1]))
+                if start > end:
+                    raise ValueError(
+                        f"Invalid port range '{part}'. Range start must be less than or equal to range end."
+                    )
                 ports.update(range(start, end + 1))
             else:
-                ports.add(int(part))
-        return sorted(list(ports))
-    except ValueError:
+                ports.add(validate_port_number(int(part)))
+    except ValueError as exc:
         raise ValueError(
-            "Invalid port format. Use comma-separated values and ranges (e.g., '22,80,100-200')."
-        )
+            f"Invalid port format. {exc}"
+        ) from exc
+    return sorted(list(ports))
 
 
 def main():
@@ -203,12 +211,29 @@ def main():
         "-t", "--target", type=str, help="A specific IP address to scan."
     )
     parser.add_argument(
+        "--iface",
+        type=str,
+        help="Network interface to use instead of automatic detection.",
+    )
+    parser.add_argument(
+        "--cidr",
+        type=str,
+        help="IPv4 CIDR range to scan during discovery (for example, '192.168.2.0/24').",
+    )
+    parser.add_argument(
         "-p",
         "--ports",
         type=str,
         help="Ports to scan (e.g., '22,80,443' or '1-1024'). Defaults to scanning popular ports.",
     )
     args = parser.parse_args()
+    if os.geteuid() != 0:
+        print(
+            f"{Fore.RED}Error: This script requires root/administrator privileges.{Style.RESET_ALL}",
+            file=sys.stderr,
+        )
+        print(f"{Fore.RED}Please run with 'sudo'.{Style.RESET_ALL}", file=sys.stderr)
+        sys.exit(1)
     try:
         ports_to_scan = parse_ports(args.ports)
     except ValueError as e:
@@ -217,15 +242,23 @@ def main():
     print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
     mac_lookup = update_vendor_database()
     devices_to_scan = []
+    db_conn = init_db()
+    scan_context = {
+        "interface": None,
+        "cidr": None,
+    }
     if args.target:
         print(f"Scanning target IP: {Fore.YELLOW}{args.target}{Style.RESET_ALL}")
         # When a specific target is given, we don't have a MAC, so we invent one.
         devices_to_scan.append(
             {"ip": args.target, "mac": "00:00:00:00:00:00", "vendor": "N/A"}
         )
+        scan_context["cidr"] = args.target
     else:
         try:
-            interface, ip_range = get_default_interface_and_ip_range()
+            interface, ip_range = resolve_scan_target(args.iface, args.cidr)
+            scan_context["interface"] = interface
+            scan_context["cidr"] = ip_range
             print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
             print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
             print("\nDiscovering devices on the network...")
@@ -240,48 +273,60 @@ def main():
         except RuntimeError as e:
             print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
             sys.exit(1)
-    print(f"Found {len(devices_to_scan)} devices. Now scanning ports and services...")
-    results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_device = {
-            executor.submit(scan_ports_for_device, device, ports_to_scan): device
-            for device in devices_to_scan
-        }
-        for future in tqdm(
-            as_completed(future_to_device),
-            total=len(devices_to_scan),
-            desc="Scanning Devices",
-        ):
-            results.append(future.result())
-    print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
-    found_any_ports = False
-    for device in sorted(results, key=lambda x: x["ip"]):
-        if device["open_ports"]:
-            found_any_ports = True
-            vendor_str = f"({device.get('vendor', 'Unknown')})"
+    scan_run_id = create_scan_run(
+        db_conn,
+        scan_context["interface"],
+        scan_context["cidr"],
+        scan_type=SCAN_TYPE_PORT,
+    )
+    try:
+        print(f"Found {len(devices_to_scan)} devices. Now scanning ports and services...")
+        results = []
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_device = {
+                executor.submit(scan_ports_for_device, device, ports_to_scan): device
+                for device in devices_to_scan
+            }
+            for future in tqdm(
+                as_completed(future_to_device),
+                total=len(devices_to_scan),
+                desc="Scanning Devices",
+            ):
+                results.append(future.result())
+        print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
+        found_any_ports = False
+        for device in sorted(results, key=lambda x: x["ip"]):
+            if device["open_ports"]:
+                found_any_ports = True
+                vendor_str = f"({device.get('vendor', 'Unknown')})"
+                print(
+                    f"  {Fore.GREEN}Device:{Style.RESET_ALL} {device['ip']} {Fore.CYAN}{vendor_str}{Style.RESET_ALL} ({device['mac']})"
+                )
+                print(f"    {Fore.GREEN}Open Ports:{Style.RESET_ALL}")
+                table_data = []
+                for port_info in device["open_ports"]:
+                    port = port_info["port"]
+                    service = port_info["service"]
+                    table_data.append([f"      {port}/tcp", service])
+                for row in table_data:
+                    print(f"{row[0]:<15} {Fore.YELLOW}{row[1]}{Style.RESET_ALL}")
+        if not found_any_ports:
             print(
-                f"  {Fore.GREEN}Device:{Style.RESET_ALL} {device['ip']} {Fore.CYAN}{vendor_str}{Style.RESET_ALL} ({device['mac']})"
+                f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
             )
-            print(f"    {Fore.GREEN}Open Ports:{Style.RESET_ALL}")
-            table_data = []
-            for port_info in device["open_ports"]:
-                port = port_info["port"]
-                service = port_info["service"]
-                table_data.append([f"      {port}/tcp", service])
-            for row in table_data:
-                print(f"{row[0]:<15} {Fore.YELLOW}{row[1]}{Style.RESET_ALL}")
-    if not found_any_ports:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
+        finalize_scan_run(
+            db_conn,
+            scan_run_id,
+            status="success",
+            device_count=len(devices_to_scan),
         )
+    except Exception:
+        finalize_scan_run(db_conn, scan_run_id, status="failed")
+        raise
+    finally:
+        db_conn.close()
+    print(f"\nScan run recorded with id: {scan_run_id}")
 
 
 if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print(
-            f"{Fore.RED}Error: This script requires root/administrator privileges.{Style.RESET_ALL}",
-            file=sys.stderr,
-        )
-        print(f"{Fore.RED}Please run with 'sudo'.{Style.RESET_ALL}", file=sys.stderr)
-        sys.exit(1)
     main()
