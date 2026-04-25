@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from unittest import mock
 import json
+from contextlib import redirect_stdout
+from io import StringIO
 
 import arp_scanner
 
@@ -61,6 +63,26 @@ class ArpScannerTests(unittest.TestCase):
             self.assertIn(("scan_runs",), tables)
             self.assertIn(("scan_run_devices",), tables)
             self.assertIn(("scan_run_ports",), tables)
+            verify_conn = sqlite3.connect(path)
+            scan_run_device_columns = verify_conn.execute(
+                "PRAGMA table_info(scan_run_devices)"
+            ).fetchall()
+            scan_run_port_columns = verify_conn.execute(
+                "PRAGMA table_info(scan_run_ports)"
+            ).fetchall()
+            verify_conn.close()
+            self.assertIn(
+                "hostname",
+                [column[1] for column in scan_run_device_columns],
+            )
+            self.assertIn(
+                "hostname",
+                [column[1] for column in scan_run_port_columns],
+            )
+            self.assertIn(
+                "tls_json",
+                [column[1] for column in scan_run_port_columns],
+            )
         finally:
             os.remove(path)
 
@@ -139,7 +161,12 @@ class ArpScannerTests(unittest.TestCase):
                     conn,
                     run1,
                     [
-                        {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "vendor": "Vendor A"},
+                        {
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "ip": "192.168.2.10",
+                            "vendor": "Vendor A",
+                            "hostname": "nas.local",
+                        },
                         {"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"},
                     ],
                 )
@@ -152,7 +179,12 @@ class ArpScannerTests(unittest.TestCase):
             self.assertEqual(
                 previous_devices,
                 [
-                    {"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "vendor": "Vendor A"},
+                    {
+                        "mac": "aa:aa:aa:aa:aa:aa",
+                        "ip": "192.168.2.10",
+                        "vendor": "Vendor A",
+                        "hostname": "nas.local",
+                    },
                     {"mac": "bb:bb:bb:bb:bb:bb", "ip": "192.168.2.20", "vendor": "Vendor B"},
                 ],
             )
@@ -178,9 +210,14 @@ class ArpScannerTests(unittest.TestCase):
                         {
                             "mac": "aa:aa:aa:aa:aa:aa",
                             "ip": "192.168.2.10",
+                            "hostname": "nas.local",
                             "open_ports": [
                                 {"port": 22, "service": "SSH"},
-                                {"port": 80, "service": "HTTP"},
+                                {
+                                    "port": 80,
+                                    "service": "HTTP",
+                                    "tls": {"protocol": "TLSv1.3"},
+                                },
                             ],
                         },
                         {
@@ -192,7 +229,7 @@ class ArpScannerTests(unittest.TestCase):
                 )
                 rows = conn.execute(
                     """
-                    SELECT mac, ip, port, service
+                    SELECT mac, ip, hostname, port, service, tls_json
                     FROM scan_run_ports
                     WHERE scan_run_id = ?
                     ORDER BY ip, port
@@ -204,8 +241,15 @@ class ArpScannerTests(unittest.TestCase):
             self.assertEqual(
                 rows,
                 [
-                    ("aa:aa:aa:aa:aa:aa", "192.168.2.10", 22, "SSH"),
-                    ("aa:aa:aa:aa:aa:aa", "192.168.2.10", 80, "HTTP"),
+                    ("aa:aa:aa:aa:aa:aa", "192.168.2.10", "nas.local", 22, "SSH", None),
+                    (
+                        "aa:aa:aa:aa:aa:aa",
+                        "192.168.2.10",
+                        "nas.local",
+                        80,
+                        "HTTP",
+                        json.dumps({"protocol": "TLSv1.3"}, sort_keys=True),
+                    ),
                 ],
             )
         finally:
@@ -227,7 +271,14 @@ class ArpScannerTests(unittest.TestCase):
                         {
                             "mac": "aa:aa:aa:aa:aa:aa",
                             "ip": "192.168.2.10",
-                            "open_ports": [{"port": 22, "service": "SSH"}],
+                            "hostname": "nas.local",
+                            "open_ports": [
+                                {
+                                    "port": 22,
+                                    "service": "SSH",
+                                    "tls": {"protocol": "TLSv1.3"},
+                                }
+                            ],
                         }
                     ],
                 )
@@ -245,8 +296,10 @@ class ArpScannerTests(unittest.TestCase):
                     {
                         "mac": "aa:aa:aa:aa:aa:aa",
                         "ip": "192.168.2.10",
+                        "hostname": "nas.local",
                         "port": 22,
                         "service": "SSH",
+                        "tls": {"protocol": "TLSv1.3"},
                     }
                 ],
             )
@@ -320,6 +373,39 @@ class ArpScannerTests(unittest.TestCase):
             [],
         )
 
+    def test_build_scan_diff_detects_hostname_changes(self):
+        diff = arp_scanner.build_scan_diff(
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "vendor": "Vendor A",
+                    "hostname": "old.local",
+                }
+            ],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "vendor": "Vendor A",
+                    "hostname": "new.local",
+                }
+            ],
+        )
+
+        self.assertEqual(
+            diff["hostname_changes"],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "vendor": "Vendor A",
+                    "old_hostname": "old.local",
+                    "new_hostname": "new.local",
+                }
+            ],
+        )
+
     def test_build_port_scan_diff_detects_new_closed_and_service_changes(self):
         diff = arp_scanner.build_port_scan_diff(
             [
@@ -346,6 +432,7 @@ class ArpScannerTests(unittest.TestCase):
                 {
                     "mac": "cc:cc:cc:cc:cc:cc",
                     "ip": "192.168.2.30",
+                    "hostname": "web.local",
                     "port": 443,
                     "service": "HTTPS",
                 },
@@ -358,6 +445,7 @@ class ArpScannerTests(unittest.TestCase):
                 {
                     "mac": "cc:cc:cc:cc:cc:cc",
                     "ip": "192.168.2.30",
+                    "hostname": "web.local",
                     "port": 443,
                     "service": "HTTPS",
                 }
@@ -383,6 +471,58 @@ class ArpScannerTests(unittest.TestCase):
                     "port": 22,
                     "old_service": "SSH",
                     "new_service": "OpenSSH",
+                }
+            ],
+        )
+        self.assertEqual(diff["tls_changes"], [])
+
+    def test_build_port_scan_diff_detects_tls_metadata_changes(self):
+        diff = arp_scanner.build_port_scan_diff(
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 443,
+                    "service": "TLS (TLSv1.2, CN=old.local, OLD_CIPHER)",
+                    "tls": {
+                        "protocol": "TLSv1.2",
+                        "common_name": "old.local",
+                        "cipher": "OLD_CIPHER",
+                    },
+                }
+            ],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 443,
+                    "service": "TLS (TLSv1.3, CN=new.local, NEW_CIPHER)",
+                    "tls": {
+                        "protocol": "TLSv1.3",
+                        "common_name": "new.local",
+                        "cipher": "NEW_CIPHER",
+                    },
+                }
+            ],
+        )
+
+        self.assertEqual(
+            diff["tls_changes"],
+            [
+                {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 443,
+                    "old_tls": {
+                        "protocol": "TLSv1.2",
+                        "common_name": "old.local",
+                        "cipher": "OLD_CIPHER",
+                    },
+                    "new_tls": {
+                        "protocol": "TLSv1.3",
+                        "common_name": "new.local",
+                        "cipher": "NEW_CIPHER",
+                    },
                 }
             ],
         )
@@ -439,10 +579,39 @@ class ArpScannerTests(unittest.TestCase):
         finally:
             os.remove(path)
 
+    def test_process_scan_results_resolves_hostnames_when_enabled(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                fake_lookup = mock.Mock()
+                fake_lookup.lookup.return_value = "Vendor A"
+
+                with mock.patch(
+                    "arp_scanner.enrich_devices_with_hostnames",
+                    side_effect=lambda devices: devices[0].update({"hostname": "nas.local"}) or devices,
+                ):
+                    table_data, json_output, new_devices = arp_scanner.process_scan_results(
+                        [{"mac": "aa:bb:cc:dd:ee:ff", "ip": "192.168.2.20"}],
+                        fake_lookup,
+                        set(),
+                        conn,
+                        resolve_hostnames=True,
+                    )
+                conn.close()
+
+            self.assertEqual(table_data[0], ["192.168.2.20", "nas.local", "aa:bb:cc:dd:ee:ff", "Vendor A"])
+            self.assertEqual(json_output[0]["hostname"], "nas.local")
+            self.assertEqual(new_devices[0]["hostname"], "nas.local")
+        finally:
+            os.remove(path)
+
     def test_save_and_report_results_writes_json_to_custom_path(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             db_path = os.path.join(tmp_dir, "arp_scan.db")
             json_path = os.path.join(tmp_dir, "reports", "arp_scan_result.json")
+            csv_path = os.path.join(tmp_dir, "reports", "arp_scan_result.csv")
 
             with mock.patch.object(arp_scanner, "DB_FILE", db_path), mock.patch.object(
                 arp_scanner, "JSON_OUTPUT_FILE", json_path
@@ -453,6 +622,7 @@ class ArpScannerTests(unittest.TestCase):
                     [
                         {
                             "ip": "192.168.2.10",
+                            "hostname": "nas.local",
                             "mac": "aa:bb:cc:dd:ee:ff",
                             "vendor": "Vendor A",
                         }
@@ -463,16 +633,50 @@ class ArpScannerTests(unittest.TestCase):
                         "returned_devices": [],
                         "missing_devices": [],
                         "ip_changes": [],
+                        "hostname_changes": [],
                     },
+                    csv_output_file=csv_path,
                 )
                 conn.close()
 
             with open(json_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
+            with open(csv_path, "r", encoding="utf-8") as handle:
+                csv_contents = handle.read()
 
             self.assertEqual(payload["devices"][0]["ip"], "192.168.2.10")
+            self.assertEqual(payload["devices"][0]["hostname"], "nas.local")
             self.assertEqual(payload["arp_diff_summary"]["new_devices"], [])
             self.assertEqual(payload["arp_diff_summary"]["returned_devices"], [])
+            self.assertIn("ip,hostname,mac,vendor,first_seen,last_seen", csv_contents)
+            self.assertIn("192.168.2.10,nas.local,aa:bb:cc:dd:ee:ff,Vendor A", csv_contents)
+
+    def test_print_diff_summary_renders_hostname_changes(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            arp_scanner.print_diff_summary(
+                {
+                    "new_devices": [],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [
+                        {
+                            "ip": "192.168.2.10",
+                            "old_hostname": "old.local",
+                            "new_hostname": "new.local",
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "vendor": "Vendor A",
+                        }
+                    ],
+                }
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Hostname changes: 1", output)
+        self.assertIn("Hostname changes:", output)
+        self.assertIn("old.local", output)
+        self.assertIn("new.local", output)
 
 
 if __name__ == "__main__":

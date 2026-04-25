@@ -11,6 +11,7 @@ def build_device_snapshot(
     ip,
     mac,
     vendor="Unknown",
+    hostname=None,
     first_seen=None,
     last_seen=None,
     open_ports=None,
@@ -21,6 +22,8 @@ def build_device_snapshot(
         "mac": mac,
         "vendor": vendor,
     }
+    if hostname is not None:
+        device["hostname"] = hostname
     if first_seen is not None:
         device["first_seen"] = first_seen
     if last_seen is not None:
@@ -30,11 +33,16 @@ def build_device_snapshot(
     return device
 
 
-def build_port_snapshot(*, mac, ip, port, service="Unknown"):
+def build_port_snapshot(*, mac, ip, port, service="Unknown", tls=None, hostname=None):
     """Create a normalized port observation dictionary."""
-    return {
+    snapshot = {
         "mac": mac,
         "ip": ip,
         "port": port,
         "service": service,
     }
+    if tls is not None:
+        snapshot["tls"] = tls
+    if hostname is not None:
+        snapshot["hostname"] = hostname
+    return snapshot

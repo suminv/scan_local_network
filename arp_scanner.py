@@ -1,5 +1,6 @@
 import argparse
 import ipaddress
+import json
 import os
 import sqlite3
 import sys
@@ -11,11 +12,13 @@ from scapy.layers.l2 import ARP, Ether
 from scapy.sendrecv import srp
 from tabulate import tabulate
 
+from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
-from reporting import build_report_payload, print_change_report, save_json_report
+from reporting import build_report_payload, print_change_report, save_csv_report, save_json_report
 
 DB_FILE = "arp_scan_v1.db"
 JSON_OUTPUT_FILE = "arp_scan_result.json"
+CSV_OUTPUT_FILE = None
 SCAN_TYPE_ARP = "arp"
 SCAN_TYPE_PORT = "port"
 VENDOR_DB_CACHE_DAYS = 7
@@ -308,24 +311,33 @@ def init_db():
         mac TEXT NOT NULL,
         ip TEXT NOT NULL,
         vendor TEXT,
+        hostname TEXT,
         PRIMARY KEY (scan_run_id, mac),
         FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
     )
     '''
     )
+    if not column_exists(conn, "scan_run_devices", "hostname"):
+        cursor.execute("ALTER TABLE scan_run_devices ADD COLUMN hostname TEXT")
     cursor.execute(
         '''
     CREATE TABLE IF NOT EXISTS scan_run_ports (
         scan_run_id INTEGER NOT NULL,
         mac TEXT NOT NULL,
         ip TEXT NOT NULL,
+        hostname TEXT,
         port INTEGER NOT NULL,
         service TEXT,
+        tls_json TEXT,
         PRIMARY KEY (scan_run_id, mac, port),
         FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
     )
     '''
     )
+    if not column_exists(conn, "scan_run_ports", "hostname"):
+        cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN hostname TEXT")
+    if not column_exists(conn, "scan_run_ports", "tls_json"):
+        cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN tls_json TEXT")
     conn.commit()
     return conn
 
@@ -362,8 +374,8 @@ def save_scan_run_devices(conn, scan_run_id, devices):
     cursor = conn.cursor()
     cursor.executemany(
         """
-        INSERT OR REPLACE INTO scan_run_devices (scan_run_id, mac, ip, vendor)
-        VALUES (?, ?, ?, ?)
+        INSERT OR REPLACE INTO scan_run_devices (scan_run_id, mac, ip, vendor, hostname)
+        VALUES (?, ?, ?, ?, ?)
         """,
         [
             (
@@ -371,6 +383,7 @@ def save_scan_run_devices(conn, scan_run_id, devices):
                 device["mac"],
                 device["ip"],
                 device.get("vendor", "Unknown"),
+                device.get("hostname"),
             )
             for device in devices
         ],
@@ -387,15 +400,21 @@ def save_scan_run_ports(conn, scan_run_id, devices):
                     scan_run_id,
                     device["mac"],
                     device["ip"],
+                    device.get("hostname"),
                     port_info["port"],
                     port_info.get("service", "Unknown"),
+                    (
+                        json.dumps(port_info.get("tls"), sort_keys=True)
+                        if port_info.get("tls") is not None
+                        else None
+                    ),
                 )
             )
     cursor = conn.cursor()
     cursor.executemany(
         """
-        INSERT OR REPLACE INTO scan_run_ports (scan_run_id, mac, ip, port, service)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO scan_run_ports (scan_run_id, mac, ip, hostname, port, service, tls_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
@@ -419,7 +438,7 @@ def load_previous_scan_ports(conn, current_scan_run_id):
     previous_scan_run_id = row[0]
     rows = cursor.execute(
         """
-        SELECT mac, ip, port, service
+        SELECT mac, ip, hostname, port, service, tls_json
         FROM scan_run_ports
         WHERE scan_run_id = ?
         ORDER BY ip, mac, port
@@ -427,8 +446,15 @@ def load_previous_scan_ports(conn, current_scan_run_id):
         (previous_scan_run_id,),
     ).fetchall()
     return [
-        build_port_snapshot(mac=mac, ip=ip, port=port, service=service)
-        for mac, ip, port, service in rows
+        build_port_snapshot(
+            mac=mac,
+            ip=ip,
+            hostname=hostname,
+            port=port,
+            service=service,
+            tls=json.loads(tls_json) if tls_json else None,
+        )
+        for mac, ip, hostname, port, service, tls_json in rows
     ]
 
 def load_previous_scan_devices(conn, current_scan_run_id):
@@ -449,14 +475,17 @@ def load_previous_scan_devices(conn, current_scan_run_id):
     previous_scan_run_id = row[0]
     rows = cursor.execute(
         """
-        SELECT mac, ip, vendor
+        SELECT mac, ip, vendor, hostname
         FROM scan_run_devices
         WHERE scan_run_id = ?
         ORDER BY ip, mac
         """,
         (previous_scan_run_id,),
     ).fetchall()
-    return [build_device_snapshot(ip=ip, mac=mac, vendor=vendor) for mac, ip, vendor in rows]
+    return [
+        build_device_snapshot(ip=ip, mac=mac, vendor=vendor, hostname=hostname)
+        for mac, ip, vendor, hostname in rows
+    ]
 
 def build_scan_diff(previous_devices, current_devices, known_macs=None):
     """Compare two scan snapshots and return changes by device MAC."""
@@ -477,6 +506,7 @@ def build_scan_diff(previous_devices, current_devices, known_macs=None):
         for mac in sorted(previous_by_mac.keys() - current_by_mac.keys())
     ]
     ip_changes = []
+    hostname_changes = []
     for mac in sorted(previous_by_mac.keys() & current_by_mac.keys()):
         previous_device = previous_by_mac[mac]
         current_device = current_by_mac[mac]
@@ -489,12 +519,23 @@ def build_scan_diff(previous_devices, current_devices, known_macs=None):
                     "new_ip": current_device["ip"],
                 }
             )
+        if previous_device.get("hostname") != current_device.get("hostname"):
+            hostname_changes.append(
+                {
+                    "mac": mac,
+                    "ip": current_device["ip"],
+                    "vendor": current_device.get("vendor", previous_device.get("vendor", "Unknown")),
+                    "old_hostname": previous_device.get("hostname"),
+                    "new_hostname": current_device.get("hostname"),
+                }
+            )
 
     return {
         "new_devices": new_devices,
         "returned_devices": returned_devices,
         "missing_devices": missing_devices,
         "ip_changes": ip_changes,
+        "hostname_changes": hostname_changes,
     }
 
 def build_port_scan_diff(previous_ports, current_ports):
@@ -511,6 +552,7 @@ def build_port_scan_diff(previous_ports, current_ports):
         for key in sorted(previous_by_key.keys() - current_by_key.keys())
     ]
     service_changes = []
+    tls_changes = []
     for key in sorted(previous_by_key.keys() & current_by_key.keys()):
         previous_port = previous_by_key[key]
         current_port = current_by_key[key]
@@ -524,11 +566,22 @@ def build_port_scan_diff(previous_ports, current_ports):
                     "new_service": current_port.get("service", "Unknown"),
                 }
             )
+        if previous_port.get("tls") != current_port.get("tls"):
+            tls_changes.append(
+                {
+                    "mac": current_port["mac"],
+                    "ip": current_port["ip"],
+                    "port": current_port["port"],
+                    "old_tls": previous_port.get("tls"),
+                    "new_tls": current_port.get("tls"),
+                }
+            )
 
     return {
         "new_ports": new_ports,
         "closed_ports": closed_ports,
         "service_changes": service_changes,
+        "tls_changes": tls_changes,
     }
 
 def load_known_devices(conn):
@@ -571,10 +624,13 @@ def update_existing_device(conn, mac, ip, vendor, seen_at):
     )
     conn.commit()
 
-def process_scan_results(devices, mac_lookup, known_macs, conn):
+def process_scan_results(devices, mac_lookup, known_macs, conn, resolve_hostnames=False):
     """Processes scan results, identifies new devices, and updates existing ones.\n\n    Args:\n        devices (list): A list of discovered device dictionaries.\n        mac_lookup (MacLookup): An instance of the MacLookup class.\n        known_macs (set): A set of known MAC addresses from the database.\n        conn (sqlite3.Connection): The database connection object.\n\n    Returns:\n        tuple: A tuple containing table_data, json_output, and a list of new_devices.\n    """
     print("=== Processing Results ===")
     print("Looking up vendor information...")
+    if resolve_hostnames:
+        print("Resolving hostnames...")
+        enrich_devices_with_hostnames(devices)
     table_data = []
     json_output = []
     new_devices = []
@@ -583,8 +639,9 @@ def process_scan_results(devices, mac_lookup, known_macs, conn):
         mac = device["mac"]
         ip = device["ip"]
         vendor = get_vendor(mac, mac_lookup)
-        device_info = build_device_snapshot(ip=ip, mac=mac, vendor=vendor)
-        table_data.append([ip, mac, vendor])
+        hostname = device.get("hostname")
+        device_info = build_device_snapshot(ip=ip, mac=mac, vendor=vendor, hostname=hostname)
+        table_data.append([ip, hostname or "-", mac, vendor])
         json_output.append(device_info)
         if mac not in known_macs:
             device_info["first_seen"] = scan_time
@@ -596,10 +653,32 @@ def process_scan_results(devices, mac_lookup, known_macs, conn):
     print("========================\n")
     return table_data, json_output, new_devices
 
-def save_and_report_results(conn, json_output, new_devices, diff_summary):
+def build_arp_csv_rows(devices):
+    """Build CSV rows for ARP snapshot export."""
+    return [
+        [
+            device["ip"],
+            device.get("hostname", ""),
+            device["mac"],
+            device.get("vendor", "Unknown"),
+            device.get("first_seen", ""),
+            device.get("last_seen", ""),
+        ]
+        for device in devices
+    ]
+
+
+def save_and_report_results(conn, json_output, new_devices, diff_summary, csv_output_file=None):
     """Save the ARP snapshot, diff summary, and any newly discovered devices."""
     payload = build_report_payload("devices", json_output, "arp_diff_summary", diff_summary)
     save_json_report(JSON_OUTPUT_FILE, payload, label="Results")
+    if csv_output_file:
+        save_csv_report(
+            csv_output_file,
+            ["ip", "hostname", "mac", "vendor", "first_seen", "last_seen"],
+            build_arp_csv_rows(json_output),
+            label="ARP CSV report",
+        )
     if new_devices:
         save_new_devices(conn, new_devices)
         print(f"Saved {len(new_devices)} new device(s) to the database.")
@@ -618,7 +697,8 @@ def print_diff_summary(diff_summary):
     returned_devices = diff_summary["returned_devices"]
     missing_devices = diff_summary["missing_devices"]
     ip_changes = diff_summary["ip_changes"]
-    if not any([new_devices, returned_devices, missing_devices, ip_changes]):
+    hostname_changes = diff_summary.get("hostname_changes", [])
+    if not any([new_devices, returned_devices, missing_devices, ip_changes, hostname_changes]):
         print_change_report(
             title="=== Changes Since Last Scan ===",
             border="==============================",
@@ -636,6 +716,7 @@ def print_diff_summary(diff_summary):
                     f"Returned: {len(returned_devices)}",
                     f"Missing: {len(missing_devices)}",
                     f"IP changes: {len(ip_changes)}",
+                    f"Hostname changes: {len(hostname_changes)}",
                 ]
             )
         ),
@@ -683,6 +764,25 @@ def print_diff_summary(diff_summary):
                     )
                 ],
             },
+            {
+                "title": "Hostname changes",
+                "rows": hostname_changes,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [
+                            [
+                                device["ip"],
+                                device.get("old_hostname") or "-",
+                                device.get("new_hostname") or "-",
+                                device["mac"],
+                                device.get("vendor", "Unknown"),
+                            ]
+                            for device in rows
+                        ],
+                        headers=["IP", "Previous Hostname", "Current Hostname", "MAC", "Vendor"],
+                    )
+                ],
+            },
         ],
     )
 
@@ -695,14 +795,14 @@ def print_summary(table_data, new_devices, diff_summary=None):
         print_diff_summary(diff_summary)
         return
     print("=== Scan Results ===")
-    print(tabulate(table_data, headers=["IP", "MAC", "Vendor"]))
+    print(tabulate(table_data, headers=["IP", "Hostname", "MAC", "Vendor"]))
     print(f"\nTotal devices found: {len(table_data)}")
     print("====================\n")
     print("=== New Devices ===")
     if new_devices:
         print(f"\U0001f514 {len(new_devices)} new device(s) detected since last scan:")
-        new_devices_table = [[d["ip"], d["mac"], d["vendor"]] for d in new_devices]
-        print(tabulate(new_devices_table, headers=["IP", "MAC", "Vendor"]))
+        new_devices_table = [[d["ip"], d.get("hostname", "-"), d["mac"], d["vendor"]] for d in new_devices]
+        print(tabulate(new_devices_table, headers=["IP", "Hostname", "MAC", "Vendor"]))
     else:
         print("No new devices detected since last scan.")
     print("===================")
@@ -731,11 +831,21 @@ def parse_args():
         type=str,
         help="JSON report output path. Defaults to arp_scan_result.json in the working directory.",
     )
+    parser.add_argument(
+        "--csv-out",
+        type=str,
+        help="CSV report output path. Disabled unless explicitly set.",
+    )
+    parser.add_argument(
+        "--resolve-hostnames",
+        action="store_true",
+        help="Resolve reverse-DNS hostnames for discovered devices.",
+    )
     return parser.parse_args()
 
 def main():
     """Main function to run the ARP scanner."""
-    global DB_FILE, JSON_OUTPUT_FILE
+    global DB_FILE, JSON_OUTPUT_FILE, CSV_OUTPUT_FILE
     args = parse_args()
     if os.geteuid() != 0:
         print("Error: This script requires root/administrator privileges to send ARP packets.", file=sys.stderr)
@@ -745,6 +855,8 @@ def main():
         DB_FILE = args.db_file
     if args.json_out:
         JSON_OUTPUT_FILE = args.json_out
+    if args.csv_out:
+        CSV_OUTPUT_FILE = args.csv_out
     print("ARP Network Scanner starting...")
     mac_lookup = update_vendor_database()
     try:
@@ -760,11 +872,17 @@ def main():
         scanned_devices = arp_scan(ip_range, interface)
         if scanned_devices:
             table_data, json_output, new_devices = process_scan_results(
-                scanned_devices, mac_lookup, known_macs, db_conn
+                scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
             )
             save_scan_run_devices(db_conn, scan_run_id, json_output)
             diff_summary = build_scan_diff(previous_devices, json_output, known_macs)
-            save_and_report_results(db_conn, json_output, new_devices, diff_summary)
+            save_and_report_results(
+                db_conn,
+                json_output,
+                new_devices,
+                diff_summary,
+                csv_output_file=CSV_OUTPUT_FILE,
+            )
             print_summary(table_data, new_devices, diff_summary)
             finalize_scan_run(
                 db_conn,

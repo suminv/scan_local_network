@@ -66,6 +66,8 @@ sudo ./venv/bin/python port_scan.py
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.
 
+Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`.
+
 **To run a scan:**
 
 ```bash
@@ -88,6 +90,18 @@ This tool discovers all devices on your local network, identifies their MAC addr
 ./scan-arp --db-file data/arp_scan.db --json-out data/reports/arp_scan_result.json
 ```
 
+**To also export the ARP snapshot as CSV:**
+
+```bash
+./scan-arp --csv-out data/reports/arp_scan_result.csv
+```
+
+**To enrich ARP results with reverse-DNS hostnames:**
+
+```bash
+./scan-arp --resolve-hostnames
+```
+
 **Recommended Synology NAS run:**
 
 ```bash
@@ -100,6 +114,7 @@ sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --d
 - scan metadata in `scan_runs`
 - device snapshots per run in `scan_run_devices`
 - full JSON export at the configured `--json-out` path with `devices` and `arp_diff_summary`
+- optional CSV export at the configured `--csv-out` path
 
 **What the ARP diff summary currently reports:**
 
@@ -107,6 +122,7 @@ sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --d
 - returned devices that were known earlier but absent from the previous successful ARP snapshot
 - missing devices since the previous successful ARP scan
 - IP address changes by MAC address
+- hostname changes when reverse-DNS enrichment is enabled
 
 ### Viewing Run History
 
@@ -140,7 +156,7 @@ sqlite3 data/arp_scan.db "SELECT id, scan_type, started_at, finished_at, interfa
 
 This tool discovers devices and then scans them for open TCP ports and running services.
 
-**To run a scan with default ports (22, 23, 80, 443, 8080):**
+**To run a scan with default ports (22, 80, 443, 3000, 5000, 8000, 8080, 8443):**
 
 ```bash
 ./scan-ports
@@ -168,6 +184,12 @@ sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24
 ./scan-ports --json-out data/reports/port_scan_result.json
 ```
 
+**To also export the port snapshot as CSV:**
+
+```bash
+./scan-ports --csv-out data/reports/port_scan_result.csv
+```
+
 **To scan a specific IP address, use the `-t` or `--target` flag:**
 
 ```bash
@@ -184,12 +206,33 @@ This will skip the network discovery phase and scan only the specified host. You
 
 -   Scan specific ports:
     ```bash
-    ./scan-ports -p 80,443,8080
+    ./scan-ports -p 80,443,8000,8080
     ```
 -   Scan a range of ports:
     ```bash
     ./scan-ports -p 1-1024
     ```
+
+**To switch the console report layout, use `--output`:**
+
+-   Grouped by device:
+    ```bash
+    ./scan-ports --output grouped
+    ```
+-   Flat table:
+    ```bash
+    ./scan-ports --output table
+    ```
+-   Focused operator view:
+    ```bash
+    ./scan-ports --output focus
+    ```
+
+**To enrich port scan results with reverse-DNS hostnames:**
+
+```bash
+./scan-ports --resolve-hostnames
+```
 
 **Example Output with Service Detection:**
 
@@ -204,14 +247,14 @@ Found 15 devices. Now scanning ports and services...
 Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00it/s]
 
 --- Scan Results ---
-  Device: 192.168.1.1 (Ubiquiti Networks Inc.) (a1:b2:c3:d4:e5:f6)
-    Open Ports:
-      80/tcp         HTTP (Server: nginx)
-      443/tcp        HTTP
+15 devices scanned | 7 with open ports | 11 open ports total
 
-  Device: 192.168.1.50 (Raspberry Pi Foundation) (d1:e2:f3:a4:b5:c6)
-    Open Ports:
-      22/tcp         SSH (SSH-2.0-OpenSSH_8.2p1)
+192.168.1.1  Ubiquiti Networks Inc.  a1:b2:c3:d4:e5:f6
+  80/tcp    HTTP    nginx
+  443/tcp   HTTPS   HTTP response detected
+
+192.168.1.50  Raspberry Pi Foundation  d1:e2:f3:a4:b5:c6
+  22/tcp    SSH     SSH-2.0-OpenSSH_8.2p1
 ```
 
 **What gets stored after each port run:**
@@ -219,6 +262,7 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 - scan metadata in `scan_runs`
 - open-port snapshots in `scan_run_ports`
 - full JSON export at the configured `--json-out` path with `devices` and `port_diff_summary`
+- optional CSV export at the configured `--csv-out` path
 
 **What the port diff summary currently reports:**
 
@@ -231,7 +275,10 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 -   **`DB_FILE`**: `"arp_scan_v1.db"` - The filename for the SQLite database.
 -   **`JSON_OUTPUT_FILE`**: `"arp_scan_result.json"` - The default JSON report output path.
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
+-   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
+-   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
+-   **`port_scan.py --output`**: Console output mode. One of `"grouped"`, `"table"`, or `"focus"`.
 
 ## 📂 Suggested Data Layout
 

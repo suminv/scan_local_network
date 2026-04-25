@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 
@@ -16,6 +17,17 @@ def save_json_report(file_path, payload, label="Results"):
     os.makedirs(directory, exist_ok=True)
     with open(file_path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=4)
+    print(f"{label} saved to {file_path}")
+
+
+def save_csv_report(file_path, headers, rows, label="Results"):
+    """Persist tabular rows as CSV and print where it was written."""
+    directory = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(directory, exist_ok=True)
+    with open(file_path, "w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(headers)
+        writer.writerows(rows)
     print(f"{label} saved to {file_path}")
 
 

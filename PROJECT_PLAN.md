@@ -22,6 +22,8 @@ Develop the project from a pair of local CLI scripts into a stable network inven
 - `arp_scanner.py` works locally and on Synology.
 - `port_scan.py` works locally and on Synology.
 - ARP discovery, vendor lookup, JSON export, and SQLite storage already work.
+- Port scanning already supports per-run history, diff reporting, and multiple console output modes.
+- Default port scanning now targets a dev/self-hosted-friendly set: `22, 80, 443, 3000, 5000, 8000, 8080, 8443`.
 - Synology runs successfully on `Python 3.9` in a project-local `venv`.
 - `requirements.txt` has already been simplified.
 
@@ -121,12 +123,13 @@ Scope:
 - Remove duplicated or dead code from `port_scan.py`.
 - Reduce warnings and rough edges in SYN scanning flow.
 - Improve service detection structure.
-- Add better handling for HTTPS on port `443`.
+- Keep console rendering modular and extensible.
 
 Done when:
 
 - `port_scan.py` has cleaner control flow.
 - Service detection is separated enough to evolve without turning into a single giant function.
+- Output formats can evolve without making the main scan path harder to maintain.
 
 ### Phase 6: TLS and Service Probes
 
@@ -203,9 +206,10 @@ Focus:
 
 ## Immediate Next Tasks
 
-1. Continue cleanup of `port_scan.py` structure and noisy network behavior.
-2. Add hostname resolution as an optional enrichment step for ARP and later port results.
-3. Decide whether to add CSV/Markdown export before scheduled execution work.
+1. Decide whether the next report target should be Markdown export or diff-first CSV/JSON output.
+2. Continue reducing responsibility inside `port_scan.py` now that probing moved into a dedicated module.
+3. Consider whether hostname and TLS changes should become first-class alert conditions for scheduled runs.
+4. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
 
 ## Progress Snapshot
 
@@ -227,6 +231,14 @@ Completed:
 - Shared reporting helpers are now also used for diff-style console summaries.
 - Shared model helpers are now used for scan context, device snapshots, and port snapshots.
 - Port parsing now validates bounds, malformed ranges, and empty entries explicitly.
+- Port scan console output now supports `grouped`, `table`, and `focus` modes.
+- Port scan output now normalizes service labels into clearer statuses such as `HTTP`, `HTTPS`, `SSH`, `WEB`, and `TLS`.
+- Unknown or weak banner results are now rendered with clearer details such as `open port, no banner` and `banner grab failed`.
+- Default port scanning now includes common dev/self-hosted ports such as `3000`, `5000`, `8000`, and `8443`.
+- Optional reverse-DNS hostname enrichment is available in both ARP and port scan flows.
+- ARP diff now reports hostname changes when hostname enrichment is enabled.
+- TLS metadata is now captured for `443/tcp`, persisted in scan history, and reported in port diffs.
+- Snapshot CSV export is now available for both ARP and port scan runs.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

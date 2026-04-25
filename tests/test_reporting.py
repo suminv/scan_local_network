@@ -35,6 +35,22 @@ class ReportingTests(unittest.TestCase):
 
             self.assertEqual(payload, {"ok": True})
 
+    def test_save_csv_report_creates_parent_directory_and_writes_rows(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "reports", "result.csv")
+            reporting.save_csv_report(
+                path,
+                ["ip", "hostname"],
+                [["192.168.2.10", "nas.local"]],
+                label="CSV report",
+            )
+
+            with open(path, "r", encoding="utf-8") as handle:
+                contents = handle.read()
+
+            self.assertIn("ip,hostname", contents)
+            self.assertIn("192.168.2.10,nas.local", contents)
+
     def test_print_change_report_renders_title_summary_and_sections(self):
         buffer = StringIO()
         with redirect_stdout(buffer):
