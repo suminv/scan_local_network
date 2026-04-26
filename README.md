@@ -41,6 +41,12 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
     pip install -r requirements.txt
     ```
 
+5.  **Optional macOS Wi-Fi backend for nearby SSID/BSSID discovery:**
+    ```bash
+    pip install -r requirements-macos.txt
+    ```
+    This enables the `PyObjC/CoreWLAN` backend used by `network-health-check` on modern macOS.
+
 4.  **Run the test suite:**
     ```bash
     python -m unittest discover -s tests -v
@@ -60,6 +66,10 @@ sudo ./venv/bin/python arp_scanner.py
 
 ```bash
 sudo ./venv/bin/python port_scan.py
+```
+
+```bash
+./venv/bin/python network_health_check.py
 ```
 
 ### 1. ARP Scanner (`scan-arp`)
@@ -292,6 +302,89 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 - closed ports since the previous successful port scan
 - service label changes on the same `(MAC, port)`
 
+### 3. Network Health Check (`scan-health`)
+
+This tool performs safe network trust checks intended for guest Wi-Fi and other untrusted networks without doing broad host discovery.
+
+It currently checks:
+
+- default gateway identity
+- default gateway MAC/vendor fingerprint when available from the local ARP cache
+- macOS Wi-Fi interface inventory and best-effort nearby Wi-Fi visibility
+- DNS server inventory for the current environment
+- DNS resolution sanity for public domains
+- captive portal behavior through common connectivity-check endpoints
+- HTTPS/TLS sanity through certificate-validated probes
+
+**To run a health check:**
+
+```bash
+./scan-health
+```
+
+On macOS, the report now includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details and nearby SSID/BSSID visibility are collected on a best-effort basis because Apple exposes them differently across macOS versions, and some details may require `sudo`.
+
+For nearby Wi-Fi inventory on modern macOS, the tool now first tries an optional `PyObjC/CoreWLAN` backend. If that bridge is not installed or macOS denies access, it falls back to older system mechanisms when available.
+
+The Wi-Fi section now also raises risk signals for:
+
+- open or unencrypted visible networks
+- weak legacy security such as WEP
+- duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
+- very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
+
+**To print only actionable health alerts:**
+
+```bash
+./scan-health --alerts-only
+```
+
+**To use the short operator view:**
+
+```bash
+./scan-health --output focus
+```
+
+**To run short Wi-Fi stability diagnostics for mesh or roaming problems:**
+
+```bash
+sudo ./scan-health --wifi-stability-seconds 20
+```
+
+This adds a short observation window with repeated gateway latency checks and current Wi-Fi sampling, looking for:
+
+- BSSID changes
+- weak signal
+- packet loss to the gateway
+- elevated gateway latency
+
+With `--alerts-only`, the process exits with:
+
+- `0` when no actionable health alerts are detected
+- `2` when suspicious DNS, captive portal, gateway, or TLS findings are detected
+
+The standard report now also includes a top-level trust assessment:
+
+- `trusted`
+- `suspicious`
+- `untrusted`
+
+**To customize DNS probe domains:**
+
+```bash
+./scan-health --dns-domain example.com --dns-domain openai.com
+```
+
+**To save the report to a specific JSON path:**
+
+```bash
+./scan-health --json-out data/reports/network_health_check_result.json
+```
+
+**What gets stored after each health run:**
+
+- full JSON export at the configured `--json-out` path with `scan_context`, `health_checks`, and `health_summary`
+
 ## ⚙️ Configuration
 
 -   **`DB_FILE`**: `"arp_scan_v1.db"` - The filename for the SQLite database.
@@ -299,6 +392,8 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
 -   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
 -   **`arp_scanner.py --alerts-only`**: Alert-only console output with exit code `2` when actionable device-level changes are detected.
+-   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
+-   **`network_health_check.py --alerts-only`**: Alert-only console output with exit code `2` when actionable health findings are detected.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.

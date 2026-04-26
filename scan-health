@@ -1,0 +1,14 @@
+#!/bin/bash
+# This script runs the network health check with the correct Python interpreter from the venv.
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+VENV_PYTHON="$SCRIPT_DIR/venv/bin/python3"
+
+if [ ! -f "$VENV_PYTHON" ]; then
+    echo "Error: Python interpreter not found at $VENV_PYTHON"
+    echo "Please ensure the virtual environment 'venv' is set up correctly."
+    exit 1
+fi
+
+echo "--- Running Network Health Check ---"
+"$VENV_PYTHON" "$SCRIPT_DIR/network_health_check.py" "$@"

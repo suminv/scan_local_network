@@ -21,4 +21,5 @@ mac_vendor_update
 
 arp_scan_result.json
 port_scan_result.json
+network_health_check_result.json
 data/

@@ -1,0 +1,1 @@
+pyobjc-framework-CoreWLAN>=10.3

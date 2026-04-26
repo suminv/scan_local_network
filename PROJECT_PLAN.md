@@ -211,7 +211,10 @@ Focus:
 2. Continue reducing responsibility inside `port_scan.py` now that probing and reporting live in dedicated modules.
 3. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
 4. Design the first notification/delivery path for alerts, such as Telegram, email, or webhook integration.
-5. Evaluate a future `network-health-check` mode for untrusted networks such as hotel Wi-Fi, focused on safe checks like client isolation, captive portal behavior, DNS consistency, and TLS anomalies rather than broad discovery.
+5. Expand `network-health-check` with a macOS-first Wi-Fi environment section, including visible SSIDs/BSSIDs, signal, channel, and security details when available.
+6. Keep a separate future TODO for a discovery-oriented network inspection mode, so it does not get mixed into the safe `network-health-check` path for untrusted networks.
+7. Add a separate future macOS-native helper path for fuller Wi-Fi discovery if CLI `CoreWLAN` remains restricted by privacy or API limits.
+8. Add Wi-Fi stability diagnostics for mesh-style issues, including repeated gateway latency, packet loss, BSSID changes, and signal drift over a short observation window.
 
 ## Progress Snapshot
 
@@ -245,6 +248,9 @@ Completed:
 - Scheduled-friendly exit codes are now available in alert-only mode.
 - Port scan alerting now treats hostname changes and TLS changes as first-class findings where applicable.
 - Port scan reporting and export logic have been split out into a dedicated `port_reporting.py` module.
+- Initial `network-health-check` support now exists for gateway, DNS, captive portal, and HTTPS/TLS sanity checks on untrusted networks.
+- The next `network-health-check` expansion should prioritize macOS Wi-Fi visibility first, with broader cross-platform discovery kept as a separate track.
+- Mesh-oriented Wi-Fi stability diagnostics are now an explicit follow-up track for `network-health-check`.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
