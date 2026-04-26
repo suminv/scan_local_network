@@ -155,11 +155,12 @@ Scope:
 - Add machine-readable scan diff output.
 - Add CSV or Markdown export.
 - Prepare scheduled execution on Synology.
-- Later add alerts for new devices or changed ports.
+- Later add alert delivery beyond console exit codes.
 
 Done when:
 
 - A scheduled run can produce history plus a usable summary of changes.
+- Scheduled runs can surface actionable findings cleanly to automation.
 
 ## Release Plan
 
@@ -207,9 +208,9 @@ Focus:
 ## Immediate Next Tasks
 
 1. Decide whether the next report target should be Markdown export or diff-first CSV/JSON output.
-2. Continue reducing responsibility inside `port_scan.py` now that probing moved into a dedicated module.
-3. Consider whether hostname and TLS changes should become first-class alert conditions for scheduled runs.
-4. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
+2. Continue reducing responsibility inside `port_scan.py` now that probing and reporting live in dedicated modules.
+3. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
+4. Design the first notification/delivery path for alerts, such as Telegram, email, or webhook integration.
 5. Evaluate a future `network-health-check` mode for untrusted networks such as hotel Wi-Fi, focused on safe checks like client isolation, captive portal behavior, DNS consistency, and TLS anomalies rather than broad discovery.
 
 ## Progress Snapshot
@@ -240,6 +241,10 @@ Completed:
 - ARP diff now reports hostname changes when hostname enrichment is enabled.
 - TLS metadata is now captured for `443/tcp`, persisted in scan history, and reported in port diffs.
 - Snapshot CSV export is now available for both ARP and port scan runs.
+- Alert-only console mode is now available for both scanners.
+- Scheduled-friendly exit codes are now available in alert-only mode.
+- Port scan alerting now treats hostname changes and TLS changes as first-class findings where applicable.
+- Port scan reporting and export logic have been split out into a dedicated `port_reporting.py` module.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
