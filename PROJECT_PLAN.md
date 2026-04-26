@@ -210,6 +210,7 @@ Focus:
 2. Continue reducing responsibility inside `port_scan.py` now that probing moved into a dedicated module.
 3. Consider whether hostname and TLS changes should become first-class alert conditions for scheduled runs.
 4. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
+5. Evaluate a future `network-health-check` mode for untrusted networks such as hotel Wi-Fi, focused on safe checks like client isolation, captive portal behavior, DNS consistency, and TLS anomalies rather than broad discovery.
 
 ## Progress Snapshot
 

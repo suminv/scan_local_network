@@ -678,6 +678,87 @@ class ArpScannerTests(unittest.TestCase):
         self.assertIn("old.local", output)
         self.assertIn("new.local", output)
 
+    def test_print_alert_summary_renders_actionable_findings(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            arp_scanner.print_alert_summary(
+                {
+                    "new_devices": [
+                        {
+                            "ip": "192.168.2.30",
+                            "hostname": "nas.local",
+                            "mac": "11:22:33:44:55:66",
+                            "vendor": "Vendor A",
+                        }
+                    ],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [],
+                }
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("=== Alerts ===", output)
+        self.assertIn("New: 1", output)
+        self.assertIn("New devices:", output)
+        self.assertIn("nas.local", output)
+
+    def test_print_alert_summary_reports_when_no_alerts_exist(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            arp_scanner.print_alert_summary(
+                {
+                    "new_devices": [],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [],
+                }
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("No actionable alerts detected.", output)
+
+    def test_has_alerts_detects_new_devices(self):
+        self.assertTrue(
+            arp_scanner.has_alerts(
+                {
+                    "new_devices": [{"ip": "192.168.2.30"}],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [],
+                }
+            )
+        )
+
+    def test_has_alerts_detects_hostname_changes(self):
+        self.assertTrue(
+            arp_scanner.has_alerts(
+                {
+                    "new_devices": [],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [{"ip": "192.168.2.10"}],
+                }
+            )
+        )
+
+    def test_has_alerts_returns_false_for_empty_diff(self):
+        self.assertFalse(
+            arp_scanner.has_alerts(
+                {
+                    "new_devices": [],
+                    "returned_devices": [],
+                    "missing_devices": [],
+                    "ip_changes": [],
+                    "hostname_changes": [],
+                }
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

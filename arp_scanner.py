@@ -786,6 +786,124 @@ def print_diff_summary(diff_summary):
         ],
     )
 
+def print_alert_summary(diff_summary):
+    """Print only actionable ARP/device-level alerts."""
+    if diff_summary is None:
+        print_change_report(
+            title="=== Alerts ===",
+            border="=============",
+            unavailable_message="No previous scan snapshot available.",
+        )
+        return
+
+    new_devices = diff_summary["new_devices"]
+    returned_devices = diff_summary["returned_devices"]
+    missing_devices = diff_summary["missing_devices"]
+    ip_changes = diff_summary["ip_changes"]
+    hostname_changes = diff_summary.get("hostname_changes", [])
+    if not any([new_devices, returned_devices, missing_devices, ip_changes, hostname_changes]):
+        print_change_report(
+            title="=== Alerts ===",
+            border="=============",
+            empty_message="No actionable alerts detected.",
+        )
+        return
+
+    print_change_report(
+        title="=== Alerts ===",
+        border="=============",
+        summary_line=(
+            " | ".join(
+                [
+                    f"New: {len(new_devices)}",
+                    f"Returned: {len(returned_devices)}",
+                    f"Missing: {len(missing_devices)}",
+                    f"IP changes: {len(ip_changes)}",
+                    f"Hostname changes: {len(hostname_changes)}",
+                ]
+            )
+        ),
+        sections=[
+            {
+                "title": "New devices",
+                "rows": new_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device.get("hostname", "-"), device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["IP", "Hostname", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "Returned devices",
+                "rows": returned_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device.get("hostname", "-"), device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["IP", "Hostname", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "Missing devices",
+                "rows": missing_devices,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [[device["ip"], device.get("hostname", "-"), device["mac"], device.get("vendor", "Unknown")] for device in rows],
+                        headers=["Last IP", "Last Hostname", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "IP changes",
+                "rows": ip_changes,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [
+                            [device["old_ip"], device["new_ip"], device["mac"], device.get("vendor", "Unknown")]
+                            for device in rows
+                        ],
+                        headers=["Previous IP", "Current IP", "MAC", "Vendor"],
+                    )
+                ],
+            },
+            {
+                "title": "Hostname changes",
+                "rows": hostname_changes,
+                "formatter": lambda rows: [
+                    tabulate(
+                        [
+                            [
+                                device["ip"],
+                                device.get("old_hostname") or "-",
+                                device.get("new_hostname") or "-",
+                                device["mac"],
+                                device.get("vendor", "Unknown"),
+                            ]
+                            for device in rows
+                        ],
+                        headers=["IP", "Previous Hostname", "Current Hostname", "MAC", "Vendor"],
+                    )
+                ],
+            },
+        ],
+    )
+
+
+def has_alerts(diff_summary):
+    """Return True when the diff contains actionable ARP/device alerts."""
+    if diff_summary is None:
+        return False
+    return any(
+        [
+            diff_summary.get("new_devices", []),
+            diff_summary.get("returned_devices", []),
+            diff_summary.get("missing_devices", []),
+            diff_summary.get("ip_changes", []),
+            diff_summary.get("hostname_changes", []),
+        ]
+    )
+
 def print_summary(table_data, new_devices, diff_summary=None):
     """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
     if not table_data:
@@ -841,11 +959,17 @@ def parse_args():
         action="store_true",
         help="Resolve reverse-DNS hostnames for discovered devices.",
     )
+    parser.add_argument(
+        "--alerts-only",
+        action="store_true",
+        help="Print only actionable alerts instead of the full ARP snapshot table.",
+    )
     return parser.parse_args()
 
 def main():
     """Main function to run the ARP scanner."""
     global DB_FILE, JSON_OUTPUT_FILE, CSV_OUTPUT_FILE
+    exit_code = 0
     args = parse_args()
     if os.geteuid() != 0:
         print("Error: This script requires root/administrator privileges to send ARP packets.", file=sys.stderr)
@@ -883,7 +1007,12 @@ def main():
                 diff_summary,
                 csv_output_file=CSV_OUTPUT_FILE,
             )
-            print_summary(table_data, new_devices, diff_summary)
+            if args.alerts_only:
+                print_alert_summary(diff_summary)
+                if has_alerts(diff_summary):
+                    exit_code = 2
+            else:
+                print_summary(table_data, new_devices, diff_summary)
             finalize_scan_run(
                 db_conn,
                 scan_run_id,
@@ -891,17 +1020,24 @@ def main():
                 device_count=len(table_data),
                 new_device_count=len(new_devices),
             )
+            print(f"\nScan run recorded with id: {scan_run_id}")
         else:
             diff_summary = build_scan_diff(previous_devices, [], known_macs)
-            print_summary([], [], diff_summary)
+            if args.alerts_only:
+                print_alert_summary(diff_summary)
+                if has_alerts(diff_summary):
+                    exit_code = 2
+            else:
+                print_summary([], [], diff_summary)
             finalize_scan_run(db_conn, scan_run_id, status="success")
+            print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
         finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise
     finally:
         db_conn.close()
-    print(f"\nScan run recorded with id: {scan_run_id}")
     print("ARP Network Scanner completed.")
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()

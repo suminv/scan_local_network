@@ -10,6 +10,7 @@ from unittest import mock
 
 import arp_scanner
 import port_scan
+import port_reporting
 import service_detection
 
 
@@ -488,6 +489,139 @@ class PortScanTests(unittest.TestCase):
 
         output = buffer.getvalue()
         self.assertIn("192.168.2.10 [nas.local] (aa:aa:aa:aa:aa:aa) 5000/tcp HTTP", output)
+
+    def test_print_port_alert_summary_renders_actionable_findings(self):
+        buffer = StringIO()
+        results = [
+            {
+                "ip": "192.168.2.40",
+                "hostname": "expired.local",
+                "mac": "10:10:10:10:10:10",
+                "vendor": "Example TLS Appliance",
+                "open_ports": [
+                    {
+                        "port": 443,
+                        "service": "TLS (TLSv1.2, CN=expired.local, OLD_CIPHER)",
+                        "tls": {
+                            "protocol": "TLSv1.2",
+                            "common_name": "expired.local",
+                            "certificate_status": "expired",
+                            "cipher": "OLD_CIPHER",
+                        },
+                    }
+                ],
+            }
+        ]
+        diff_summary = {
+            "new_ports": [
+                {
+                    "ip": "192.168.2.40",
+                    "hostname": "expired.local",
+                    "mac": "10:10:10:10:10:10",
+                    "port": 443,
+                    "service": "TLS (TLSv1.2, CN=expired.local, OLD_CIPHER)",
+                }
+            ],
+            "closed_ports": [],
+            "service_changes": [],
+            "tls_changes": [],
+        }
+
+        with redirect_stdout(buffer):
+            port_reporting.print_port_alert_summary(results, diff_summary)
+
+        output = buffer.getvalue()
+        self.assertIn("=== Alerts ===", output)
+        self.assertIn("TLS alerts: 1", output)
+        self.assertIn("TLS certificate alerts:", output)
+        self.assertIn("TLS! expired", output)
+        self.assertIn("New open ports:", output)
+
+    def test_print_port_alert_summary_reports_when_no_alerts_exist(self):
+        buffer = StringIO()
+        results = [
+            {
+                "ip": "192.168.2.10",
+                "hostname": "web.local",
+                "mac": "aa:aa:aa:aa:aa:aa",
+                "vendor": "Vendor A",
+                "open_ports": [{"port": 80, "service": "HTTP"}],
+            }
+        ]
+        diff_summary = {
+            "new_ports": [],
+            "closed_ports": [],
+            "service_changes": [],
+            "tls_changes": [],
+        }
+
+        with redirect_stdout(buffer):
+            port_reporting.print_port_alert_summary(results, diff_summary)
+
+        output = buffer.getvalue()
+        self.assertIn("No actionable alerts detected.", output)
+
+    def test_has_port_alerts_detects_tls_alerts(self):
+        results = [
+            {
+                "ip": "192.168.2.40",
+                "hostname": "expired.local",
+                "mac": "10:10:10:10:10:10",
+                "vendor": "Example TLS Appliance",
+                "open_ports": [
+                    {
+                        "port": 443,
+                        "service": "TLS",
+                        "tls": {"certificate_status": "expired"},
+                    }
+                ],
+            }
+        ]
+
+        self.assertTrue(
+            port_reporting.has_port_alerts(
+                results,
+                {
+                    "new_ports": [],
+                    "closed_ports": [],
+                    "service_changes": [],
+                    "tls_changes": [],
+                },
+            )
+        )
+
+    def test_has_port_alerts_detects_service_changes(self):
+        self.assertTrue(
+            port_reporting.has_port_alerts(
+                [],
+                {
+                    "new_ports": [],
+                    "closed_ports": [],
+                    "service_changes": [
+                        {
+                            "ip": "192.168.2.10",
+                            "port": 443,
+                            "old_service": "HTTP",
+                            "new_service": "TLS",
+                        }
+                    ],
+                    "tls_changes": [],
+                },
+            )
+        )
+
+    def test_has_port_alerts_returns_false_without_actionable_findings(self):
+        self.assertFalse(
+            port_reporting.has_port_alerts(
+                [],
+                {
+                    "new_ports": [],
+                    "closed_ports": [],
+                    "service_changes": [],
+                    "tls_changes": [],
+                },
+            )
+        )
 
     def test_discover_devices_to_scan_uses_target_without_discovery(self):
         args = SimpleNamespace(
