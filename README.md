@@ -102,6 +102,17 @@ Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`
 ./scan-arp --resolve-hostnames
 ```
 
+**To print only actionable ARP alerts for cron or systemd runs:**
+
+```bash
+./scan-arp --alerts-only
+```
+
+With `--alerts-only`, the process exits with:
+
+- `0` when no actionable alerts are detected
+- `2` when new, missing, returned, IP-change, or hostname-change alerts are detected
+
 **Recommended Synology NAS run:**
 
 ```bash
@@ -234,6 +245,17 @@ This will skip the network discovery phase and scan only the specified host. You
 ./scan-ports --resolve-hostnames
 ```
 
+**To print only actionable port alerts for scheduled runs:**
+
+```bash
+./scan-ports --alerts-only
+```
+
+With `--alerts-only`, the process exits with:
+
+- `0` when no actionable alerts are detected
+- `2` when TLS alerts, new open ports, service changes, or TLS metadata changes are detected
+
 **Example Output with Service Detection:**
 
 ```
@@ -276,8 +298,10 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 -   **`JSON_OUTPUT_FILE`**: `"arp_scan_result.json"` - The default JSON report output path.
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
 -   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
+-   **`arp_scanner.py --alerts-only`**: Alert-only console output with exit code `2` when actionable device-level changes are detected.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
+-   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
 -   **`port_scan.py --output`**: Console output mode. One of `"grouped"`, `"table"`, or `"focus"`.
 
 ## 📂 Suggested Data Layout
