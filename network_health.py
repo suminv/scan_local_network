@@ -1010,14 +1010,16 @@ def collect_macos_nearby_wifi_networks():
 def collect_wifi_environment():
     if not is_macos():
         return None
-    inventory = collect_macos_wifi_inventory()
-    current = collect_macos_current_wifi_details()
-    nearby = collect_macos_nearby_wifi_networks()
+    return collect_macos_wifi_state()
+
+
+def collect_macos_wifi_state():
+    """Collect the current macOS Wi-Fi environment in one structured payload."""
     return {
         "platform": "macos",
-        "inventory": inventory,
-        "current": current,
-        "nearby": nearby,
+        "inventory": collect_macos_wifi_inventory(),
+        "current": collect_macos_current_wifi_details(),
+        "nearby": collect_macos_nearby_wifi_networks(),
     }
 
 
@@ -1114,6 +1116,54 @@ def analyze_nearby_wifi_networks(networks):
     }
 
 
+def build_wifi_environment_analysis(wifi_environment):
+    """Attach a nearby-network analysis block to the collected Wi-Fi state."""
+    nearby_networks = wifi_environment["nearby"]["networks"]
+    analysis = (
+        analyze_nearby_wifi_networks(nearby_networks)
+        if nearby_networks
+        else {
+            "visible_network_count": 0,
+            "duplicate_ssids": [],
+            "limited_scan": False,
+            "risks": [],
+        }
+    )
+    enriched = dict(wifi_environment)
+    enriched["analysis"] = analysis
+    return enriched
+
+
+def summarize_wifi_environment(wifi_environment):
+    """Return status and summary text for the collected Wi-Fi environment."""
+    interfaces = wifi_environment["inventory"]["interfaces"]
+    nearby = wifi_environment["nearby"]
+    analysis = wifi_environment["analysis"]
+    nearby_networks = nearby["networks"]
+
+    if not interfaces:
+        return "alert", "No Wi-Fi interfaces detected on macOS"
+    if analysis["limited_scan"]:
+        return (
+            "ok",
+            f"Wi-Fi inventory collected, but nearby scan looks restricted by macOS "
+            f"({analysis['visible_network_count']} incomplete object(s))",
+        )
+    if analysis["risks"]:
+        return (
+            "alert",
+            f"Wi-Fi environment shows {len(analysis['risks'])} risk signal(s) across "
+            f"{analysis['visible_network_count']} visible network(s)",
+        )
+    if not nearby["available"]:
+        return "ok", "Wi-Fi interfaces detected; nearby SSID inventory is unavailable on this macOS setup"
+    return (
+        "ok",
+        f"Wi-Fi inventory collected for {len(interfaces)} interface(s) and "
+        f"{len(nearby_networks)} nearby network(s)",
+    )
+
+
 def build_wifi_environment_check():
     wifi = collect_wifi_environment()
     if wifi is None:
@@ -1124,39 +1174,8 @@ def build_wifi_environment_check():
             "details": {"platform": platform.system()},
         }
 
-    interfaces = wifi["inventory"]["interfaces"]
-    nearby_networks = wifi["nearby"]["networks"]
-    analysis = analyze_nearby_wifi_networks(nearby_networks) if nearby_networks else {
-        "visible_network_count": 0,
-        "duplicate_ssids": [],
-        "limited_scan": False,
-        "risks": [],
-    }
-    wifi["analysis"] = analysis
-    if not interfaces:
-        status = "alert"
-        summary = "No Wi-Fi interfaces detected on macOS"
-    elif analysis["limited_scan"]:
-        status = "ok"
-        summary = (
-            f"Wi-Fi inventory collected, but nearby scan looks restricted by macOS "
-            f"({analysis['visible_network_count']} incomplete object(s))"
-        )
-    elif analysis["risks"]:
-        status = "alert"
-        summary = (
-            f"Wi-Fi environment shows {len(analysis['risks'])} risk signal(s) across "
-            f"{analysis['visible_network_count']} visible network(s)"
-        )
-    elif not wifi["nearby"]["available"]:
-        status = "ok"
-        summary = "Wi-Fi interfaces detected; nearby SSID inventory is unavailable on this macOS setup"
-    else:
-        status = "ok"
-        summary = (
-            f"Wi-Fi inventory collected for {len(interfaces)} interface(s) and "
-            f"{len(nearby_networks)} nearby network(s)"
-        )
+    wifi = build_wifi_environment_analysis(wifi)
+    status, summary = summarize_wifi_environment(wifi)
 
     return {
         "name": "wifi_environment",

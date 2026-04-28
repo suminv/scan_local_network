@@ -428,6 +428,26 @@ Wi-Fi:
         self.assertEqual(result["backend"], "unavailable")
         self.assertIn("CoreWLAN backend unavailable", result["reason"])
 
+    def test_collect_macos_wifi_state_combines_inventory_current_and_nearby(self):
+        with mock.patch(
+            "network_health.collect_macos_wifi_inventory",
+            return_value={"interfaces": [{"name": "en1"}], "software": {}},
+        ):
+            with mock.patch(
+                "network_health.collect_macos_current_wifi_details",
+                return_value={"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+            ):
+                with mock.patch(
+                    "network_health.collect_macos_nearby_wifi_networks",
+                    return_value={"available": True, "backend": "corewlan", "networks": []},
+                ):
+                    state = network_health.collect_macos_wifi_state()
+
+        self.assertEqual(state["platform"], "macos")
+        self.assertEqual(state["inventory"]["interfaces"][0]["name"], "en1")
+        self.assertTrue(state["current"]["available"])
+        self.assertEqual(state["nearby"]["backend"], "corewlan")
+
     def test_classify_wifi_security_distinguishes_profiles(self):
         self.assertEqual(network_health.classify_wifi_security("WPA3(PSK/AES/AES)"), "strong")
         self.assertEqual(network_health.classify_wifi_security("WPA2(PSK/AES/AES)"), "modern")
@@ -485,6 +505,36 @@ Wi-Fi:
         self.assertEqual(analysis["visible_network_count"], 1)
         self.assertTrue(analysis["limited_scan"])
         self.assertFalse(any(risk["type"] == "open_network" for risk in analysis["risks"]))
+
+    def test_build_wifi_environment_analysis_adds_empty_default_analysis(self):
+        wifi_environment = {
+            "inventory": {"interfaces": [{"name": "en1"}]},
+            "current": {"available": False, "interfaces": {}},
+            "nearby": {"available": False, "networks": []},
+        }
+
+        enriched = network_health.build_wifi_environment_analysis(wifi_environment)
+
+        self.assertEqual(enriched["analysis"]["visible_network_count"], 0)
+        self.assertEqual(enriched["analysis"]["risks"], [])
+
+    def test_summarize_wifi_environment_marks_unavailable_nearby_as_ok(self):
+        status, summary = network_health.summarize_wifi_environment(
+            {
+                "inventory": {"interfaces": [{"name": "en1"}]},
+                "current": {"available": False, "interfaces": {}},
+                "nearby": {"available": False, "networks": []},
+                "analysis": {
+                    "visible_network_count": 0,
+                    "duplicate_ssids": [],
+                    "limited_scan": False,
+                    "risks": [],
+                },
+            }
+        )
+
+        self.assertEqual(status, "ok")
+        self.assertIn("nearby SSID inventory is unavailable", summary)
 
     def test_build_wifi_environment_check_handles_non_macos(self):
         with mock.patch("network_health.is_macos", return_value=False):
