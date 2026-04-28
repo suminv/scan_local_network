@@ -22,6 +22,16 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(args.md_out, "health.md")
         self.assertEqual(args.output, "focus")
 
+    def test_build_parser_supports_webhook_flags(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(
+            ["--webhook-url", "https://example.test/webhook", "--webhook-timeout", "9"]
+        )
+
+        self.assertEqual(args.webhook_url, "https://example.test/webhook")
+        self.assertEqual(args.webhook_timeout, 9.0)
+
     def test_get_corewlan_module_returns_import_error_when_unavailable(self):
         original_import = __import__
 
@@ -59,6 +69,31 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["gateway_mac"], "40:3f:8c:c6:39:37")
         self.assertEqual(result["details"]["vendor"], "TP-LINK TECHNOLOGIES CO.,LTD.")
         lookup_cls.assert_called_once()
+
+    def test_build_gateway_exposure_check_marks_dns_only_as_ok(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 53,
+            ):
+                result = network_health.build_gateway_exposure_check(timeout=3)
+
+        self.assertEqual(result["name"], "gateway_exposure")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["reachable_services"][0]["port"], 53)
+        self.assertEqual(result["details"]["risky_services"], [])
+
+    def test_build_gateway_exposure_check_alerts_on_gateway_web_admin_service(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port in [53, 443],
+            ):
+                result = network_health.build_gateway_exposure_check(timeout=3)
+
+        self.assertEqual(result["status"], "alert")
+        self.assertIn("local web/admin service", result["summary"])
+        self.assertEqual(result["details"]["risky_services"][0]["port"], 443)
 
     def test_parse_scutil_dns_extracts_nameservers(self):
         resolvers = network_health.parse_scutil_dns(
@@ -290,6 +325,38 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("Default route uses active Wi-Fi interface en1", result["summary"])
+
+    def test_maybe_send_health_webhook_skips_when_no_alerts(self):
+        sent = network_health_check.maybe_send_health_webhook(
+            "https://example.test/webhook",
+            10,
+            {"interface": "en0", "cidr": "192.168.2.0/24"},
+            {"alert_checks": 0, "total_checks": 4, "alerts": []},
+        )
+
+        self.assertFalse(sent)
+
+    def test_maybe_send_health_webhook_sends_expected_payload(self):
+        summary = {
+            "alert_checks": 1,
+            "total_checks": 4,
+            "alerts": [{"name": "active_path", "status": "alert", "summary": "Default route mismatch"}],
+        }
+
+        with mock.patch("network_health_check.send_webhook_payload", return_value=True) as sender:
+            sent = network_health_check.maybe_send_health_webhook(
+                "https://example.test/webhook",
+                12,
+                {"interface": "en0", "cidr": "192.168.2.0/24"},
+                summary,
+            )
+
+        self.assertTrue(sent)
+        payload = sender.call_args.args[1]
+        self.assertEqual(payload["source"], "network_health_check")
+        self.assertEqual(payload["alert_summary"]["alert_checks"], 1)
+        self.assertEqual(payload["alerts"]["health_alerts"], summary["alerts"])
+        self.assertEqual(sender.call_args.kwargs["timeout"], 12)
 
     def test_parse_system_profiler_wifi_json_extracts_interfaces(self):
         parsed = network_health.parse_system_profiler_wifi_json(
@@ -629,28 +696,30 @@ Wi-Fi:
     def test_run_network_health_checks_includes_active_path_alert(self):
         with mock.patch("network_health.resolve_gateway_identity", return_value={"name": "gateway_identity", "status": "ok"}):
             with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
-                with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
-                    with mock.patch(
-                        "network_health.build_wifi_environment_check",
-                        return_value={
-                            "name": "wifi_environment",
-                            "status": "ok",
-                            "details": {
-                                "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
-                                "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
-                            },
-                        },
-                    ):
+                with mock.patch("network_health.build_gateway_exposure_check", return_value={"name": "gateway_exposure", "status": "ok"}):
+                    with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
                         with mock.patch(
-                            "network_health.build_active_path_check",
-                            return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                            "network_health.build_wifi_environment_check",
+                            return_value={
+                                "name": "wifi_environment",
+                                "status": "ok",
+                                "details": {
+                                    "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
+                                    "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+                                },
+                            },
                         ):
-                            with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
-                                with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
-                                    with mock.patch("network_health.run_https_tls_checks", return_value=[]):
-                                        checks = network_health.run_network_health_checks()
+                            with mock.patch(
+                                "network_health.build_active_path_check",
+                                return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                            ):
+                                with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
+                                    with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
+                                        with mock.patch("network_health.run_https_tls_checks", return_value=[]):
+                                            checks = network_health.run_network_health_checks()
 
         self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
+        self.assertTrue(any(check["name"] == "gateway_exposure" for check in checks))
 
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -894,6 +963,30 @@ Wi-Fi:
         self.assertIn("resolver classes:", output)
         self.assertIn("[on-link DNS]", output)
         self.assertNotIn("{'nameservers': ['raw', 'dump']}", output)
+
+    def test_print_health_report_renders_gateway_exposure_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "gateway_exposure",
+                "status": "alert",
+                "summary": "Gateway exposes 1 local web/admin service(s) to the client on 192.168.2.1",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "reachable_services": [{"port": 443, "label": "HTTPS admin/web", "risk": True}],
+                    "risky_services": [{"port": 443, "label": "HTTPS admin/web", "risk": True}],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "alert_checks": 1, "alerts": checks}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Gateway exposure", output)
+        self.assertIn("443/tcp HTTPS admin/web [alert]", output)
 
     def test_print_health_report_formats_wifi_nearby_networks_compactly(self):
         buffer = StringIO()

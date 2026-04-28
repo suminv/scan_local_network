@@ -1,6 +1,7 @@
 import argparse
 import sys
 
+from alert_delivery import build_alert_payload, send_webhook_payload
 from arp_scanner import resolve_scan_target
 from colorama import Fore, Style, init
 from models import build_scan_context
@@ -16,7 +17,7 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 CHECK_GROUPS = [
-    ("Network", ["gateway_identity", "gateway_fingerprint", "active_path"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "active_path"]),
     ("DNS", ["dns_environment", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_", "https_"]),
@@ -24,6 +25,7 @@ CHECK_GROUPS = [
 CHECK_LABELS = {
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
+    "gateway_exposure": "Gateway exposure",
     "active_path": "Active path",
     "dns_environment": "DNS servers",
     "wifi_environment": "Wi-Fi environment",
@@ -65,6 +67,22 @@ def format_gateway_fingerprint_details(details):
         f"  vendor: {details.get('vendor', 'Unknown')}",
         f"  interface: {details.get('interface')}",
     ]
+
+
+def format_gateway_exposure_details(details):
+    lines = [
+        f"  gateway: {details.get('gateway_ip')}",
+        f"  interface: {details.get('interface')}",
+    ]
+    reachable = details.get("reachable_services", [])
+    if not reachable:
+        lines.append("  reachable local services: none detected")
+        return lines
+    lines.append("  reachable local services:")
+    for service in reachable:
+        risk_marker = " [alert]" if service.get("risk") else ""
+        lines.append(f"    - {service['port']}/tcp {service['label']}{risk_marker}")
+    return lines
 
 
 def format_active_path_details(details):
@@ -205,6 +223,8 @@ def format_check_details(check):
         return format_gateway_identity_details(details)
     if name == "gateway_fingerprint":
         return format_gateway_fingerprint_details(details)
+    if name == "gateway_exposure":
+        return format_gateway_exposure_details(details)
     if name == "active_path":
         return format_active_path_details(details)
     if name == "dns_environment":
@@ -534,6 +554,17 @@ def build_parser():
         default=0,
         help="Run short Wi-Fi stability diagnostics for the given number of seconds.",
     )
+    parser.add_argument(
+        "--webhook-url",
+        type=str,
+        help="Optional webhook URL that receives actionable network health alerts.",
+    )
+    parser.add_argument(
+        "--webhook-timeout",
+        type=float,
+        default=10,
+        help="Webhook timeout in seconds. Defaults to 10.",
+    )
     return parser
 
 
@@ -593,6 +624,23 @@ def render_health_report(args, checks, summary):
     return 0
 
 
+def maybe_send_health_webhook(webhook_url, timeout, scan_context, summary):
+    """Send health alerts to a webhook when actionable checks are present."""
+    if not webhook_url or not summary.get("alert_checks"):
+        return False
+    payload = build_alert_payload(
+        source="network_health_check",
+        scan_context=scan_context,
+        alert_summary={
+            "has_alerts": True,
+            "alert_checks": summary.get("alert_checks", 0),
+            "total_checks": summary.get("total_checks", 0),
+        },
+        alerts={"health_alerts": summary.get("alerts", [])},
+    )
+    return send_webhook_payload(webhook_url, payload, timeout=timeout, label="Network health webhook alert")
+
+
 def main():
     init(autoreset=True)
     args = parse_args()
@@ -607,6 +655,12 @@ def main():
             build_health_markdown_report(scan_context, checks, summary),
             label="Network health Markdown report",
         )
+    maybe_send_health_webhook(
+        args.webhook_url,
+        args.webhook_timeout,
+        scan_context,
+        summary,
+    )
     exit_code = render_health_report(args, checks, summary)
     if args.debug_wifi:
         print_wifi_debug_report(checks)

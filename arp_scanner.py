@@ -12,6 +12,7 @@ from scapy.layers.l2 import ARP, Ether
 from scapy.sendrecv import srp
 from tabulate import tabulate
 
+from alert_delivery import build_alert_payload, send_webhook_payload
 from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
@@ -1043,6 +1044,40 @@ def has_alerts(diff_summary):
         ]
     )
 
+
+def build_arp_alert_summary(diff_summary):
+    """Build a compact ARP alert count summary for webhook delivery."""
+    if diff_summary is None:
+        return {
+            "has_alerts": False,
+            "new_devices": 0,
+            "returned_devices": 0,
+            "missing_devices": 0,
+            "ip_changes": 0,
+            "hostname_changes": 0,
+        }
+    return {
+        "has_alerts": has_alerts(diff_summary),
+        "new_devices": len(diff_summary.get("new_devices", [])),
+        "returned_devices": len(diff_summary.get("returned_devices", [])),
+        "missing_devices": len(diff_summary.get("missing_devices", [])),
+        "ip_changes": len(diff_summary.get("ip_changes", [])),
+        "hostname_changes": len(diff_summary.get("hostname_changes", [])),
+    }
+
+
+def maybe_send_arp_webhook(webhook_url, timeout, interface, cidr, diff_summary):
+    """Send ARP alert summary to a webhook when actionable findings exist."""
+    if not webhook_url or not has_alerts(diff_summary):
+        return False
+    payload = build_alert_payload(
+        source="arp_scanner",
+        scan_context={"interface": interface, "cidr": cidr},
+        alert_summary=build_arp_alert_summary(diff_summary),
+        alerts=diff_summary,
+    )
+    return send_webhook_payload(webhook_url, payload, timeout=timeout, label="ARP webhook alert")
+
 def print_summary(table_data, new_devices, diff_summary=None):
     """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
     if not table_data:
@@ -1108,6 +1143,17 @@ def parse_args():
         action="store_true",
         help="Print only actionable alerts instead of the full ARP snapshot table.",
     )
+    parser.add_argument(
+        "--webhook-url",
+        type=str,
+        help="Optional webhook URL that receives ARP alerts when actionable changes are detected.",
+    )
+    parser.add_argument(
+        "--webhook-timeout",
+        type=float,
+        default=10,
+        help="Webhook timeout in seconds. Defaults to 10.",
+    )
     return parser.parse_args()
 
 def main():
@@ -1160,6 +1206,13 @@ def main():
                     exit_code = 2
             else:
                 print_summary(table_data, new_devices, diff_summary)
+            maybe_send_arp_webhook(
+                args.webhook_url,
+                args.webhook_timeout,
+                interface,
+                ip_range,
+                diff_summary,
+            )
             finalize_scan_run(
                 db_conn,
                 scan_run_id,
@@ -1176,6 +1229,13 @@ def main():
                     exit_code = 2
             else:
                 print_summary([], [], diff_summary)
+            maybe_send_arp_webhook(
+                args.webhook_url,
+                args.webhook_timeout,
+                interface,
+                ip_range,
+                diff_summary,
+            )
             finalize_scan_run(db_conn, scan_run_id, status="success")
             print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:

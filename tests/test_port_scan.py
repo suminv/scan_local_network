@@ -23,6 +23,16 @@ class PortScanTests(unittest.TestCase):
         self.assertEqual(args.md_out, "report.md")
         self.assertEqual(args.output, "focus")
 
+    def test_build_parser_supports_webhook_flags(self):
+        parser = port_scan.build_parser()
+
+        args = parser.parse_args(
+            ["--webhook-url", "https://example.test/webhook", "--webhook-timeout", "4"]
+        )
+
+        self.assertEqual(args.webhook_url, "https://example.test/webhook")
+        self.assertEqual(args.webhook_timeout, 4.0)
+
     def test_parse_ports_returns_defaults_when_empty(self):
         self.assertEqual(
             port_scan.parse_ports(None),
@@ -108,6 +118,44 @@ class PortScanTests(unittest.TestCase):
             ]
         )
         self.assertEqual(count, 3)
+
+    def test_maybe_send_port_webhook_skips_when_no_alerts(self):
+        sent = port_scan.maybe_send_port_webhook(
+            "https://example.test/webhook",
+            10,
+            {"interface": "en0", "cidr": "192.168.2.0/24"},
+            [],
+            {"new_ports": [], "service_changes": [], "tls_changes": []},
+        )
+
+        self.assertFalse(sent)
+
+    def test_maybe_send_port_webhook_sends_expected_payload(self):
+        results = [
+            {
+                "ip": "192.168.2.10",
+                "mac": "aa:aa:aa:aa:aa:aa",
+                "open_ports": [{"port": 443, "service": "TLS", "tls": {"certificate_status": "expired"}}],
+            }
+        ]
+        diff_summary = {"new_ports": [], "service_changes": [], "tls_changes": []}
+
+        with mock.patch("port_scan.send_webhook_payload", return_value=True) as sender:
+            sent = port_scan.maybe_send_port_webhook(
+                "https://example.test/webhook",
+                6,
+                {"interface": "en0", "cidr": "192.168.2.0/24"},
+                results,
+                diff_summary,
+            )
+
+        self.assertTrue(sent)
+        payload = sender.call_args.args[1]
+        self.assertEqual(payload["source"], "port_scan")
+        self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
+        self.assertEqual(payload["alert_summary"]["tls_alerts"], 1)
+        self.assertEqual(payload["alerts"]["port_diff_summary"], diff_summary)
+        self.assertEqual(sender.call_args.kwargs["timeout"], 6)
 
     def test_normalize_service_entry_maps_unknown_web_ports_to_clear_status(self):
         self.assertEqual(

@@ -42,6 +42,13 @@ DEFAULT_HTTPS_PROBES = [
         "expected_statuses": [204],
     },
 ]
+DEFAULT_GATEWAY_EXPOSURE_PROBES = [
+    {"port": 53, "label": "DNS", "risk": False},
+    {"port": 80, "label": "HTTP admin/web", "risk": True},
+    {"port": 443, "label": "HTTPS admin/web", "risk": True},
+    {"port": 8080, "label": "HTTP alt admin/web", "risk": True},
+    {"port": 8443, "label": "HTTPS alt admin/web", "risk": True},
+]
 MACOS_AIRPORT_SCAN_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 AUXILIARY_WIFI_INTERFACES = {"awdl0", "llw0", "p2p0"}
 ACTIVE_WIFI_STATUSES = {"spairport_status_active", "connected", "active"}
@@ -108,6 +115,62 @@ def resolve_gateway_identity():
             "interface": interface,
             "hostname": hostname,
             "is_public_ip": is_public_ip(gateway_ip),
+        },
+    }
+
+
+def probe_tcp_service(host, port, timeout=2):
+    """Return True when a TCP service accepts a connection on the target host/port."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (OSError, socket.timeout):
+        return False
+
+
+def build_gateway_exposure_check(timeout=2, probes=None):
+    """Inspect only the default gateway for a small set of local services."""
+    gateway_ip, interface = get_default_gateway()
+    reachable_services = []
+    risky_services = []
+
+    for probe in probes or DEFAULT_GATEWAY_EXPOSURE_PROBES:
+        if not probe_tcp_service(gateway_ip, probe["port"], timeout=timeout):
+            continue
+        service = {
+            "port": probe["port"],
+            "label": probe["label"],
+            "risk": probe["risk"],
+        }
+        reachable_services.append(service)
+        if probe["risk"]:
+            risky_services.append(service)
+
+    if risky_services:
+        status = "alert"
+        summary = (
+            f"Gateway exposes {len(risky_services)} local web/admin service(s) "
+            f"to the client on {gateway_ip}"
+        )
+    elif reachable_services:
+        status = "ok"
+        summary = (
+            f"Gateway exposes {len(reachable_services)} expected local service(s) "
+            f"to the client on {gateway_ip}"
+        )
+    else:
+        status = "ok"
+        summary = f"No common local gateway services responded on {gateway_ip}"
+
+    return {
+        "name": "gateway_exposure",
+        "status": status,
+        "summary": summary,
+        "details": {
+            "gateway_ip": gateway_ip,
+            "interface": interface,
+            "reachable_services": reachable_services,
+            "risky_services": risky_services,
         },
     }
 
@@ -1235,7 +1298,12 @@ def run_network_health_checks(
     wifi_stability_seconds=0,
     wifi_stability_progress_callback=None,
 ):
-    checks = [resolve_gateway_identity(), resolve_gateway_fingerprint(), build_dns_environment_check()]
+    checks = [
+        resolve_gateway_identity(),
+        resolve_gateway_fingerprint(),
+        build_gateway_exposure_check(timeout=timeout),
+        build_dns_environment_check(),
+    ]
     wifi_environment_check = build_wifi_environment_check()
     checks.append(wifi_environment_check)
     checks.append(build_active_path_check(wifi_environment_check.get("details")))

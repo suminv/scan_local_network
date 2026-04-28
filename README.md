@@ -16,6 +16,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 - **Customizable Port Selection**: Allows specifying ports or port ranges to scan via command-line arguments.
 - **Rich Console Output**: Displays results in a clean, color-coded, tabular format.
 - **Data Export**: Saves full scan results to a JSON file.
+- **Webhook Alerts**: Can POST actionable ARP, port, and health alerts to a webhook endpoint.
 
 ## 🛠 Requirements
 
@@ -128,6 +129,14 @@ With `--alerts-only`, the process exits with:
 
 - `0` when no actionable alerts are detected
 - `2` when new, missing, returned, IP-change, or hostname-change alerts are detected
+
+**To send actionable ARP alerts to a webhook:**
+
+```bash
+./scan-arp --alerts-only --webhook-url https://example.test/webhook
+```
+
+Webhook delivery is attempted only when actionable ARP changes exist. Use `--webhook-timeout` to override the default 10-second timeout.
 
 **Recommended Synology NAS run:**
 
@@ -279,6 +288,14 @@ With `--alerts-only`, the process exits with:
 - `0` when no actionable alerts are detected
 - `2` when TLS alerts, new open ports, service changes, or TLS metadata changes are detected
 
+**To send actionable port alerts to a webhook:**
+
+```bash
+./scan-ports --alerts-only --webhook-url https://example.test/webhook
+```
+
+Webhook delivery is attempted only when actionable port findings exist. Use `--webhook-timeout` to override the default 10-second timeout.
+
 **Example Output with Service Detection:**
 
 ```
@@ -324,6 +341,7 @@ It currently checks:
 
 - default gateway identity
 - default gateway MAC/vendor fingerprint when available from the local ARP cache
+- whether the default gateway exposes common local services such as DNS or web/admin endpoints to the current client
 - whether an active Wi-Fi interface is present while the default route is using a different interface
 - macOS Wi-Fi interface inventory and best-effort nearby Wi-Fi visibility
 - DNS server inventory for the current environment
@@ -349,6 +367,8 @@ The Wi-Fi section now also raises risk signals for:
 - very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
 
 On macOS, the report now also raises an alert when an active Wi-Fi interface is present but the system default route is currently using another interface such as Ethernet. This is meant to catch dual-connected situations where a health check might otherwise look healthy because traffic is leaving through the wired path instead of the Wi-Fi path you intended to assess.
+
+The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
 
 **To print only actionable health alerts:**
 
@@ -379,6 +399,14 @@ With `--alerts-only`, the process exits with:
 
 - `0` when no actionable health alerts are detected
 - `2` when suspicious gateway path, DNS, captive portal, Wi-Fi, or TLS findings are detected
+
+**To send actionable network health alerts to a webhook:**
+
+```bash
+./scan-health --alerts-only --webhook-url https://example.test/webhook
+```
+
+Webhook delivery is attempted only when actionable health findings exist. Use `--webhook-timeout` to override the default 10-second timeout.
 
 The standard report now also includes a top-level trust assessment:
 
@@ -417,13 +445,19 @@ The standard report now also includes a top-level trust assessment:
 -   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
 -   **`arp_scanner.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`arp_scanner.py --alerts-only`**: Alert-only console output with exit code `2` when actionable device-level changes are detected.
+-   **`arp_scanner.py --webhook-url`**: Optional webhook URL for actionable ARP alerts.
+-   **`arp_scanner.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
 -   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
 -   **`network_health_check.py --alerts-only`**: Alert-only console output with exit code `2` when actionable health findings are detected.
+-   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.
+-   **`network_health_check.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
+-   **`port_scan.py --webhook-url`**: Optional webhook URL for actionable port alerts.
+-   **`port_scan.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`port_scan.py --output`**: Console output mode. One of `"grouped"`, `"table"`, or `"focus"`.
 
 ## 📂 Suggested Data Layout

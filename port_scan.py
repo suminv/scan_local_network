@@ -4,6 +4,7 @@ import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from alert_delivery import build_alert_payload, send_webhook_payload
 from colorama import Fore, Style, init
 from models import build_device_snapshot, build_port_snapshot, build_scan_context
 from scapy.layers.l2 import ARP, Ether
@@ -323,6 +324,17 @@ def build_parser():
         action="store_true",
         help="Print only actionable alerts instead of the full port scan report.",
     )
+    parser.add_argument(
+        "--webhook-url",
+        type=str,
+        help="Optional webhook URL that receives port alerts when actionable findings are detected.",
+    )
+    parser.add_argument(
+        "--webhook-timeout",
+        type=float,
+        default=10,
+        help="Webhook timeout in seconds. Defaults to 10.",
+    )
     return parser
 
 
@@ -360,6 +372,37 @@ def render_empty_scan_outcome(args, diff_summary):
     print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
     print_port_diff_summary(diff_summary)
     return 0
+
+
+def build_port_alert_summary(results, diff_summary):
+    """Build a compact port alert count summary for webhook delivery."""
+    observations = build_port_observations(results)
+    tls_alert_count = sum(
+        1
+        for row in observations
+        if (row.get("tls") or {}).get("certificate_status") in ["expired", "expiring_soon"]
+    )
+    diff_summary = diff_summary or {}
+    return {
+        "has_alerts": has_port_alerts(results, diff_summary),
+        "tls_alerts": tls_alert_count,
+        "new_ports": len(diff_summary.get("new_ports", [])),
+        "service_changes": len(diff_summary.get("service_changes", [])),
+        "tls_changes": len(diff_summary.get("tls_changes", [])),
+    }
+
+
+def maybe_send_port_webhook(webhook_url, timeout, scan_context, results, diff_summary):
+    """Send port scan alert summary to a webhook when actionable findings exist."""
+    if not webhook_url or not has_port_alerts(results, diff_summary):
+        return False
+    payload = build_alert_payload(
+        source="port_scan",
+        scan_context=scan_context,
+        alert_summary=build_port_alert_summary(results, diff_summary),
+        alerts={"port_diff_summary": diff_summary},
+    )
+    return send_webhook_payload(webhook_url, payload, timeout=timeout, label="Port webhook alert")
 
 
 def main():
@@ -418,6 +461,13 @@ def main():
             output_paths["json"],
             csv_output_file=CSV_OUTPUT_FILE,
             markdown_output_file=MARKDOWN_OUTPUT_FILE,
+        )
+        maybe_send_port_webhook(
+            args.webhook_url,
+            args.webhook_timeout,
+            scan_context,
+            results,
+            diff_summary,
         )
         finalize_scan_run(
             db_conn,

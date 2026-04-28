@@ -11,6 +11,22 @@ import arp_scanner
 
 
 class ArpScannerTests(unittest.TestCase):
+    def test_parse_args_supports_webhook_flags(self):
+        with mock.patch(
+            "sys.argv",
+            [
+                "arp_scanner.py",
+                "--webhook-url",
+                "https://example.test/webhook",
+                "--webhook-timeout",
+                "5",
+            ],
+        ):
+            args = arp_scanner.parse_args()
+
+        self.assertEqual(args.webhook_url, "https://example.test/webhook")
+        self.assertEqual(args.webhook_timeout, 5.0)
+
     def test_validate_ip_range_normalizes_host_to_network(self):
         self.assertEqual(
             arp_scanner.validate_ip_range("192.168.2.45/24"),
@@ -254,6 +270,50 @@ class ArpScannerTests(unittest.TestCase):
             )
         finally:
             os.remove(path)
+
+    def test_maybe_send_arp_webhook_skips_when_no_alerts(self):
+        sent = arp_scanner.maybe_send_arp_webhook(
+            "https://example.test/webhook",
+            10,
+            "en0",
+            "192.168.2.0/24",
+            {
+                "new_devices": [],
+                "returned_devices": [],
+                "missing_devices": [],
+                "ip_changes": [],
+                "hostname_changes": [],
+            },
+        )
+
+        self.assertFalse(sent)
+
+    def test_maybe_send_arp_webhook_sends_expected_payload(self):
+        diff_summary = {
+            "new_devices": [{"ip": "192.168.2.10", "mac": "aa:aa:aa:aa:aa:aa"}],
+            "returned_devices": [],
+            "missing_devices": [],
+            "ip_changes": [],
+            "hostname_changes": [],
+        }
+
+        with mock.patch("arp_scanner.send_webhook_payload", return_value=True) as sender:
+            sent = arp_scanner.maybe_send_arp_webhook(
+                "https://example.test/webhook",
+                8,
+                "en0",
+                "192.168.2.0/24",
+                diff_summary,
+            )
+
+        self.assertTrue(sent)
+        payload = sender.call_args.args[1]
+        self.assertEqual(sender.call_args.args[0], "https://example.test/webhook")
+        self.assertEqual(payload["source"], "arp_scanner")
+        self.assertEqual(payload["scan_context"]["interface"], "en0")
+        self.assertEqual(payload["alert_summary"]["new_devices"], 1)
+        self.assertEqual(payload["alerts"], diff_summary)
+        self.assertEqual(sender.call_args.kwargs["timeout"], 8)
 
     def test_load_previous_scan_ports_returns_last_successful_port_snapshot(self):
         fd, path = tempfile.mkstemp(suffix=".db")

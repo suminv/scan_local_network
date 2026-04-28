@@ -29,193 +29,107 @@ Develop the project from a pair of local CLI scripts into a stable network inven
 
 ## Main Product Direction
 
-The next stage is not deployment work. The next stage is to turn the scanner into a repeatable monitoring tool with:
+This repository now has two active product tracks:
 
-- scan history;
-- change detection;
-- better runtime configurability;
-- cleaner service detection;
-- a more maintainable internal structure.
+- `network_scan`: inventory and change monitoring for your own local network
+- `network-health-check`: trust and exposure assessment for guest, hotel, cafe, and other untrusted networks
 
-## Roadmap
+These tracks should share reusable plumbing where it helps, but they should not be forced into one user workflow.
 
-### Phase 1: Stabilize Runtime and CLI
+## Scope Boundaries
 
-Priority: High
+### In Scope For This Repository
 
-Scope:
+- local-network inventory and change detection
+- port visibility on your own hosts and subnets
+- export/reporting/alerts around those changes
+- safe trust checks for untrusted networks
+- Wi-Fi environment, DNS, captive portal, HTTPS/TLS, and path sanity checks
 
-- Add `--iface` override.
-- Add `--cidr` override.
-- Add optional output path flags for DB and JSON.
-- Validate port ranges and invalid CLI input.
-- Standardize recommended launch commands in README.
+### Explicitly Out Of Scope For This Repository
 
-Done when:
+- broad active scanning of third-party or open public networks
+- “what is reachable on everyone else’s network” style probing
+- aggressive discovery logic aimed at unknown external devices
 
-- The same code runs locally and on NAS without edits.
-- Synology can explicitly use `--iface ovs_eth0`.
-- Local runs can still rely on automatic interface detection.
+If active probing of open/public networks becomes a real goal, that should be a separate project with its own threat model, UX, legal boundary, and safety rules.
 
-### Phase 2: Improve Persistence Model
+## Active Roadmap
 
-Priority: High
+### Track A: `network_scan`
 
-Scope:
+Priority:
 
-- Extend storage beyond `first_seen`.
-- Add `last_seen`.
-- Track scan runs explicitly.
-- Prepare schema for device observations and later port history.
+- High
 
-Target schema direction:
+Current role:
 
-- `devices`
-- `scan_runs`
-- `device_observations`
-- later `port_observations`
+- monitor your own LAN
+- maintain device and port history
+- surface actionable changes
 
-Done when:
+Remaining work:
 
-- Each scan has a recorded run entry.
-- Devices persist across runs with both first and last seen timestamps.
-- The project can compare current and previous observations.
+- decide whether snapshot tables are enough or whether to move to richer observation/event modeling
+- continue selective cleanup of `port_scan.py` and shared persistence/reporting boundaries
+- extend alert delivery beyond the first webhook path when needed, for example Telegram or email
+- improve long-term inventory semantics if device history needs to become more than “latest state + snapshots”
 
-### Phase 3: Diff Between Scans
+Backlog:
 
-Priority: High
+- Synology scheduler / cron-ready execution
+- heavier automation wrappers
+- UI
 
-Scope:
+### Track B: `network-health-check`
 
-- Detect new devices.
-- Detect missing devices.
-- Detect IP changes.
-- Prepare comparison of open ports across runs.
-- Print a concise change summary after each scan.
+Priority:
 
-Done when:
+- High
 
-- A repeated scan clearly reports what changed since the previous run.
-- “New device” is no longer the only tracked change type.
-- Known devices that disappear and later respond again are reported as returned devices, not as brand-new devices.
+Current role:
 
-### Phase 4: Host Identity Improvements
+- assess whether a network looks trustworthy enough to use
+- inspect current path, Wi-Fi conditions, DNS behavior, captive portal behavior, and HTTPS/TLS behavior
 
-Priority: Medium
+Remaining work:
 
-Scope:
+- expand macOS-first Wi-Fi environment detail where the platform allows it
+- improve guest/open-network exposure assessment beyond the current gateway-local visibility check without crossing into broad active scanning
+- keep refining dual-connectivity, mesh instability, and route/path diagnostics
+- continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
-- Add reverse DNS hostname lookup.
-- Store hostname per observation, not as permanent device truth.
-- Keep hostname resolution optional if it slows scans too much.
+Backlog:
 
-Done when:
+- fuller macOS-native Wi-Fi discovery if `CoreWLAN` remains restricted
+- any future discovery-oriented mode that goes beyond safe trust checks
 
-- Results can show hostname when available.
-- Missing reverse DNS does not break scans.
+## Release Direction
 
-### Phase 5: Clean Port Scanning Logic
-
-Priority: Medium
-
-Scope:
-
-- Remove duplicated or dead code from `port_scan.py`.
-- Reduce warnings and rough edges in SYN scanning flow.
-- Improve service detection structure.
-- Keep console rendering modular and extensible.
-
-Done when:
-
-- `port_scan.py` has cleaner control flow.
-- Service detection is separated enough to evolve without turning into a single giant function.
-- Output formats can evolve without making the main scan path harder to maintain.
-
-### Phase 6: TLS and Service Probes
-
-Priority: Medium
-
-Scope:
-
-- Add HTTPS/TLS certificate inspection.
-- Split probes by protocol where useful.
-- Improve HTTP, HTTPS, SSH, and generic TCP identification.
-
-Done when:
-
-- `443/tcp` reports more than a best-effort plaintext banner.
-- Open ports have more reliable service labels.
-
-### Phase 7: Reporting and Automation
-
-Priority: Medium
-
-Scope:
-
-- Add machine-readable scan diff output.
-- Add CSV or Markdown export.
-- Prepare scheduled execution on Synology.
-- Later add alert delivery beyond console exit codes.
-
-Done when:
-
-- A scheduled run can produce history plus a usable summary of changes.
-- Scheduled runs can surface actionable findings cleanly to automation.
-
-## Release Plan
-
-### v0.2
+### Near Term
 
 Focus:
 
-- CLI overrides
-- storage improvements
-- scan history
-- basic diff
+- cleanup and internal structure
+- extend alert delivery beyond the initial webhook path
+- history model decision
+- `network-health-check` capability expansion within safe bounds
 
-Candidate tasks:
-
-- add `--iface`
-- add `--cidr`
-- add `last_seen`
-- add `scan_runs`
-- print scan diff summary
-
-### v0.3
+### Later
 
 Focus:
 
-- hostname resolution
-- report export
-- code cleanup around scanning flow
-
-### v0.4
-
-Focus:
-
-- improved service detection
-- TLS inspection
-- better reporting of open port changes
-
-### v0.5
-
-Focus:
-
-- scheduled execution
-- notifications
-- richer inventory features
+- notification integrations
+- richer inventory semantics
+- possible extraction of `network-health-check` into a more standalone tool if it keeps growing
 
 ## Immediate Next Tasks
 
-1. Decide whether the next report target should be Markdown export or diff-first CSV/JSON output.
-2. Continue reducing responsibility inside `port_scan.py` now that probing and reporting live in dedicated modules.
-3. Decide whether long-term history should move beyond snapshot tables into richer observation/event modeling.
-4. Design the first notification/delivery path for alerts, such as Telegram, email, or webhook integration.
-5. Expand `network-health-check` with a macOS-first Wi-Fi environment section, including visible SSIDs/BSSIDs, signal, channel, and security details when available.
-6. Keep a separate future TODO for a discovery-oriented network inspection mode, so it does not get mixed into the safe `network-health-check` path for untrusted networks.
-7. Add a separate future macOS-native helper path for fuller Wi-Fi discovery if CLI `CoreWLAN` remains restricted by privacy or API limits.
-8. Add Wi-Fi stability diagnostics for mesh-style issues, including repeated gateway latency, packet loss, BSSID changes, and signal drift over a short observation window.
-9. Completed: `scan-health` now raises an explicit active-path alert when an active Wi-Fi interface exists but the default route currently uses a different interface, so dual-connected macOS runs no longer look silently healthy.
+1. Decide whether `network_scan` should stay on snapshot tables or move toward observation/event modeling.
+2. Continue selective cleanup in `network_health.py`, especially around macOS Wi-Fi collectors and trust-check composition.
+3. Expand `network-health-check` beyond the current gateway-local exposure signal with more safe trust checks that do not require broad active scanning.
+4. Decide whether the next alert channel should be Telegram or email on top of the current webhook path.
+5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
 ## Progress Snapshot
 
@@ -248,12 +162,15 @@ Completed:
 - Snapshot Markdown export is now available for ARP, port scan, and network health reports.
 - Alert-only console mode is now available for both scanners.
 - Scheduled-friendly exit codes are now available in alert-only mode.
+- Webhook alert delivery is now available for ARP, port scan, and network health checks when actionable findings exist.
 - Port scan alerting now treats hostname changes and TLS changes as first-class findings where applicable.
 - Port scan reporting and export logic have been split out into a dedicated `port_reporting.py` module.
 - Initial `network-health-check` support now exists for gateway, DNS, captive portal, and HTTPS/TLS sanity checks on untrusted networks.
 - The next `network-health-check` expansion should prioritize macOS Wi-Fi visibility first, with broader cross-platform discovery kept as a separate track.
 - Mesh-oriented Wi-Fi stability diagnostics are now an explicit follow-up track for `network-health-check`.
 - `network-health-check` now raises an explicit `active_path` alert for dual-connected macOS scenarios where Ethernet is active while Wi-Fi is also connected.
+- `network-health-check` now includes a gateway-local exposure check to show whether the current gateway exposes DNS and web/admin surfaces directly to the client.
+- `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
