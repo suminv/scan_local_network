@@ -2,7 +2,14 @@ import json
 
 from colorama import Fore, Style
 
-from reporting import build_report_payload, print_change_report, save_csv_report, save_json_report
+from reporting import (
+    build_report_payload,
+    print_change_report,
+    render_markdown_table,
+    save_csv_report,
+    save_json_report,
+    save_markdown_report,
+)
 
 DEFAULT_OUTPUT_FORMAT = "grouped"
 
@@ -135,7 +142,112 @@ def build_port_csv_rows(results):
     return rows
 
 
-def save_port_scan_results(results, diff_summary, json_output_file, csv_output_file=None):
+def build_port_markdown_report(results, diff_summary):
+    """Build a Markdown report for port scan output."""
+    lines = [
+        "# Port Scan Report",
+        "",
+        f"Devices scanned: **{len(results)}**",
+        f"Open port observations: **{count_open_ports(results)}**",
+        "",
+    ]
+
+    if results:
+        snapshot_rows = []
+        for device in results:
+            for port_info in device.get("open_ports", []):
+                snapshot_rows.append(
+                    [
+                        device["ip"],
+                        device.get("hostname", "-") or "-",
+                        device["mac"],
+                        device.get("vendor", "Unknown"),
+                        port_info["port"],
+                        port_info.get("service", "Unknown"),
+                        format_tls_metadata(port_info.get("tls")),
+                    ]
+                )
+        if snapshot_rows:
+            lines.extend(
+                [
+                    "## Open Ports",
+                    "",
+                    render_markdown_table(
+                        ["IP", "Hostname", "MAC", "Vendor", "Port", "Service", "TLS"],
+                        snapshot_rows,
+                    ),
+                    "",
+                ]
+            )
+
+    lines.extend(["## Port Changes Since Last Scan", ""])
+    if diff_summary is None:
+        lines.extend(["No previous port scan snapshot available.", ""])
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"- New ports: `{len(diff_summary['new_ports'])}`",
+            f"- Closed ports: `{len(diff_summary['closed_ports'])}`",
+            f"- Service changes: `{len(diff_summary['service_changes'])}`",
+            f"- TLS changes: `{len(diff_summary.get('tls_changes', []))}`",
+            "",
+        ]
+    )
+
+    section_specs = [
+        (
+            "New open ports",
+            diff_summary["new_ports"],
+            ["Host", "Port", "Service"],
+            lambda row: [format_port_diff_host(row), f"{row['port']}/tcp", row.get("service", "Unknown")],
+        ),
+        (
+            "Closed ports",
+            diff_summary["closed_ports"],
+            ["Host", "Port", "Service"],
+            lambda row: [format_port_diff_host(row), f"{row['port']}/tcp", row.get("service", "Unknown")],
+        ),
+        (
+            "Service changes",
+            diff_summary["service_changes"],
+            ["Host", "Port", "Previous", "Current"],
+            lambda row: [format_port_diff_host(row), f"{row['port']}/tcp", row["old_service"], row["new_service"]],
+        ),
+        (
+            "TLS metadata changes",
+            diff_summary.get("tls_changes", []),
+            ["Host", "Port", "Previous TLS", "Current TLS"],
+            lambda row: [
+                format_port_diff_host(row),
+                f"{row['port']}/tcp",
+                format_tls_metadata(row.get("old_tls")),
+                format_tls_metadata(row.get("new_tls")),
+            ],
+        ),
+    ]
+    for title, rows, headers, row_builder in section_specs:
+        if not rows:
+            continue
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                render_markdown_table(headers, [row_builder(row) for row in rows]),
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def save_port_scan_results(
+    results,
+    diff_summary,
+    json_output_file,
+    csv_output_file=None,
+    markdown_output_file=None,
+):
     """Save the port scan snapshot and diff summary to JSON/CSV."""
     payload = build_report_payload("devices", results, "port_diff_summary", diff_summary)
     save_json_report(json_output_file, payload, label="Port scan results")
@@ -145,6 +257,12 @@ def save_port_scan_results(results, diff_summary, json_output_file, csv_output_f
             ["ip", "hostname", "mac", "vendor", "port", "service", "tls_json"],
             build_port_csv_rows(results),
             label="Port scan CSV report",
+        )
+    if markdown_output_file:
+        save_markdown_report(
+            markdown_output_file,
+            build_port_markdown_report(results, diff_summary),
+            label="Port scan Markdown report",
         )
 
 

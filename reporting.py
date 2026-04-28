@@ -31,6 +31,27 @@ def save_csv_report(file_path, headers, rows, label="Results"):
     print(f"{label} saved to {file_path}")
 
 
+def render_markdown_table(headers, rows):
+    """Render a simple GitHub-flavored Markdown table."""
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in rows:
+        normalized = [str(cell).replace("\n", " ").strip() for cell in row]
+        lines.append("| " + " | ".join(normalized) + " |")
+    return "\n".join(lines)
+
+
+def save_markdown_report(file_path, content, label="Results"):
+    """Persist Markdown content and print where it was written."""
+    directory = os.path.dirname(os.path.abspath(file_path))
+    os.makedirs(directory, exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as handle:
+        handle.write(content)
+    print(f"{label} saved to {file_path}")
+
+
 def print_change_report(
     *,
     title,

@@ -44,6 +44,7 @@ DEFAULT_HTTPS_PROBES = [
 ]
 MACOS_AIRPORT_SCAN_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 AUXILIARY_WIFI_INTERFACES = {"awdl0", "llw0", "p2p0"}
+ACTIVE_WIFI_STATUSES = {"spairport_status_active", "connected", "active"}
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -614,6 +615,26 @@ def get_primary_wifi_interface_name(inventory, current_details):
     return None
 
 
+def get_active_wifi_interface_name(inventory, current_details):
+    current_interfaces = current_details.get("interfaces", {})
+    for interface_name, details in current_interfaces.items():
+        if interface_name in AUXILIARY_WIFI_INTERFACES:
+            continue
+        if not details:
+            continue
+        if details.get("ssid") or details.get("bssid"):
+            return interface_name
+
+    for interface in inventory.get("interfaces", []):
+        name = interface.get("name")
+        status = interface.get("status")
+        if not name or name in AUXILIARY_WIFI_INTERFACES:
+            continue
+        if status in ACTIVE_WIFI_STATUSES:
+            return name
+    return None
+
+
 def build_current_wifi_snapshot(inventory, current_details):
     interface_name = get_primary_wifi_interface_name(inventory, current_details)
     interface_details = current_details.get("interfaces", {}).get(interface_name, {})
@@ -626,6 +647,70 @@ def build_current_wifi_snapshot(inventory, current_details):
         "rssi": interface_details.get("agrctlrssi") or interface_details.get("rssi"),
         "channel": interface_details.get("channel"),
         "tx_rate": interface_details.get("last_tx_rate") or interface_details.get("lasttxrate"),
+    }
+
+
+def build_active_path_check(wifi_environment=None):
+    gateway_ip, default_interface = get_default_gateway()
+    if not is_macos():
+        return {
+            "name": "active_path",
+            "status": "ok",
+            "summary": f"Default route uses {default_interface}",
+            "details": {
+                "gateway_ip": gateway_ip,
+                "default_interface": default_interface,
+                "wifi_interface": None,
+                "wifi_active": False,
+            },
+        }
+
+    if wifi_environment is None:
+        wifi_environment = collect_wifi_environment()
+
+    inventory = (wifi_environment or {}).get("inventory", {})
+    current = (wifi_environment or {}).get("current", {})
+    active_wifi_interface = get_active_wifi_interface_name(inventory, current)
+
+    if active_wifi_interface and active_wifi_interface != default_interface:
+        return {
+            "name": "active_path",
+            "status": "alert",
+            "summary": (
+                f"Active Wi-Fi interface {active_wifi_interface} is present, but the default route "
+                f"currently uses {default_interface}"
+            ),
+            "details": {
+                "gateway_ip": gateway_ip,
+                "default_interface": default_interface,
+                "wifi_interface": active_wifi_interface,
+                "wifi_active": True,
+            },
+        }
+
+    if active_wifi_interface:
+        return {
+            "name": "active_path",
+            "status": "ok",
+            "summary": f"Default route uses active Wi-Fi interface {active_wifi_interface}",
+            "details": {
+                "gateway_ip": gateway_ip,
+                "default_interface": default_interface,
+                "wifi_interface": active_wifi_interface,
+                "wifi_active": True,
+            },
+        }
+
+    return {
+        "name": "active_path",
+        "status": "ok",
+        "summary": f"No active Wi-Fi interface detected; default route uses {default_interface}",
+        "details": {
+            "gateway_ip": gateway_ip,
+            "default_interface": default_interface,
+            "wifi_interface": None,
+            "wifi_active": False,
+        },
     }
 
 
@@ -1132,7 +1217,9 @@ def run_network_health_checks(
     wifi_stability_progress_callback=None,
 ):
     checks = [resolve_gateway_identity(), resolve_gateway_fingerprint(), build_dns_environment_check()]
-    checks.append(build_wifi_environment_check())
+    wifi_environment_check = build_wifi_environment_check()
+    checks.append(wifi_environment_check)
+    checks.append(build_active_path_check(wifi_environment_check.get("details")))
     checks.extend(run_dns_consistency_checks(dns_domains))
     checks.extend(run_captive_portal_checks(timeout=timeout))
     checks.extend(run_https_tls_checks(timeout=timeout))

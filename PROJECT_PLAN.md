@@ -215,6 +215,7 @@ Focus:
 6. Keep a separate future TODO for a discovery-oriented network inspection mode, so it does not get mixed into the safe `network-health-check` path for untrusted networks.
 7. Add a separate future macOS-native helper path for fuller Wi-Fi discovery if CLI `CoreWLAN` remains restricted by privacy or API limits.
 8. Add Wi-Fi stability diagnostics for mesh-style issues, including repeated gateway latency, packet loss, BSSID changes, and signal drift over a short observation window.
+9. Completed: `scan-health` now raises an explicit active-path alert when an active Wi-Fi interface exists but the default route currently uses a different interface, so dual-connected macOS runs no longer look silently healthy.
 
 ## Progress Snapshot
 
@@ -244,6 +245,7 @@ Completed:
 - ARP diff now reports hostname changes when hostname enrichment is enabled.
 - TLS metadata is now captured for `443/tcp`, persisted in scan history, and reported in port diffs.
 - Snapshot CSV export is now available for both ARP and port scan runs.
+- Snapshot Markdown export is now available for ARP, port scan, and network health reports.
 - Alert-only console mode is now available for both scanners.
 - Scheduled-friendly exit codes are now available in alert-only mode.
 - Port scan alerting now treats hostname changes and TLS changes as first-class findings where applicable.
@@ -251,6 +253,7 @@ Completed:
 - Initial `network-health-check` support now exists for gateway, DNS, captive portal, and HTTPS/TLS sanity checks on untrusted networks.
 - The next `network-health-check` expansion should prioritize macOS Wi-Fi visibility first, with broader cross-platform discovery kept as a separate track.
 - Mesh-oriented Wi-Fi stability diagnostics are now an explicit follow-up track for `network-health-check`.
+- `network-health-check` now raises an explicit `active_path` alert for dual-connected macOS scenarios where Ethernet is active while Wi-Fi is also connected.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

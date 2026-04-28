@@ -612,6 +612,7 @@ class ArpScannerTests(unittest.TestCase):
             db_path = os.path.join(tmp_dir, "arp_scan.db")
             json_path = os.path.join(tmp_dir, "reports", "arp_scan_result.json")
             csv_path = os.path.join(tmp_dir, "reports", "arp_scan_result.csv")
+            markdown_path = os.path.join(tmp_dir, "reports", "arp_scan_result.md")
 
             with mock.patch.object(arp_scanner, "DB_FILE", db_path), mock.patch.object(
                 arp_scanner, "JSON_OUTPUT_FILE", json_path
@@ -636,6 +637,7 @@ class ArpScannerTests(unittest.TestCase):
                         "hostname_changes": [],
                     },
                     csv_output_file=csv_path,
+                    markdown_output_file=markdown_path,
                 )
                 conn.close()
 
@@ -643,6 +645,8 @@ class ArpScannerTests(unittest.TestCase):
                 payload = json.load(handle)
             with open(csv_path, "r", encoding="utf-8") as handle:
                 csv_contents = handle.read()
+            with open(markdown_path, "r", encoding="utf-8") as handle:
+                markdown_contents = handle.read()
 
             self.assertEqual(payload["devices"][0]["ip"], "192.168.2.10")
             self.assertEqual(payload["devices"][0]["hostname"], "nas.local")
@@ -650,6 +654,9 @@ class ArpScannerTests(unittest.TestCase):
             self.assertEqual(payload["arp_diff_summary"]["returned_devices"], [])
             self.assertIn("ip,hostname,mac,vendor,first_seen,last_seen", csv_contents)
             self.assertIn("192.168.2.10,nas.local,aa:bb:cc:dd:ee:ff,Vendor A", csv_contents)
+            self.assertIn("# ARP Scan Report", markdown_contents)
+            self.assertIn("## Devices", markdown_contents)
+            self.assertIn("| IP | Hostname | MAC | Vendor |", markdown_contents)
 
     def test_print_diff_summary_renders_hostname_changes(self):
         buffer = StringIO()

@@ -106,6 +106,12 @@ Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`
 ./scan-arp --csv-out data/reports/arp_scan_result.csv
 ```
 
+**To also export the ARP snapshot and diff as Markdown:**
+
+```bash
+./scan-arp --md-out data/reports/arp_scan_result.md
+```
+
 **To enrich ARP results with reverse-DNS hostnames:**
 
 ```bash
@@ -136,6 +142,7 @@ sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --d
 - device snapshots per run in `scan_run_devices`
 - full JSON export at the configured `--json-out` path with `devices` and `arp_diff_summary`
 - optional CSV export at the configured `--csv-out` path
+- optional Markdown export at the configured `--md-out` path
 
 **What the ARP diff summary currently reports:**
 
@@ -209,6 +216,12 @@ sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24
 
 ```bash
 ./scan-ports --csv-out data/reports/port_scan_result.csv
+```
+
+**To also export the port snapshot and diff as Markdown:**
+
+```bash
+./scan-ports --md-out data/reports/port_scan_result.md
 ```
 
 **To scan a specific IP address, use the `-t` or `--target` flag:**
@@ -295,6 +308,7 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 - open-port snapshots in `scan_run_ports`
 - full JSON export at the configured `--json-out` path with `devices` and `port_diff_summary`
 - optional CSV export at the configured `--csv-out` path
+- optional Markdown export at the configured `--md-out` path
 
 **What the port diff summary currently reports:**
 
@@ -310,6 +324,7 @@ It currently checks:
 
 - default gateway identity
 - default gateway MAC/vendor fingerprint when available from the local ARP cache
+- whether an active Wi-Fi interface is present while the default route is using a different interface
 - macOS Wi-Fi interface inventory and best-effort nearby Wi-Fi visibility
 - DNS server inventory for the current environment
 - DNS resolution sanity for public domains
@@ -332,6 +347,8 @@ The Wi-Fi section now also raises risk signals for:
 - weak legacy security such as WEP
 - duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
 - very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
+
+On macOS, the report now also raises an alert when an active Wi-Fi interface is present but the system default route is currently using another interface such as Ethernet. This is meant to catch dual-connected situations where a health check might otherwise look healthy because traffic is leaving through the wired path instead of the Wi-Fi path you intended to assess.
 
 **To print only actionable health alerts:**
 
@@ -361,7 +378,7 @@ This adds a short observation window with repeated gateway latency checks and cu
 With `--alerts-only`, the process exits with:
 
 - `0` when no actionable health alerts are detected
-- `2` when suspicious DNS, captive portal, gateway, or TLS findings are detected
+- `2` when suspicious gateway path, DNS, captive portal, Wi-Fi, or TLS findings are detected
 
 The standard report now also includes a top-level trust assessment:
 
@@ -381,9 +398,16 @@ The standard report now also includes a top-level trust assessment:
 ./scan-health --json-out data/reports/network_health_check_result.json
 ```
 
+**To also export the health report as Markdown:**
+
+```bash
+./scan-health --md-out data/reports/network_health_check_result.md
+```
+
 **What gets stored after each health run:**
 
 - full JSON export at the configured `--json-out` path with `scan_context`, `health_checks`, and `health_summary`
+- optional Markdown export at the configured `--md-out` path
 
 ## ⚙️ Configuration
 
@@ -391,11 +415,14 @@ The standard report now also includes a top-level trust assessment:
 -   **`JSON_OUTPUT_FILE`**: `"arp_scan_result.json"` - The default JSON report output path.
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
 -   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
+-   **`arp_scanner.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`arp_scanner.py --alerts-only`**: Alert-only console output with exit code `2` when actionable device-level changes are detected.
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
+-   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
 -   **`network_health_check.py --alerts-only`**: Alert-only console output with exit code `2` when actionable health findings are detected.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
+-   **`port_scan.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
 -   **`port_scan.py --output`**: Console output mode. One of `"grouped"`, `"table"`, or `"focus"`.
 

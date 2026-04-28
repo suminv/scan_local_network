@@ -15,6 +15,14 @@ import service_detection
 
 
 class PortScanTests(unittest.TestCase):
+    def test_build_parser_supports_markdown_and_output_flags(self):
+        parser = port_scan.build_parser()
+
+        args = parser.parse_args(["--md-out", "report.md", "--output", "focus"])
+
+        self.assertEqual(args.md_out, "report.md")
+        self.assertEqual(args.output, "focus")
+
     def test_parse_ports_returns_defaults_when_empty(self):
         self.assertEqual(
             port_scan.parse_ports(None),
@@ -659,10 +667,49 @@ class PortScanTests(unittest.TestCase):
 
         self.assertEqual(devices[0]["hostname"], "nas.local")
 
+    def test_resolve_report_output_paths_uses_defaults_and_optional_overrides(self):
+        args = SimpleNamespace(
+            json_out=None,
+            csv_out="report.csv",
+            md_out="report.md",
+        )
+
+        paths = port_scan.resolve_report_output_paths(args)
+
+        self.assertEqual(paths["json"], port_scan.JSON_OUTPUT_FILE)
+        self.assertEqual(paths["csv"], "report.csv")
+        self.assertEqual(paths["markdown"], "report.md")
+
+    def test_render_port_scan_outcome_returns_alert_exit_code_when_actionable(self):
+        args = SimpleNamespace(alerts_only=True, output="grouped")
+        results = [{"ip": "192.168.2.10", "open_ports": []}]
+        diff_summary = {"new_ports": [{"ip": "192.168.2.10", "port": 22}]}
+
+        with mock.patch("port_scan.print_port_alert_summary") as print_alert_summary:
+            with mock.patch("port_scan.has_port_alerts", return_value=True):
+                exit_code = port_scan.render_port_scan_outcome(args, results, diff_summary)
+
+        print_alert_summary.assert_called_once_with(results, diff_summary)
+        self.assertEqual(exit_code, 2)
+
+    def test_render_empty_scan_outcome_uses_full_output_when_not_alerts_only(self):
+        args = SimpleNamespace(alerts_only=False)
+        diff_summary = {"new_ports": [], "closed_ports": [], "service_changes": [], "tls_changes": []}
+
+        with mock.patch("port_scan.print_port_diff_summary") as print_port_diff_summary:
+            buffer = StringIO()
+            with redirect_stdout(buffer):
+                exit_code = port_scan.render_empty_scan_outcome(args, diff_summary)
+
+        print_port_diff_summary.assert_called_once_with(diff_summary)
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No devices found on the network.", buffer.getvalue())
+
     def test_save_port_scan_results_writes_snapshot_and_diff(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             json_path = os.path.join(tmp_dir, "reports", "port_scan_result.json")
             csv_path = os.path.join(tmp_dir, "reports", "port_scan_result.csv")
+            markdown_path = os.path.join(tmp_dir, "reports", "port_scan_result.md")
 
             port_scan.save_port_scan_results(
                 results=[
@@ -695,12 +742,15 @@ class PortScanTests(unittest.TestCase):
                 },
                 json_output_file=json_path,
                 csv_output_file=csv_path,
+                markdown_output_file=markdown_path,
             )
 
             with open(json_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
             with open(csv_path, "r", encoding="utf-8") as handle:
                 csv_contents = handle.read()
+            with open(markdown_path, "r", encoding="utf-8") as handle:
+                markdown_contents = handle.read()
 
             self.assertEqual(payload["devices"][0]["ip"], "192.168.2.10")
             self.assertEqual(payload["port_diff_summary"]["new_ports"][0]["port"], 22)
@@ -710,6 +760,9 @@ class PortScanTests(unittest.TestCase):
             )
             self.assertIn("ip,hostname,mac,vendor,port,service,tls_json", csv_contents)
             self.assertIn("192.168.2.10,nas.local,aa:aa:aa:aa:aa:aa,Vendor A,22,SSH", csv_contents)
+            self.assertIn("# Port Scan Report", markdown_contents)
+            self.assertIn("## Open Ports", markdown_contents)
+            self.assertIn("| IP | Hostname | MAC | Vendor | Port | Service | TLS |", markdown_contents)
 
 
 if __name__ == "__main__":

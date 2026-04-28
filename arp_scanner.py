@@ -14,11 +14,19 @@ from tabulate import tabulate
 
 from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
-from reporting import build_report_payload, print_change_report, save_csv_report, save_json_report
+from reporting import (
+    build_report_payload,
+    print_change_report,
+    render_markdown_table,
+    save_csv_report,
+    save_json_report,
+    save_markdown_report,
+)
 
 DB_FILE = "arp_scan_v1.db"
 JSON_OUTPUT_FILE = "arp_scan_result.json"
 CSV_OUTPUT_FILE = None
+MARKDOWN_OUTPUT_FILE = None
 SCAN_TYPE_ARP = "arp"
 SCAN_TYPE_PORT = "port"
 VENDOR_DB_CACHE_DAYS = 7
@@ -668,7 +676,132 @@ def build_arp_csv_rows(devices):
     ]
 
 
-def save_and_report_results(conn, json_output, new_devices, diff_summary, csv_output_file=None):
+def build_arp_markdown_report(devices, diff_summary):
+    """Build a Markdown report for ARP scan output."""
+    lines = [
+        "# ARP Scan Report",
+        "",
+        f"Devices found: **{len(devices)}**",
+        "",
+    ]
+
+    if devices:
+        lines.extend(
+            [
+                "## Devices",
+                "",
+                render_markdown_table(
+                    ["IP", "Hostname", "MAC", "Vendor"],
+                    [
+                        [
+                            device["ip"],
+                            device.get("hostname", "-") or "-",
+                            device["mac"],
+                            device.get("vendor", "Unknown"),
+                        ]
+                        for device in devices
+                    ],
+                ),
+                "",
+            ]
+        )
+
+    lines.extend(["## Changes Since Last Scan", ""])
+    if diff_summary is None:
+        lines.extend(["No previous scan snapshot available.", ""])
+        return "\n".join(lines)
+
+    lines.extend(
+        [
+            f"- New devices: `{len(diff_summary['new_devices'])}`",
+            f"- Returned devices: `{len(diff_summary['returned_devices'])}`",
+            f"- Missing devices: `{len(diff_summary['missing_devices'])}`",
+            f"- IP changes: `{len(diff_summary['ip_changes'])}`",
+            f"- Hostname changes: `{len(diff_summary.get('hostname_changes', []))}`",
+            "",
+        ]
+    )
+
+    section_specs = [
+        (
+            "New devices",
+            diff_summary["new_devices"],
+            ["IP", "Hostname", "MAC", "Vendor"],
+            lambda device: [
+                device["ip"],
+                device.get("hostname", "-") or "-",
+                device["mac"],
+                device.get("vendor", "Unknown"),
+            ],
+        ),
+        (
+            "Returned devices",
+            diff_summary["returned_devices"],
+            ["IP", "Hostname", "MAC", "Vendor"],
+            lambda device: [
+                device["ip"],
+                device.get("hostname", "-") or "-",
+                device["mac"],
+                device.get("vendor", "Unknown"),
+            ],
+        ),
+        (
+            "Missing devices",
+            diff_summary["missing_devices"],
+            ["Last IP", "Hostname", "MAC", "Vendor"],
+            lambda device: [
+                device["ip"],
+                device.get("hostname", "-") or "-",
+                device["mac"],
+                device.get("vendor", "Unknown"),
+            ],
+        ),
+        (
+            "IP changes",
+            diff_summary["ip_changes"],
+            ["Previous IP", "Current IP", "MAC", "Vendor"],
+            lambda device: [
+                device["old_ip"],
+                device["new_ip"],
+                device["mac"],
+                device.get("vendor", "Unknown"),
+            ],
+        ),
+        (
+            "Hostname changes",
+            diff_summary.get("hostname_changes", []),
+            ["IP", "MAC", "Old Hostname", "New Hostname"],
+            lambda device: [
+                device["ip"],
+                device["mac"],
+                device.get("old_hostname") or "-",
+                device.get("new_hostname") or "-",
+            ],
+        ),
+    ]
+    for title, rows, headers, row_builder in section_specs:
+        if not rows:
+            continue
+        lines.extend(
+            [
+                f"### {title}",
+                "",
+                render_markdown_table(headers, [row_builder(row) for row in rows]),
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+def save_and_report_results(
+    conn,
+    json_output,
+    new_devices,
+    diff_summary,
+    csv_output_file=None,
+    markdown_output_file=None,
+):
     """Save the ARP snapshot, diff summary, and any newly discovered devices."""
     payload = build_report_payload("devices", json_output, "arp_diff_summary", diff_summary)
     save_json_report(JSON_OUTPUT_FILE, payload, label="Results")
@@ -678,6 +811,12 @@ def save_and_report_results(conn, json_output, new_devices, diff_summary, csv_ou
             ["ip", "hostname", "mac", "vendor", "first_seen", "last_seen"],
             build_arp_csv_rows(json_output),
             label="ARP CSV report",
+        )
+    if markdown_output_file:
+        save_markdown_report(
+            markdown_output_file,
+            build_arp_markdown_report(json_output, diff_summary),
+            label="ARP Markdown report",
         )
     if new_devices:
         save_new_devices(conn, new_devices)
@@ -955,6 +1094,11 @@ def parse_args():
         help="CSV report output path. Disabled unless explicitly set.",
     )
     parser.add_argument(
+        "--md-out",
+        type=str,
+        help="Markdown report output path. Disabled unless explicitly set.",
+    )
+    parser.add_argument(
         "--resolve-hostnames",
         action="store_true",
         help="Resolve reverse-DNS hostnames for discovered devices.",
@@ -968,7 +1112,7 @@ def parse_args():
 
 def main():
     """Main function to run the ARP scanner."""
-    global DB_FILE, JSON_OUTPUT_FILE, CSV_OUTPUT_FILE
+    global DB_FILE, JSON_OUTPUT_FILE, CSV_OUTPUT_FILE, MARKDOWN_OUTPUT_FILE
     exit_code = 0
     args = parse_args()
     if os.geteuid() != 0:
@@ -981,6 +1125,8 @@ def main():
         JSON_OUTPUT_FILE = args.json_out
     if args.csv_out:
         CSV_OUTPUT_FILE = args.csv_out
+    if args.md_out:
+        MARKDOWN_OUTPUT_FILE = args.md_out
     print("ARP Network Scanner starting...")
     mac_lookup = update_vendor_database()
     try:
@@ -1006,6 +1152,7 @@ def main():
                 new_devices,
                 diff_summary,
                 csv_output_file=CSV_OUTPUT_FILE,
+                markdown_output_file=MARKDOWN_OUTPUT_FILE,
             )
             if args.alerts_only:
                 print_alert_summary(diff_summary)

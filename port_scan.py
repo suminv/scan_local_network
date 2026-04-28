@@ -65,6 +65,7 @@ MIN_PORT = 1
 MAX_PORT = 65535
 JSON_OUTPUT_FILE = "port_scan_result.json"
 CSV_OUTPUT_FILE = None
+MARKDOWN_OUTPUT_FILE = None
 OUTPUT_FORMATS = ["grouped", "table", "focus"]
 
 
@@ -266,11 +267,8 @@ def run_port_scan(devices_to_scan, ports_to_scan):
     return results
 
 
-def main():
-    """Main function to run the port scanner."""
-    global CSV_OUTPUT_FILE
-    exit_code = 0
-    init(autoreset=True)
+def build_parser():
+    """Build the CLI parser for the port scanner."""
     parser = argparse.ArgumentParser(
         description="Network Port Scanner with Service Detection"
     )
@@ -304,6 +302,11 @@ def main():
         help="CSV report output path. Disabled unless explicitly set.",
     )
     parser.add_argument(
+        "--md-out",
+        type=str,
+        help="Markdown report output path. Disabled unless explicitly set.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default=DEFAULT_OUTPUT_FORMAT,
@@ -320,7 +323,51 @@ def main():
         action="store_true",
         help="Print only actionable alerts instead of the full port scan report.",
     )
-    args = parser.parse_args()
+    return parser
+
+
+def parse_args():
+    """Parse CLI arguments for the port scanner."""
+    return build_parser().parse_args()
+
+
+def resolve_report_output_paths(args):
+    """Resolve JSON/CSV/Markdown output paths from CLI arguments."""
+    return {
+        "json": args.json_out or JSON_OUTPUT_FILE,
+        "csv": args.csv_out,
+        "markdown": args.md_out,
+    }
+
+
+def render_port_scan_outcome(args, results, diff_summary):
+    """Render scan output and return the appropriate process exit code."""
+    if args.alerts_only:
+        print_port_alert_summary(results, diff_summary)
+        return 2 if has_port_alerts(results, diff_summary) else 0
+
+    print_port_scan_results(results, output_format=args.output)
+    print_port_diff_summary(diff_summary)
+    return 0
+
+
+def render_empty_scan_outcome(args, diff_summary):
+    """Render the empty-discovery case and return the appropriate process exit code."""
+    if args.alerts_only:
+        print_port_alert_summary([], diff_summary)
+        return 2 if has_port_alerts([], diff_summary) else 0
+
+    print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
+    print_port_diff_summary(diff_summary)
+    return 0
+
+
+def main():
+    """Main function to run the port scanner."""
+    global CSV_OUTPUT_FILE, MARKDOWN_OUTPUT_FILE
+    exit_code = 0
+    init(autoreset=True)
+    args = parse_args()
     if os.geteuid() != 0:
         print(
             f"{Fore.RED}Error: This script requires root/administrator privileges.{Style.RESET_ALL}",
@@ -333,8 +380,9 @@ def main():
     except ValueError as e:
         print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
         sys.exit(1)
-    json_output_file = args.json_out or JSON_OUTPUT_FILE
-    CSV_OUTPUT_FILE = args.csv_out
+    output_paths = resolve_report_output_paths(args)
+    CSV_OUTPUT_FILE = output_paths["csv"]
+    MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
     print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
     mac_lookup = update_vendor_database()
     db_conn = init_db()
@@ -354,13 +402,7 @@ def main():
         previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
             diff_summary = build_port_scan_diff(previous_ports, [])
-            if args.alerts_only:
-                print_port_alert_summary([], diff_summary)
-                if has_port_alerts([], diff_summary):
-                    exit_code = 2
-            else:
-                print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
-                print_port_diff_summary(diff_summary)
+            exit_code = render_empty_scan_outcome(args, diff_summary)
             finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
             print(f"\nScan run recorded with id: {scan_run_id}")
             sys.exit(exit_code)
@@ -369,18 +411,13 @@ def main():
         results = run_port_scan(devices_to_scan, ports_to_scan)
         save_scan_run_ports(db_conn, scan_run_id, results)
         diff_summary = build_port_scan_diff(previous_ports, flatten_port_results(results))
-        if args.alerts_only:
-            print_port_alert_summary(results, diff_summary)
-            if has_port_alerts(results, diff_summary):
-                exit_code = 2
-        else:
-            print_port_scan_results(results, output_format=args.output)
-            print_port_diff_summary(diff_summary)
+        exit_code = render_port_scan_outcome(args, results, diff_summary)
         save_port_scan_results(
             results,
             diff_summary,
-            json_output_file,
+            output_paths["json"],
             csv_output_file=CSV_OUTPUT_FILE,
+            markdown_output_file=MARKDOWN_OUTPUT_FILE,
         )
         finalize_scan_run(
             db_conn,

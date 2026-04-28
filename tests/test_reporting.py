@@ -51,6 +51,26 @@ class ReportingTests(unittest.TestCase):
             self.assertIn("ip,hostname", contents)
             self.assertIn("192.168.2.10,nas.local", contents)
 
+    def test_render_markdown_table_formats_gfm_rows(self):
+        table = reporting.render_markdown_table(
+            ["IP", "Hostname"],
+            [["192.168.2.10", "nas.local"]],
+        )
+
+        self.assertIn("| IP | Hostname |", table)
+        self.assertIn("| --- | --- |", table)
+        self.assertIn("| 192.168.2.10 | nas.local |", table)
+
+    def test_save_markdown_report_creates_parent_directory_and_writes_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = os.path.join(tmp_dir, "reports", "result.md")
+            reporting.save_markdown_report(path, "# Title\n", label="Markdown report")
+
+            with open(path, "r", encoding="utf-8") as handle:
+                contents = handle.read()
+
+            self.assertEqual(contents, "# Title\n")
+
     def test_print_change_report_renders_title_summary_and_sections(self):
         buffer = StringIO()
         with redirect_stdout(buffer):

@@ -9,13 +9,14 @@ from network_health import (
     build_health_summary,
     run_network_health_checks,
 )
-from reporting import save_json_report
+from reporting import render_markdown_table, save_json_report, save_markdown_report
 
 
 JSON_OUTPUT_FILE = "network_health_check_result.json"
+MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 CHECK_GROUPS = [
-    ("Network", ["gateway_identity", "gateway_fingerprint"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "active_path"]),
     ("DNS", ["dns_environment", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_", "https_"]),
@@ -23,6 +24,7 @@ CHECK_GROUPS = [
 CHECK_LABELS = {
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
+    "active_path": "Active path",
     "dns_environment": "DNS servers",
     "wifi_environment": "Wi-Fi environment",
     "wifi_stability": "Wi-Fi stability",
@@ -63,6 +65,18 @@ def format_gateway_fingerprint_details(details):
         f"  vendor: {details.get('vendor', 'Unknown')}",
         f"  interface: {details.get('interface')}",
     ]
+
+
+def format_active_path_details(details):
+    lines = [
+        f"  default interface: {details.get('default_interface')}",
+        f"  gateway: {details.get('gateway_ip')}",
+    ]
+    if details.get("wifi_active"):
+        lines.append(f"  active wifi interface: {details.get('wifi_interface')}")
+    else:
+        lines.append("  active wifi interface: none detected")
+    return lines
 
 
 def format_dns_environment_details(details):
@@ -191,6 +205,8 @@ def format_check_details(check):
         return format_gateway_identity_details(details)
     if name == "gateway_fingerprint":
         return format_gateway_fingerprint_details(details)
+    if name == "active_path":
+        return format_active_path_details(details)
     if name == "dns_environment":
         return format_dns_environment_details(details)
     if name == "wifi_environment":
@@ -206,12 +222,7 @@ def format_check_details(check):
 
 def format_check_heading(check):
     status = check["status"].upper()
-    if check["name"] in CHECK_LABELS:
-        label = CHECK_LABELS[check["name"]]
-    elif check["name"].startswith("dns_") and check["name"] != "dns_environment":
-        label = check["name"][4:]
-    else:
-        label = check["name"].replace("_", " ")
+    label = format_check_label(check["name"])
     return f"{format_status_badge(status)} {label}"
 
 
@@ -243,6 +254,18 @@ def group_checks(checks):
     return grouped
 
 
+def format_check_label(check_name):
+    if check_name in CHECK_LABELS:
+        return CHECK_LABELS[check_name]
+    if check_name.startswith("dns_") and check_name != "dns_environment":
+        return check_name[4:]
+    if check_name.startswith("captive_"):
+        return "Captive portal"
+    if check_name.startswith("https_"):
+        return "HTTPS"
+    return check_name.replace("_", " ")
+
+
 def format_top_alert_summary(summary):
     alerts = summary.get("alerts", [])
     if not alerts:
@@ -258,10 +281,8 @@ def format_top_alert_summary(summary):
             labels.append("Captive portal")
         elif name.startswith("https_"):
             labels.append("HTTPS")
-        elif name.startswith("dns_"):
-            labels.append(name[4:])
         else:
-            labels.append(name.replace("_", " "))
+            labels.append(format_check_label(name))
     suffix = " ..." if len(alerts) > 4 else ""
     return f"Risk summary: {len(alerts)} alert(s) in {', '.join(labels)}{suffix}"
 
@@ -329,7 +350,7 @@ def print_focus_health_report(checks, summary):
         check
         for check in checks
         if check["status"] == "alert"
-        or check["name"] in {"gateway_identity", "gateway_fingerprint", "dns_environment", "wifi_environment"}
+        or check["name"] in {"gateway_identity", "gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
     ]
     seen = set()
     for check in key_checks:
@@ -425,12 +446,36 @@ def print_alert_report(summary):
         return
     print(f"Alerts: {len(alerts)}")
     for check in alerts:
-        print(f"\n{format_status_badge('ALERT')} {check['name']}")
+        print(f"\n{format_status_badge('ALERT')} {format_check_label(check['name'])}")
         print(check["summary"])
     print("=============================")
 
 
-def parse_args():
+def build_health_markdown_report(scan_context, checks, summary):
+    """Build a Markdown report for network health checks."""
+    lines = [
+        "# Network Health Report",
+        "",
+        "## Scan Context",
+        "",
+        render_markdown_table(
+            ["Interface", "CIDR", "Alerts", "Total checks"],
+            [[scan_context.get("interface"), scan_context.get("cidr"), summary["alert_checks"], summary["total_checks"]]],
+        ),
+        "",
+        "## Health Checks",
+        "",
+        render_markdown_table(
+            ["Check", "Status", "Summary"],
+            [[format_check_label(check["name"]), check["status"], check["summary"]] for check in checks],
+        ),
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def build_parser():
+    """Build the CLI parser for network health checks."""
     parser = argparse.ArgumentParser(
         description="Safe network health checks for untrusted Wi-Fi and guest networks."
     )
@@ -448,6 +493,11 @@ def parse_args():
         "--json-out",
         type=str,
         help="JSON report output path. Defaults to network_health_check_result.json.",
+    )
+    parser.add_argument(
+        "--md-out",
+        type=str,
+        help="Markdown report output path. Disabled unless explicitly set.",
     )
     parser.add_argument(
         "--dns-domain",
@@ -484,19 +534,35 @@ def parse_args():
         default=0,
         help="Run short Wi-Fi stability diagnostics for the given number of seconds.",
     )
-    return parser.parse_args()
+    return parser
 
 
-def main():
-    init(autoreset=True)
-    args = parse_args()
-    json_output_file = args.json_out or JSON_OUTPUT_FILE
+def parse_args():
+    """Parse CLI arguments for network health checks."""
+    return build_parser().parse_args()
+
+
+def resolve_report_output_paths(args):
+    """Resolve JSON and Markdown output paths from CLI arguments."""
+    return {
+        "json": args.json_out or JSON_OUTPUT_FILE,
+        "markdown": args.md_out,
+    }
+
+
+def normalize_wifi_stability_seconds(raw_value):
+    """Normalize the Wi-Fi stability duration to a safe numeric value."""
+    if isinstance(raw_value, (int, float)):
+        return raw_value
+    return 0
+
+
+def run_health_check_collection(args):
+    """Collect scan context, run health checks, and build summary/payload data."""
     interface, cidr = resolve_scan_target(args.iface, args.cidr)
-    raw_wifi_stability_seconds = getattr(args, "wifi_stability_seconds", 0)
-    wifi_stability_seconds = (
-        raw_wifi_stability_seconds
-        if isinstance(raw_wifi_stability_seconds, (int, float))
-        else 0
+    scan_context = build_scan_context(interface=interface, cidr=cidr)
+    wifi_stability_seconds = normalize_wifi_stability_seconds(
+        getattr(args, "wifi_stability_seconds", 0)
     )
     checks = run_network_health_checks(
         dns_domains=args.dns_domains or DEFAULT_DNS_DOMAINS,
@@ -508,20 +574,43 @@ def main():
     )
     summary = build_health_summary(checks)
     payload = {
-        "scan_context": build_scan_context(interface=interface, cidr=cidr),
+        "scan_context": scan_context,
         "health_checks": checks,
         "health_summary": summary,
     }
-    save_json_report(json_output_file, payload, label="Network health report")
+    return scan_context, checks, summary, payload
+
+
+def render_health_report(args, checks, summary):
+    """Render health report output and return the appropriate exit code."""
     if args.alerts_only:
         print_alert_report(summary)
-    elif args.output == "focus":
+        return 2 if summary["alert_checks"] else 0
+    if args.output == "focus":
         print_focus_health_report(checks, summary)
     else:
         print_health_report(checks, summary)
+    return 0
+
+
+def main():
+    init(autoreset=True)
+    args = parse_args()
+    global MARKDOWN_OUTPUT_FILE
+    output_paths = resolve_report_output_paths(args)
+    MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
+    scan_context, checks, summary, payload = run_health_check_collection(args)
+    save_json_report(output_paths["json"], payload, label="Network health report")
+    if MARKDOWN_OUTPUT_FILE:
+        save_markdown_report(
+            MARKDOWN_OUTPUT_FILE,
+            build_health_markdown_report(scan_context, checks, summary),
+            label="Network health Markdown report",
+        )
+    exit_code = render_health_report(args, checks, summary)
     if args.debug_wifi:
         print_wifi_debug_report(checks)
-    sys.exit(2 if summary["alert_checks"] else 0)
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

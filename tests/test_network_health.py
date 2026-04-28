@@ -14,6 +14,14 @@ import network_health_check
 
 
 class NetworkHealthTests(unittest.TestCase):
+    def test_build_parser_supports_markdown_and_focus_flags(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(["--md-out", "health.md", "--output", "focus"])
+
+        self.assertEqual(args.md_out, "health.md")
+        self.assertEqual(args.output, "focus")
+
     def test_get_corewlan_module_returns_import_error_when_unavailable(self):
         original_import = __import__
 
@@ -228,6 +236,60 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
 
         self.assertEqual(result["name"], "wifi_stability")
         self.assertEqual(progress_calls, [(1, 2, "192.168.2.254"), (2, 2, "192.168.2.254")])
+
+    def test_get_active_wifi_interface_name_prefers_current_wifi_details(self):
+        interface_name = network_health.get_active_wifi_interface_name(
+            {"interfaces": [{"name": "en1", "status": "spairport_status_inactive"}]},
+            {"interfaces": {"en1": {"ssid": "Hotel WiFi", "bssid": "11:22:33:44:55:66"}}},
+        )
+
+        self.assertEqual(interface_name, "en1")
+
+    def test_build_active_path_check_alerts_on_dual_connected_macos_mismatch(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en0")):
+            with mock.patch("network_health.is_macos", return_value=True):
+                result = network_health.build_active_path_check(
+                    {
+                        "inventory": {
+                            "interfaces": [
+                                {"name": "en1", "status": "spairport_status_active"},
+                            ]
+                        },
+                        "current": {
+                            "available": True,
+                            "interfaces": {
+                                "en1": {"ssid": "Hotel WiFi", "bssid": "11:22:33:44:55:66"}
+                            },
+                        },
+                    }
+                )
+
+        self.assertEqual(result["name"], "active_path")
+        self.assertEqual(result["status"], "alert")
+        self.assertIn("default route currently uses en0", result["summary"])
+        self.assertEqual(result["details"]["wifi_interface"], "en1")
+
+    def test_build_active_path_check_marks_active_wifi_route_ok_when_aligned(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en1")):
+            with mock.patch("network_health.is_macos", return_value=True):
+                result = network_health.build_active_path_check(
+                    {
+                        "inventory": {
+                            "interfaces": [
+                                {"name": "en1", "status": "spairport_status_active"},
+                            ]
+                        },
+                        "current": {
+                            "available": True,
+                            "interfaces": {
+                                "en1": {"ssid": "Hotel WiFi", "bssid": "11:22:33:44:55:66"}
+                            },
+                        },
+                    }
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Default route uses active Wi-Fi interface en1", result["summary"])
 
     def test_parse_system_profiler_wifi_json_extracts_interfaces(self):
         parsed = network_health.parse_system_profiler_wifi_json(
@@ -514,6 +576,32 @@ Wi-Fi:
         self.assertIn("risk signal", result["summary"])
         self.assertTrue(result["details"]["analysis"]["risks"])
 
+    def test_run_network_health_checks_includes_active_path_alert(self):
+        with mock.patch("network_health.resolve_gateway_identity", return_value={"name": "gateway_identity", "status": "ok"}):
+            with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
+                with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
+                    with mock.patch(
+                        "network_health.build_wifi_environment_check",
+                        return_value={
+                            "name": "wifi_environment",
+                            "status": "ok",
+                            "details": {
+                                "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
+                                "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+                            },
+                        },
+                    ):
+                        with mock.patch(
+                            "network_health.build_active_path_check",
+                            return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                        ):
+                            with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
+                                with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
+                                    with mock.patch("network_health.run_https_tls_checks", return_value=[]):
+                                        checks = network_health.run_network_health_checks()
+
+        self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
+
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch("network_health.socket.gethostbyaddr", side_effect=OSError):
@@ -573,19 +661,105 @@ Wi-Fi:
 
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
 
+    def test_resolve_report_output_paths_uses_defaults_and_optional_overrides(self):
+        args = mock.Mock(json_out=None, md_out="health.md")
+
+        paths = network_health_check.resolve_report_output_paths(args)
+
+        self.assertEqual(paths["json"], network_health_check.JSON_OUTPUT_FILE)
+        self.assertEqual(paths["markdown"], "health.md")
+
+    def test_normalize_wifi_stability_seconds_rejects_non_numeric_values(self):
+        self.assertEqual(network_health_check.normalize_wifi_stability_seconds("5"), 0)
+        self.assertEqual(network_health_check.normalize_wifi_stability_seconds(12), 12)
+
+    def test_render_health_report_returns_alert_exit_code_in_alerts_only_mode(self):
+        args = mock.Mock(alerts_only=True, output="full")
+        summary = {"alert_checks": 1, "alerts": [{"name": "dns_environment", "summary": "risk"}]}
+
+        with mock.patch("network_health_check.print_alert_report") as print_alert_report:
+            exit_code = network_health_check.render_health_report(args, [], summary)
+
+        print_alert_report.assert_called_once_with(summary)
+        self.assertEqual(exit_code, 2)
+
+    def test_run_health_check_collection_builds_payload_from_context_and_checks(self):
+        args = mock.Mock(
+            iface=None,
+            cidr=None,
+            dns_domains=None,
+            timeout=5,
+            wifi_stability_seconds=0,
+        )
+
+        with mock.patch(
+            "network_health_check.resolve_scan_target",
+            return_value=("en0", "192.168.2.0/24"),
+        ):
+            with mock.patch(
+                "network_health_check.run_network_health_checks",
+                return_value=[{"name": "gateway_identity", "status": "ok", "summary": "ok"}],
+            ):
+                scan_context, checks, summary, payload = network_health_check.run_health_check_collection(args)
+
+        self.assertEqual(scan_context["interface"], "en0")
+        self.assertEqual(checks[0]["name"], "gateway_identity")
+        self.assertEqual(summary["alert_checks"], 0)
+        self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
+
+    def test_print_alert_report_uses_human_labels(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            network_health_check.print_alert_report(
+                {
+                    "alerts": [
+                        {
+                            "name": "active_path",
+                            "summary": "Active Wi-Fi interface en1 is present, but the default route currently uses en0",
+                        },
+                        {
+                            "name": "https_example_https",
+                            "summary": "TLS verification failed for https://example.com",
+                        },
+                    ]
+                }
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Active path", output)
+        self.assertIn("HTTPS", output)
+        self.assertNotIn("https_example_https", output)
+
+    def test_format_top_alert_summary_uses_human_labels_for_active_path(self):
+        summary = network_health_check.format_top_alert_summary(
+            {
+                "alerts": [
+                    {"name": "active_path"},
+                    {"name": "dns_environment"},
+                    {"name": "https_example_https"},
+                ]
+            }
+        )
+
+        self.assertEqual(summary, "Risk summary: 3 alert(s) in Active path, DNS, HTTPS")
+
     def test_main_writes_json_report(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             output_path = os.path.join(tmp_dir, "health.json")
+            markdown_path = os.path.join(tmp_dir, "health.md")
             with mock.patch(
                 "network_health_check.parse_args",
                 return_value=mock.Mock(
                     iface=None,
                     cidr=None,
                     json_out=output_path,
+                    md_out=markdown_path,
                     dns_domains=None,
                     timeout=5,
                     alerts_only=False,
                     output="full",
+                    debug_wifi=False,
+                    wifi_stability_seconds=0,
                 ),
             ):
                 with mock.patch(
@@ -602,8 +776,13 @@ Wi-Fi:
             self.assertEqual(exit_ctx.exception.code, 0)
             with open(output_path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
+            with open(markdown_path, "r", encoding="utf-8") as handle:
+                markdown = handle.read()
             self.assertEqual(payload["scan_context"]["interface"], "en0")
             self.assertEqual(payload["health_summary"]["alert_checks"], 0)
+            self.assertIn("# Network Health Report", markdown)
+            self.assertIn("## Health Checks", markdown)
+            self.assertIn("| Check | Status | Summary |", markdown)
 
     def test_build_trust_assessment_maps_alert_counts(self):
         self.assertEqual(
@@ -759,6 +938,31 @@ Wi-Fi:
         self.assertIn("[!]", output)
         self.assertIn("Gateway", output)
         self.assertIn("[OK]", output)
+
+    def test_print_health_report_renders_active_path_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "active_path",
+                "status": "alert",
+                "summary": "Active Wi-Fi interface en1 is present, but the default route currently uses en0",
+                "details": {
+                    "default_interface": "en0",
+                    "gateway_ip": "192.168.2.254",
+                    "wifi_interface": "en1",
+                    "wifi_active": True,
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "alert_checks": 1, "alerts": checks}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Active path", output)
+        self.assertIn("default interface: en0", output)
+        self.assertIn("active wifi interface: en1", output)
 
     def test_build_wifi_debug_summary_detects_likely_os_restriction(self):
         checks = [
