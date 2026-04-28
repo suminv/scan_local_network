@@ -119,6 +119,33 @@ def resolve_gateway_identity():
     }
 
 
+def extract_html_title(body):
+    """Extract a short HTML title from a response body when available."""
+    if not body:
+        return None
+    match = re.search(r"<title>\s*(.*?)\s*</title>", body, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    title = re.sub(r"\s+", " ", match.group(1)).strip()
+    return title or None
+
+
+def extract_body_hint(body):
+    """Return a compact fingerprint hint derived from a short HTML/body preview."""
+    if not body:
+        return None
+    lowered = body.lower()
+    if "<!doctype html" in lowered:
+        if "serving your web app in a path other than the root" in lowered:
+            return "single-page app shell"
+        return "html document"
+    if "<html" in lowered:
+        return "html response"
+    if body.lstrip().startswith("{"):
+        return "json response"
+    return None
+
+
 def probe_tcp_service(host, port, timeout=2):
     """Return True when a TCP service accepts a connection on the target host/port."""
     try:
@@ -126,6 +153,28 @@ def probe_tcp_service(host, port, timeout=2):
             return True
     except (OSError, socket.timeout):
         return False
+
+
+def inspect_gateway_http_surface(host, port, timeout=2):
+    """Fetch lightweight HTTP/HTTPS metadata for a reachable gateway web surface."""
+    scheme = "https" if port in [443, 8443] else "http"
+    context = ssl._create_unverified_context() if scheme == "https" else None
+    url = f"{scheme}://{host}:{port}/"
+    try:
+        response = fetch_url(url, timeout=timeout, context=context)
+    except (urllib.error.URLError, OSError, ssl.SSLError) as exc:
+        return {"url": url, "error": str(exc)}
+    headers = response.get("headers", {})
+    return {
+        "url": url,
+        "status_code": response.get("status_code"),
+        "server": headers.get("Server"),
+        "location": headers.get("Location"),
+        "content_type": headers.get("Content-Type"),
+        "title": extract_html_title(response.get("body")),
+        "page_hint": extract_body_hint(response.get("body")),
+        "body_preview": response.get("body"),
+    }
 
 
 def build_gateway_exposure_check(timeout=2, probes=None):
@@ -142,16 +191,29 @@ def build_gateway_exposure_check(timeout=2, probes=None):
             "label": probe["label"],
             "risk": probe["risk"],
         }
+        if probe["port"] in [80, 443, 8080, 8443]:
+            service["http_probe"] = inspect_gateway_http_surface(
+                gateway_ip,
+                probe["port"],
+                timeout=timeout,
+            )
         reachable_services.append(service)
         if probe["risk"]:
             risky_services.append(service)
 
     if risky_services:
-        status = "alert"
-        summary = (
-            f"Gateway exposes {len(risky_services)} local web/admin service(s) "
-            f"to the client on {gateway_ip}"
-        )
+        if is_public_ip(gateway_ip):
+            status = "alert"
+            summary = (
+                f"Gateway exposes {len(risky_services)} local web/admin service(s) "
+                f"to the client on {gateway_ip}"
+            )
+        else:
+            status = "notice"
+            summary = (
+                f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
+                f"to the client on {gateway_ip}"
+            )
     elif reachable_services:
         status = "ok"
         summary = (
@@ -1323,10 +1385,13 @@ def run_network_health_checks(
 def build_health_summary(checks):
     total = len(checks)
     alerts = [check for check in checks if check["status"] == "alert"]
+    notices = [check for check in checks if check["status"] == "notice"]
     oks = [check for check in checks if check["status"] == "ok"]
     return {
         "total_checks": total,
         "ok_checks": len(oks),
+        "notice_checks": len(notices),
         "alert_checks": len(alerts),
+        "notices": notices,
         "alerts": alerts,
     }

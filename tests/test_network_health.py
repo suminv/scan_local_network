@@ -83,6 +83,48 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["reachable_services"][0]["port"], 53)
         self.assertEqual(result["details"]["risky_services"], [])
 
+    def test_extract_html_title_returns_clean_title(self):
+        title = network_health.extract_html_title(
+            "<html><head><title>\n Router Admin \n</title></head></html>"
+        )
+
+        self.assertEqual(title, "Router Admin")
+
+    def test_extract_body_hint_detects_spa_shell(self):
+        hint = network_health.extract_body_hint(
+            "<!DOCTYPE html><html><head><!-- If you are serving your web app in a path other than the root --></head></html>"
+        )
+
+        self.assertEqual(hint, "single-page app shell")
+
+    def test_build_gateway_exposure_check_captures_http_probe_details(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 80,
+            ):
+                with mock.patch(
+                    "network_health.inspect_gateway_http_surface",
+                    return_value={
+                        "url": "http://192.168.2.1:80/",
+                        "status_code": 200,
+                        "content_type": "text/html",
+                        "server": "nginx",
+                        "location": None,
+                        "title": "Router Admin",
+                        "page_hint": "single-page app shell",
+                    },
+                ):
+                    result = network_health.build_gateway_exposure_check(timeout=3)
+
+        service = result["details"]["reachable_services"][0]
+        self.assertEqual(service["http_probe"]["status_code"], 200)
+        self.assertEqual(service["http_probe"]["content_type"], "text/html")
+        self.assertEqual(service["http_probe"]["server"], "nginx")
+        self.assertEqual(service["http_probe"]["title"], "Router Admin")
+        self.assertEqual(service["http_probe"]["page_hint"], "single-page app shell")
+        self.assertEqual(result["status"], "notice")
+
     def test_build_gateway_exposure_check_alerts_on_gateway_web_admin_service(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
@@ -91,9 +133,20 @@ class NetworkHealthTests(unittest.TestCase):
             ):
                 result = network_health.build_gateway_exposure_check(timeout=3)
 
-        self.assertEqual(result["status"], "alert")
-        self.assertIn("local web/admin service", result["summary"])
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("Private/local gateway exposes", result["summary"])
         self.assertEqual(result["details"]["risky_services"][0]["port"], 443)
+
+    def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("8.8.8.8", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 443,
+            ):
+                result = network_health.build_gateway_exposure_check(timeout=3)
+
+        self.assertEqual(result["status"], "alert")
+        self.assertIn("Gateway exposes 1 local web/admin service", result["summary"])
 
     def test_parse_scutil_dns_extracts_nameservers(self):
         resolvers = network_health.parse_scutil_dns(
@@ -765,12 +818,14 @@ Wi-Fi:
         summary = network_health.build_health_summary(
             [
                 {"name": "a", "status": "ok"},
+                {"name": "n", "status": "notice"},
                 {"name": "b", "status": "alert"},
             ]
         )
 
-        self.assertEqual(summary["total_checks"], 2)
+        self.assertEqual(summary["total_checks"], 3)
         self.assertEqual(summary["ok_checks"], 1)
+        self.assertEqual(summary["notice_checks"], 1)
         self.assertEqual(summary["alert_checks"], 1)
 
     def test_print_alert_report_reports_empty_state(self):
@@ -909,6 +964,10 @@ Wi-Fi:
             "trusted",
         )
         self.assertEqual(
+            network_health_check.build_trust_assessment({"alert_checks": 0, "notice_checks": 1})["level"],
+            "trusted",
+        )
+        self.assertEqual(
             network_health_check.build_trust_assessment({"alert_checks": 1})["level"],
             "suspicious",
         )
@@ -950,7 +1009,7 @@ Wi-Fi:
                 },
             }
         ]
-        summary = {"total_checks": 2, "ok_checks": 2, "alert_checks": 0, "alerts": []}
+        summary = {"total_checks": 2, "ok_checks": 2, "notice_checks": 0, "alert_checks": 0, "alerts": [], "notices": []}
 
         with redirect_stdout(buffer):
             network_health_check.print_health_report(checks, summary)
@@ -974,12 +1033,27 @@ Wi-Fi:
                 "details": {
                     "gateway_ip": "192.168.2.1",
                     "interface": "en0",
-                    "reachable_services": [{"port": 443, "label": "HTTPS admin/web", "risk": True}],
+                    "reachable_services": [
+                        {
+                            "port": 443,
+                            "label": "HTTPS admin/web",
+                            "risk": True,
+                            "http_probe": {
+                                "url": "https://192.168.2.1:443/",
+                                "status_code": 302,
+                                "content_type": "text/html",
+                                "server": "lighttpd",
+                                "location": "/login",
+                                "title": "Router Login",
+                                "page_hint": "html document",
+                            },
+                        }
+                    ],
                     "risky_services": [{"port": 443, "label": "HTTPS admin/web", "risk": True}],
                 },
             }
         ]
-        summary = {"total_checks": 1, "ok_checks": 0, "alert_checks": 1, "alerts": checks}
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": checks}
 
         with redirect_stdout(buffer):
             network_health_check.print_health_report(checks, summary)
@@ -987,13 +1061,20 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Gateway exposure", output)
         self.assertIn("443/tcp HTTPS admin/web [alert]", output)
+        self.assertIn("url: https://192.168.2.1:443/", output)
+        self.assertIn("content_type: text/html", output)
+        self.assertIn("server: lighttpd", output)
+        self.assertIn("location: /login", output)
+        self.assertIn("title: Router Login", output)
+        self.assertIn("page_hint: html document", output)
+        self.assertIn("Notices: 1", output)
 
     def test_print_health_report_formats_wifi_nearby_networks_compactly(self):
         buffer = StringIO()
         checks = [
             {
                 "name": "wifi_environment",
-                "status": "alert",
+                "status": "notice",
                 "summary": "Wi-Fi environment shows 1 risk signal(s) across 1 visible network(s)",
                 "details": {
                     "inventory": {
@@ -1059,7 +1140,7 @@ Wi-Fi:
             },
             {
                 "name": "wifi_environment",
-                "status": "alert",
+                "status": "notice",
                 "summary": "Wi-Fi environment shows 1 risk signal(s) across 1 visible network(s)",
                 "details": {
                     "inventory": {"interfaces": [{"name": "en1", "status": "connected", "country_code": "NL", "supported_phy_modes": "802.11ac"}]},
@@ -1069,16 +1150,16 @@ Wi-Fi:
                 },
             },
         ]
-        summary = {"total_checks": 2, "ok_checks": 1, "alert_checks": 1, "alerts": [checks[1]]}
+        summary = {"total_checks": 2, "ok_checks": 1, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": [checks[1]]}
 
         with redirect_stdout(buffer):
             network_health_check.print_focus_health_report(checks, summary)
 
         output = buffer.getvalue()
         self.assertIn("=== Network Health Focus ===", output)
-        self.assertIn("Trust assessment: suspicious", output)
+        self.assertIn("Trust assessment: trusted", output)
         self.assertIn("Wi-Fi environment", output)
-        self.assertIn("[!]", output)
+        self.assertIn("[~]", output)
         self.assertIn("Gateway", output)
         self.assertIn("[OK]", output)
 

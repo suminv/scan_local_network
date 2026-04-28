@@ -82,6 +82,23 @@ def format_gateway_exposure_details(details):
     for service in reachable:
         risk_marker = " [alert]" if service.get("risk") else ""
         lines.append(f"    - {service['port']}/tcp {service['label']}{risk_marker}")
+        http_probe = service.get("http_probe") or {}
+        if http_probe.get("url"):
+            lines.append(f"      url: {http_probe['url']}")
+        if http_probe.get("status_code") is not None:
+            lines.append(f"      status: {http_probe['status_code']}")
+        if http_probe.get("content_type"):
+            lines.append(f"      content_type: {http_probe['content_type']}")
+        if http_probe.get("server"):
+            lines.append(f"      server: {http_probe['server']}")
+        if http_probe.get("location"):
+            lines.append(f"      location: {http_probe['location']}")
+        if http_probe.get("title"):
+            lines.append(f"      title: {http_probe['title']}")
+        if http_probe.get("page_hint"):
+            lines.append(f"      page_hint: {http_probe['page_hint']}")
+        if http_probe.get("error"):
+            lines.append(f"      probe_error: {http_probe['error']}")
     return lines
 
 
@@ -249,6 +266,8 @@ def format_check_heading(check):
 def format_status_badge(status):
     if status == "OK":
         return f"{Fore.GREEN}[OK]{Style.RESET_ALL}"
+    if status == "NOTICE":
+        return f"{Fore.YELLOW}[~]{Style.RESET_ALL}"
     if status == "ALERT":
         return f"{Fore.RED}[!]{Style.RESET_ALL}"
     return f"{Fore.YELLOW}[?]{Style.RESET_ALL}"
@@ -288,7 +307,12 @@ def format_check_label(check_name):
 
 def format_top_alert_summary(summary):
     alerts = summary.get("alerts", [])
+    notices = summary.get("notices", [])
     if not alerts:
+        if notices:
+            labels = [format_check_label(check["name"]) for check in notices[:4]]
+            suffix = " ..." if len(notices) > 4 else ""
+            return f"Risk summary: no hard alerts; {len(notices)} notice(s) in {', '.join(labels)}{suffix}"
         return "Risk summary: no active alerts"
     labels = []
     for check in alerts[:4]:
@@ -309,7 +333,13 @@ def format_top_alert_summary(summary):
 
 def build_trust_assessment(summary):
     alert_count = summary.get("alert_checks", 0)
+    notice_count = summary.get("notice_checks", 0)
     if alert_count == 0:
+        if notice_count:
+            return {
+                "level": "trusted",
+                "summary": f"No hard alerts detected. {notice_count} notice(s) are present for review.",
+            }
         return {
             "level": "trusted",
             "summary": "No active alerts detected in network, DNS, Wi-Fi, or internet probes.",
@@ -344,7 +374,7 @@ def print_health_report(checks, summary):
     assessment = build_trust_assessment(summary)
     print("=== Network Health Check ===")
     print(
-        f"Checks: {summary['total_checks']} | OK: {summary['ok_checks']} | Alerts: {summary['alert_checks']}"
+        f"Checks: {summary['total_checks']} | OK: {summary['ok_checks']} | Notices: {summary.get('notice_checks', 0)} | Alerts: {summary['alert_checks']}"
     )
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
@@ -370,6 +400,7 @@ def print_focus_health_report(checks, summary):
         check
         for check in checks
         if check["status"] == "alert"
+        or check["status"] == "notice"
         or check["name"] in {"gateway_identity", "gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
     ]
     seen = set()
