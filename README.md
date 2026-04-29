@@ -2,6 +2,12 @@
 
 A Python-based suite of network scanning tools, including an ARP scanner for device discovery and a multi-threaded port scanner.
 
+Current milestone: `v1.0.0`
+
+- `network_scan` is a working LAN inventory and change-monitoring tool.
+- `network-health-check` is a working safe trust-assessment tool for guest and untrusted networks.
+- The current `v1` scope is CLI-first, report-oriented, and intentionally avoids broad active probing of third-party networks.
+
 ## ✨ Features
 
 - **Automatic Network Detection**: Automatically finds the default network interface and IP range.

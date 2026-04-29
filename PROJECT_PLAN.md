@@ -19,6 +19,7 @@ Develop the project from a pair of local CLI scripts into a stable network inven
 
 ## Current State
 
+- Milestone `v1.0.0` is now reached for the current CLI-first scope.
 - `arp_scanner.py` works locally and on Synology.
 - `port_scan.py` works locally and on Synology.
 - ARP discovery, vendor lookup, JSON export, and SQLite storage already work.
@@ -55,6 +56,15 @@ These tracks should share reusable plumbing where it helps, but they should not 
 If active probing of open/public networks becomes a real goal, that should be a separate project with its own threat model, UX, legal boundary, and safety rules.
 
 ## Active Roadmap
+
+## V1 Scope
+
+`v1.0.0` means:
+
+- the project is usable on macOS and Synology from one codebase;
+- `network_scan` is already useful for inventory, diffing, export, and alerts on your own LAN;
+- `network-health-check` already provides safe trust assessment for local path, DNS, captive portal, and HTTPS/TLS behavior;
+- further work after this point is iterative improvement, not “make the first working version exist”.
 
 ### Track A: `network_scan`
 
