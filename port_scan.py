@@ -4,6 +4,7 @@ import socket
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import arp_scanner
 from alert_delivery import build_alert_payload, send_webhook_payload
 from colorama import Fore, Style, init
 from models import build_device_snapshot, build_port_snapshot, build_scan_context
@@ -298,6 +299,11 @@ def build_parser():
         help="JSON report output path. Defaults to port_scan_result.json in the working directory.",
     )
     parser.add_argument(
+        "--db-file",
+        type=str,
+        help="SQLite database path. Defaults to arp_scan_v1.db in the working directory.",
+    )
+    parser.add_argument(
         "--csv-out",
         type=str,
         help="CSV report output path. Disabled unless explicitly set.",
@@ -346,6 +352,7 @@ def parse_args():
 def resolve_report_output_paths(args):
     """Resolve JSON/CSV/Markdown output paths from CLI arguments."""
     return {
+        "db": getattr(args, "db_file", None),
         "json": args.json_out or JSON_OUTPUT_FILE,
         "csv": args.csv_out,
         "markdown": args.md_out,
@@ -424,6 +431,8 @@ def main():
         print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
         sys.exit(1)
     output_paths = resolve_report_output_paths(args)
+    if output_paths["db"]:
+        arp_scanner.DB_FILE = output_paths["db"]
     CSV_OUTPUT_FILE = output_paths["csv"]
     MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
     print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")

@@ -33,6 +33,13 @@ class PortScanTests(unittest.TestCase):
         self.assertEqual(args.webhook_url, "https://example.test/webhook")
         self.assertEqual(args.webhook_timeout, 4.0)
 
+    def test_build_parser_supports_db_file_flag(self):
+        parser = port_scan.build_parser()
+
+        args = parser.parse_args(["--db-file", "data/arp_scan.db"])
+
+        self.assertEqual(args.db_file, "data/arp_scan.db")
+
     def test_parse_ports_returns_defaults_when_empty(self):
         self.assertEqual(
             port_scan.parse_ports(None),
@@ -118,6 +125,21 @@ class PortScanTests(unittest.TestCase):
             ]
         )
         self.assertEqual(count, 3)
+
+    def test_resolve_report_output_paths_includes_db_override(self):
+        args = SimpleNamespace(
+            db_file="data/arp_scan.db",
+            json_out=None,
+            csv_out="report.csv",
+            md_out="report.md",
+        )
+
+        paths = port_scan.resolve_report_output_paths(args)
+
+        self.assertEqual(paths["db"], "data/arp_scan.db")
+        self.assertEqual(paths["json"], port_scan.JSON_OUTPUT_FILE)
+        self.assertEqual(paths["csv"], "report.csv")
+        self.assertEqual(paths["markdown"], "report.md")
 
     def test_maybe_send_port_webhook_skips_when_no_alerts(self):
         sent = port_scan.maybe_send_port_webhook(
