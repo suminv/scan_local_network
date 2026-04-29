@@ -1759,6 +1759,70 @@ def build_https_trust_reasoning_check(https_checks):
     }
 
 
+def build_overall_trust_explanation_check(
+    client_isolation_hint_check,
+    dns_trust_reasoning_check,
+    captive_trust_reasoning_check,
+    https_trust_reasoning_check,
+    active_path_check=None,
+):
+    """Build one short human-oriented explanation across local, DNS, captive, and HTTPS trust layers."""
+    local_details = client_isolation_hint_check.get("details", {})
+    dns_details = dns_trust_reasoning_check.get("details", {})
+    captive_details = captive_trust_reasoning_check.get("details", {})
+    https_details = https_trust_reasoning_check.get("details", {})
+
+    local_hint = local_details.get("hint_level")
+    dns_hint = dns_details.get("hint_level")
+    captive_hint = captive_details.get("hint_level")
+    https_hint = https_details.get("hint_level")
+    is_private_gateway = local_details.get("is_private_gateway", False)
+
+    affected_components = []
+    if dns_trust_reasoning_check.get("status") == "alert":
+        affected_components.append("DNS")
+    if captive_trust_reasoning_check.get("status") == "alert":
+        affected_components.append("Captive portal")
+    if https_trust_reasoning_check.get("status") == "alert":
+        affected_components.append("HTTPS")
+    if active_path_check and active_path_check.get("status") == "alert":
+        affected_components.append("Active path")
+
+    if affected_components:
+        status = "notice"
+        summary = (
+            f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
+        )
+        context_note = "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related"
+    elif local_hint == "peer_visibility_detected" and is_private_gateway:
+        status = "ok"
+        summary = "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN"
+        context_note = "peer visibility and gateway web surfaces are expected on many home LANs"
+    elif local_hint == "peer_visibility_detected":
+        status = "notice"
+        summary = "Internet trust path looks healthy, but the local segment appears openly visible to nearby peers"
+        context_note = "this can be fine on trusted LANs, but deserves attention on guest or public networks"
+    else:
+        status = "ok"
+        summary = "Internet trust path looks healthy and the local segment does not currently show strong trust anomalies"
+        context_note = "DNS, captive-portal, and HTTPS checks all behaved normally"
+
+    return {
+        "name": "overall_trust_explanation",
+        "status": status,
+        "summary": summary,
+        "details": {
+            "local_segment": local_hint,
+            "dns_path": dns_hint,
+            "captive_path": captive_hint,
+            "https_path": https_hint,
+            "active_path": active_path_check.get("status") if active_path_check else None,
+            "affected_components": affected_components,
+            "context_note": context_note,
+        },
+    }
+
+
 def run_network_health_checks(
     *,
     dns_domains=None,
@@ -1795,12 +1859,22 @@ def run_network_health_checks(
     ]
     wifi_environment_check = build_wifi_environment_check()
     checks.append(wifi_environment_check)
-    checks.append(build_active_path_check(wifi_environment_check.get("details")))
+    active_path_check = build_active_path_check(wifi_environment_check.get("details"))
+    checks.append(active_path_check)
     checks.extend(dns_resolution_checks)
     checks.extend(captive_checks)
     checks.append(captive_trust_reasoning_check)
     checks.extend(https_checks)
     checks.append(https_trust_reasoning_check)
+    checks.append(
+        build_overall_trust_explanation_check(
+            client_isolation_hint_check,
+            dns_trust_reasoning_check,
+            captive_trust_reasoning_check,
+            https_trust_reasoning_check,
+            active_path_check=active_path_check,
+        )
+    )
     if wifi_stability_seconds and wifi_stability_seconds > 0:
         stability_check = run_wifi_stability_diagnostics(
             duration_seconds=wifi_stability_seconds,

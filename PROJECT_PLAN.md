@@ -97,6 +97,7 @@ Remaining work:
 - expand macOS-first Wi-Fi environment detail where the platform allows it
 - improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
 - add a concise overall trust/path explanation on top of the current gateway, peer-visibility, DNS, captive, and HTTPS reasoning layers
+- continue refining the operator-facing wording now that the overall trust/path explanation exists
 - keep refining dual-connectivity, mesh instability, and route/path diagnostics
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
@@ -128,7 +129,7 @@ Focus:
 
 1. Decide whether `network_scan` should stay on snapshot tables or move toward observation/event modeling.
 2. Continue selective cleanup in `network_health.py`, especially around macOS Wi-Fi collectors and trust-check composition.
-3. Add a short overall trust summary that explains the combined outcome of local-segment, DNS, captive-portal, and HTTPS reasoning.
+3. Refine the new overall trust summary so it stays concise and useful across private LAN, guest Wi-Fi, and degraded-path scenarios.
 4. Decide whether the next alert channel should be Telegram or email on top of the current webhook path.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
@@ -175,6 +176,7 @@ Completed:
 - `network-health-check` now includes a passive `local_peer_visibility` check based on the current ARP cache to show whether peer devices are already visible on the local segment without broad active probing.
 - `network-health-check` now includes a derived `client_isolation_hint` that summarizes whether the current segment appears to expose peer devices to the client based on passive visibility signals.
 - `network-health-check` now includes aggregated `dns_trust_reasoning`, `captive_trust_reasoning`, and `https_trust_reasoning` checks on top of the existing probe results.
+- `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.

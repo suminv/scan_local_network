@@ -17,12 +17,14 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 CHECK_GROUPS = [
+    ("Summary", ["overall_trust_explanation"]),
     ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "client_isolation_hint", "active_path"]),
     ("DNS", ["dns_environment", "dns_trust_reasoning", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_"]),
 ]
 CHECK_LABELS = {
+    "overall_trust_explanation": "Overall trust explanation",
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
     "gateway_exposure": "Gateway exposure",
@@ -216,6 +218,25 @@ def format_https_trust_reasoning_details(details):
     return lines
 
 
+def format_overall_trust_explanation_details(details):
+    lines = []
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
+    if details.get("local_segment"):
+        lines.append(f"  local segment: {details['local_segment']}")
+    if details.get("dns_path"):
+        lines.append(f"  DNS path: {details['dns_path']}")
+    if details.get("captive_path"):
+        lines.append(f"  captive path: {details['captive_path']}")
+    if details.get("https_path"):
+        lines.append(f"  HTTPS path: {details['https_path']}")
+    if details.get("active_path"):
+        lines.append(f"  active path: {details['active_path']}")
+    if details.get("affected_components"):
+        lines.append(f"  affected components: {', '.join(details['affected_components'])}")
+    return lines
+
+
 def format_wifi_environment_details(details):
     lines = []
     inventory = details.get("inventory", {})
@@ -338,6 +359,8 @@ def format_check_details(check):
         return format_captive_trust_reasoning_details(details)
     if name == "https_trust_reasoning":
         return format_https_trust_reasoning_details(details)
+    if name == "overall_trust_explanation":
+        return format_overall_trust_explanation_details(details)
     if name == "wifi_environment":
         return format_wifi_environment_details(details)
     if name == "wifi_stability":
@@ -417,6 +440,8 @@ def format_top_alert_summary(summary):
             labels.append("Captive portal")
         elif name.startswith("https_"):
             labels.append("HTTPS")
+        elif name == "overall_trust_explanation":
+            labels.append("Overall trust")
         else:
             labels.append(format_check_label(name))
     suffix = " ..." if len(alerts) > 4 else ""
@@ -493,7 +518,7 @@ def print_focus_health_report(checks, summary):
         for check in checks
         if check["status"] == "alert"
         or check["status"] == "notice"
-        or check["name"] in {"gateway_identity", "gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
+        or check["name"] in {"overall_trust_explanation", "gateway_identity", "gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
     ]
     seen = set()
     for check in key_checks:

@@ -938,7 +938,8 @@ Wi-Fi:
                                                     with mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}):
                                                         with mock.patch("network_health.run_https_tls_checks", return_value=[]):
                                                             with mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
-                                                                checks = network_health.run_network_health_checks()
+                                                                with mock.patch("network_health.build_overall_trust_explanation_check", return_value={"name": "overall_trust_explanation", "status": "ok"}):
+                                                                    checks = network_health.run_network_health_checks()
 
         self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
         self.assertTrue(any(check["name"] == "gateway_exposure" for check in checks))
@@ -947,6 +948,7 @@ Wi-Fi:
         self.assertTrue(any(check["name"] == "dns_trust_reasoning" for check in checks))
         self.assertTrue(any(check["name"] == "captive_trust_reasoning" for check in checks))
         self.assertTrue(any(check["name"] == "https_trust_reasoning" for check in checks))
+        self.assertTrue(any(check["name"] == "overall_trust_explanation" for check in checks))
 
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -1061,6 +1063,43 @@ Wi-Fi:
 
         self.assertEqual(result["status"], "alert")
         self.assertEqual(result["details"]["hint_level"], "partial_https_failure")
+
+    def test_build_overall_trust_explanation_marks_home_lan_as_ok(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "notice",
+                "details": {
+                    "hint_level": "peer_visibility_detected",
+                    "is_private_gateway": True,
+                },
+            },
+            {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
+            {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
+            {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("typical private/home LAN", result["summary"])
+
+    def test_build_overall_trust_explanation_marks_internet_anomalies_as_notice(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "ok",
+                "details": {
+                    "hint_level": "gateway_only_visibility",
+                    "is_private_gateway": False,
+                },
+            },
+            {"name": "dns_trust_reasoning", "status": "alert", "details": {"hint_level": "mixed_dns_path"}},
+            {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
+            {"name": "https_trust_reasoning", "status": "alert", "details": {"hint_level": "certificate_validation_failure"}},
+            active_path_check={"name": "active_path", "status": "alert"},
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["affected_components"], ["DNS", "HTTPS", "Active path"])
 
     def test_build_health_summary_counts_alerts(self):
         summary = network_health.build_health_summary(
@@ -1483,6 +1522,34 @@ Wi-Fi:
         self.assertIn("HTTPS trust reasoning", output)
         self.assertIn("hint level: certificate_validation_failure", output)
         self.assertIn("probe names: example_https", output)
+
+    def test_print_health_report_renders_overall_trust_explanation_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "overall_trust_explanation",
+                "status": "ok",
+                "summary": "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN",
+                "details": {
+                    "context_note": "peer visibility and gateway web surfaces are expected on many home LANs",
+                    "local_segment": "peer_visibility_detected",
+                    "dns_path": "gateway_dns_expected",
+                    "captive_path": "normal_internet_path",
+                    "https_path": "normal_https_path",
+                    "active_path": "ok",
+                    "affected_components": [],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 1, "notice_checks": 0, "alert_checks": 0, "alerts": [], "notices": []}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Overall trust explanation", output)
+        self.assertIn("local segment: peer_visibility_detected", output)
+        self.assertIn("DNS path: gateway_dns_expected", output)
 
     def test_print_health_report_formats_wifi_nearby_networks_compactly(self):
         buffer = StringIO()

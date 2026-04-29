@@ -356,6 +356,7 @@ It currently checks:
 - DNS resolution sanity for public domains plus an aggregated DNS trust interpretation
 - captive portal behavior through common connectivity-check endpoints plus an aggregated captive/interception interpretation
 - HTTPS/TLS sanity through certificate-validated probes plus an aggregated HTTPS trust interpretation
+- an overall trust explanation that summarizes the current local-segment posture and internet trust path in one short human-readable block
 
 **To run a health check:**
 
