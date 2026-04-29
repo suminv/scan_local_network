@@ -96,6 +96,7 @@ Remaining work:
 
 - expand macOS-first Wi-Fi environment detail where the platform allows it
 - improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
+- add a concise overall trust/path explanation on top of the current gateway, peer-visibility, DNS, captive, and HTTPS reasoning layers
 - keep refining dual-connectivity, mesh instability, and route/path diagnostics
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
@@ -127,7 +128,7 @@ Focus:
 
 1. Decide whether `network_scan` should stay on snapshot tables or move toward observation/event modeling.
 2. Continue selective cleanup in `network_health.py`, especially around macOS Wi-Fi collectors and trust-check composition.
-3. Expand `network-health-check` beyond the current gateway-local exposure signal with more safe trust checks that do not require broad active scanning.
+3. Add a short overall trust summary that explains the combined outcome of local-segment, DNS, captive-portal, and HTTPS reasoning.
 4. Decide whether the next alert channel should be Telegram or email on top of the current webhook path.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
@@ -172,6 +173,8 @@ Completed:
 - `network-health-check` now raises an explicit `active_path` alert for dual-connected macOS scenarios where Ethernet is active while Wi-Fi is also connected.
 - `network-health-check` now includes a gateway-local exposure check to show whether the current gateway exposes DNS and web/admin surfaces directly to the client.
 - `network-health-check` now includes a passive `local_peer_visibility` check based on the current ARP cache to show whether peer devices are already visible on the local segment without broad active probing.
+- `network-health-check` now includes a derived `client_isolation_hint` that summarizes whether the current segment appears to expose peer devices to the client based on passive visibility signals.
+- `network-health-check` now includes aggregated `dns_trust_reasoning`, `captive_trust_reasoning`, and `https_trust_reasoning` checks on top of the existing probe results.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.

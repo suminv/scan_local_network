@@ -135,7 +135,9 @@ class NetworkHealthTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "notice")
         self.assertIn("Private/local gateway exposes", result["summary"])
+        self.assertIn("home LAN", result["summary"])
         self.assertEqual(result["details"]["risky_services"][0]["port"], 443)
+        self.assertEqual(result["details"]["context_note"], "often expected on a private/home LAN")
 
     def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
         with mock.patch("network_health.get_default_gateway", return_value=("8.8.8.8", "en0")):
@@ -177,6 +179,7 @@ class NetworkHealthTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["visible_peers"][0]["ip"], "192.168.2.22")
+        self.assertEqual(result["details"]["context_note"], "often normal on a private/home LAN")
 
     def test_build_local_peer_visibility_check_marks_empty_cache_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -185,6 +188,62 @@ class NetworkHealthTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["details"]["visible_peers"], [])
+
+    def test_build_client_isolation_hint_marks_visible_peers_as_notice(self):
+        result = network_health.build_client_isolation_hint_check(
+            {
+                "name": "gateway_exposure",
+                "status": "notice",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "risky_services": [{"port": 80, "label": "HTTP admin/web", "risk": True}],
+                },
+            },
+            {
+                "name": "local_peer_visibility",
+                "status": "notice",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "visible_peers": [{"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"}],
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["hint_level"], "peer_visibility_detected")
+        self.assertEqual(result["details"]["visible_peer_count"], 1)
+        self.assertIn("typical for a private/home LAN", result["summary"])
+
+    def test_build_client_isolation_hint_marks_gateway_only_visibility_ok(self):
+        result = network_health.build_client_isolation_hint_check(
+            {
+                "name": "gateway_exposure",
+                "status": "notice",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "risky_services": [{"port": 80, "label": "HTTP admin/web", "risk": True}],
+                },
+            },
+            {
+                "name": "local_peer_visibility",
+                "status": "ok",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "visible_peers": [],
+                },
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["hint_level"], "gateway_only_visibility")
 
     def test_parse_scutil_dns_extracts_nameservers(self):
         resolvers = network_health.parse_scutil_dns(
@@ -297,6 +356,70 @@ nameserver 1.1.1.1
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("Detected 2 DNS server", result["summary"])
+
+    def test_build_dns_trust_reasoning_marks_gateway_dns_expected_ok(self):
+        result = network_health.build_dns_trust_reasoning_check(
+            {
+                "name": "dns_environment",
+                "status": "ok",
+                "details": {
+                    "nameservers": ["192.168.2.254"],
+                    "analysis": {
+                        "classifications": [{"classification": "gateway_dns"}],
+                        "risks": [],
+                    },
+                },
+            },
+            [],
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["hint_level"], "gateway_dns_expected")
+
+    def test_build_dns_trust_reasoning_flags_public_upstream_dns(self):
+        result = network_health.build_dns_trust_reasoning_check(
+            {
+                "name": "dns_environment",
+                "status": "alert",
+                "details": {
+                    "nameservers": ["1.1.1.1"],
+                    "analysis": {
+                        "classifications": [{"classification": "public_upstream"}],
+                        "risks": [{"type": "public_upstream", "server": "1.1.1.1"}],
+                    },
+                },
+            },
+            [],
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "public_upstream_dns_present")
+
+    def test_build_dns_trust_reasoning_flags_resolution_failures(self):
+        result = network_health.build_dns_trust_reasoning_check(
+            {
+                "name": "dns_environment",
+                "status": "ok",
+                "details": {
+                    "nameservers": ["192.168.2.254"],
+                    "analysis": {
+                        "classifications": [{"classification": "gateway_dns"}],
+                        "risks": [],
+                    },
+                },
+            },
+            [
+                {
+                    "name": "dns_example.com",
+                    "status": "alert",
+                    "details": {"domain": "example.com"},
+                }
+            ],
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "resolution_failure")
+        self.assertEqual(result["details"]["affected_domains"], ["example.com"])
 
     def test_parse_ping_summary_extracts_loss_and_latency(self):
         summary = network_health.parse_ping_summary(
@@ -792,30 +915,38 @@ Wi-Fi:
             with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
                 with mock.patch("network_health.build_gateway_exposure_check", return_value={"name": "gateway_exposure", "status": "ok"}):
                     with mock.patch("network_health.build_local_peer_visibility_check", return_value={"name": "local_peer_visibility", "status": "ok"}):
-                        with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
-                            with mock.patch(
-                                "network_health.build_wifi_environment_check",
-                                return_value={
-                                    "name": "wifi_environment",
-                                    "status": "ok",
-                                    "details": {
-                                        "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
-                                        "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
-                                    },
-                                },
-                            ):
-                                with mock.patch(
-                                    "network_health.build_active_path_check",
-                                    return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
-                                ):
-                                    with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
-                                        with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
-                                            with mock.patch("network_health.run_https_tls_checks", return_value=[]):
-                                                checks = network_health.run_network_health_checks()
+                        with mock.patch("network_health.build_client_isolation_hint_check", return_value={"name": "client_isolation_hint", "status": "ok"}):
+                            with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
+                                with mock.patch("network_health.build_dns_trust_reasoning_check", return_value={"name": "dns_trust_reasoning", "status": "ok"}):
+                                    with mock.patch(
+                                        "network_health.build_wifi_environment_check",
+                                        return_value={
+                                            "name": "wifi_environment",
+                                            "status": "ok",
+                                            "details": {
+                                                "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
+                                                "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+                                            },
+                                        },
+                                    ):
+                                        with mock.patch(
+                                            "network_health.build_active_path_check",
+                                            return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                                        ):
+                                            with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
+                                                with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
+                                                    with mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}):
+                                                        with mock.patch("network_health.run_https_tls_checks", return_value=[]):
+                                                            with mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
+                                                                checks = network_health.run_network_health_checks()
 
         self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
         self.assertTrue(any(check["name"] == "gateway_exposure" for check in checks))
         self.assertTrue(any(check["name"] == "local_peer_visibility" for check in checks))
+        self.assertTrue(any(check["name"] == "client_isolation_hint" for check in checks))
+        self.assertTrue(any(check["name"] == "dns_trust_reasoning" for check in checks))
+        self.assertTrue(any(check["name"] == "captive_trust_reasoning" for check in checks))
+        self.assertTrue(any(check["name"] == "https_trust_reasoning" for check in checks))
 
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -848,6 +979,39 @@ Wi-Fi:
         self.assertEqual(results[0]["status"], "alert")
         self.assertIn("Unexpected captive-portal probe response", results[0]["summary"])
 
+    def test_build_captive_trust_reasoning_marks_normal_path_ok(self):
+        result = network_health.build_captive_trust_reasoning_check(
+            [
+                {"name": "captive_gstatic_204", "status": "ok"},
+                {"name": "captive_apple_captive", "status": "ok"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["hint_level"], "normal_internet_path")
+
+    def test_build_captive_trust_reasoning_marks_all_alerts_as_likely_portal(self):
+        result = network_health.build_captive_trust_reasoning_check(
+            [
+                {"name": "captive_gstatic_204", "status": "alert"},
+                {"name": "captive_apple_captive", "status": "alert"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "likely_captive_portal")
+
+    def test_build_captive_trust_reasoning_marks_partial_interception(self):
+        result = network_health.build_captive_trust_reasoning_check(
+            [
+                {"name": "captive_gstatic_204", "status": "alert"},
+                {"name": "captive_apple_captive", "status": "ok"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "partial_http_interception")
+
     def test_run_https_tls_checks_flags_ssl_failures(self):
         with mock.patch("network_health.probe_https_endpoint", side_effect=ssl.SSLError("verify failed")):
             results = network_health.run_https_tls_checks(
@@ -856,6 +1020,47 @@ Wi-Fi:
 
         self.assertEqual(results[0]["status"], "alert")
         self.assertIn("TLS verification failed", results[0]["summary"])
+
+    def test_build_https_trust_reasoning_marks_normal_path_ok(self):
+        result = network_health.build_https_trust_reasoning_check(
+            [
+                {"name": "https_example_https", "status": "ok"},
+                {"name": "https_google_204_https", "status": "ok"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["hint_level"], "normal_https_path")
+
+    def test_build_https_trust_reasoning_flags_certificate_validation_failure(self):
+        result = network_health.build_https_trust_reasoning_check(
+            [
+                {
+                    "name": "https_example_https",
+                    "status": "alert",
+                    "summary": "TLS verification failed for https://example.com",
+                },
+                {"name": "https_google_204_https", "status": "ok"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "certificate_validation_failure")
+
+    def test_build_https_trust_reasoning_flags_partial_https_failure(self):
+        result = network_health.build_https_trust_reasoning_check(
+            [
+                {
+                    "name": "https_example_https",
+                    "status": "alert",
+                    "summary": "HTTPS probe failed for https://example.com",
+                },
+                {"name": "https_google_204_https", "status": "ok"},
+            ]
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["hint_level"], "partial_https_failure")
 
     def test_build_health_summary_counts_alerts(self):
         summary = network_health.build_health_summary(
@@ -1100,6 +1305,7 @@ Wi-Fi:
                 "details": {
                     "gateway_ip": "192.168.2.1",
                     "interface": "en0",
+                    "context_note": "often expected on a private/home LAN",
                     "reachable_services": [
                         {
                             "port": 443,
@@ -1127,6 +1333,7 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("Gateway exposure", output)
+        self.assertIn("context: often expected on a private/home LAN", output)
         self.assertIn("443/tcp HTTPS admin/web [alert]", output)
         self.assertIn("url: https://192.168.2.1:443/", output)
         self.assertIn("content_type: text/html", output)
@@ -1146,6 +1353,7 @@ Wi-Fi:
                 "details": {
                     "interface": "en0",
                     "gateway_ip": "192.168.2.1",
+                    "context_note": "often normal on a private/home LAN",
                     "visible_peers": [
                         {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
                         {"ip": "192.168.2.23", "mac": "11:22:33:44:55:66"},
@@ -1160,8 +1368,121 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("Local peer visibility", output)
+        self.assertIn("context: often normal on a private/home LAN", output)
         self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
         self.assertIn("[~]", output)
+
+    def test_print_health_report_renders_client_isolation_hint_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "client_isolation_hint",
+                "status": "notice",
+                "summary": "Local peers are already visible to this client on en0; this is typical for a private/home LAN and suggests client isolation is not enforced",
+                "details": {
+                    "interface": "en0",
+                    "gateway_ip": "192.168.2.1",
+                    "hint_level": "peer_visibility_detected",
+                    "visible_peer_count": 2,
+                    "risky_gateway_service_count": 1,
+                    "context_note": "typical for a private/home LAN",
+                    "visible_peers": [
+                        {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
+                    ],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": checks}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Client isolation hint", output)
+        self.assertIn("hint level: peer_visibility_detected", output)
+        self.assertIn("context: typical for a private/home LAN", output)
+        self.assertIn("visible peers: 2", output)
+        self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
+
+    def test_print_health_report_renders_dns_trust_reasoning_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "dns_trust_reasoning",
+                "status": "ok",
+                "summary": "DNS path looks local and expected: the current gateway is acting as resolver",
+                "details": {
+                    "hint_level": "gateway_dns_expected",
+                    "context_note": "typical for private/home LANs and many managed networks",
+                    "nameservers": ["192.168.2.254"],
+                    "resolver_profile": ["gateway_dns"],
+                    "risk_count": 0,
+                    "resolution_issue_count": 0,
+                    "affected_domains": [],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 1, "notice_checks": 0, "alert_checks": 0, "alerts": [], "notices": []}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("DNS trust reasoning", output)
+        self.assertIn("hint level: gateway_dns_expected", output)
+        self.assertIn("resolver profile: gateway_dns", output)
+
+    def test_print_health_report_renders_captive_trust_reasoning_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "captive_trust_reasoning",
+                "status": "alert",
+                "summary": "All captive-portal probes behaved unexpectedly; captive portal or broad HTTP interception is likely",
+                "details": {
+                    "hint_level": "likely_captive_portal",
+                    "context_note": "multiple independent connectivity checks were affected",
+                    "probe_count": 2,
+                    "alert_probe_count": 2,
+                    "affected_probes": ["gstatic_204", "apple_captive"],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 0, "alert_checks": 1, "alerts": checks, "notices": []}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Captive portal reasoning", output)
+        self.assertIn("hint level: likely_captive_portal", output)
+        self.assertIn("probe names: gstatic_204, apple_captive", output)
+
+    def test_print_health_report_renders_https_trust_reasoning_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "https_trust_reasoning",
+                "status": "alert",
+                "summary": "1 HTTPS probe(s) failed certificate validation; TLS interception or trust problems are possible",
+                "details": {
+                    "hint_level": "certificate_validation_failure",
+                    "context_note": "certificate validation should normally succeed on a healthy internet path",
+                    "probe_count": 2,
+                    "alert_probe_count": 1,
+                    "affected_probes": ["example_https"],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 0, "alert_checks": 1, "alerts": checks, "notices": []}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("HTTPS trust reasoning", output)
+        self.assertIn("hint level: certificate_validation_failure", output)
+        self.assertIn("probe names: example_https", output)
 
     def test_print_health_report_formats_wifi_nearby_networks_compactly(self):
         buffer = StringIO()

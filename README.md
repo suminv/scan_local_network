@@ -349,12 +349,13 @@ It currently checks:
 - default gateway MAC/vendor fingerprint when available from the local ARP cache
 - whether the default gateway exposes common local services such as DNS or web/admin endpoints to the current client
 - whether the passive ARP cache already shows other local peers besides the gateway on the current interface
+- a client-isolation hint that summarizes whether the current segment appears to expose peer devices to the client
 - whether an active Wi-Fi interface is present while the default route is using a different interface
 - macOS Wi-Fi interface inventory and best-effort nearby Wi-Fi visibility
 - DNS server inventory for the current environment
-- DNS resolution sanity for public domains
-- captive portal behavior through common connectivity-check endpoints
-- HTTPS/TLS sanity through certificate-validated probes
+- DNS resolution sanity for public domains plus an aggregated DNS trust interpretation
+- captive portal behavior through common connectivity-check endpoints plus an aggregated captive/interception interpretation
+- HTTPS/TLS sanity through certificate-validated probes plus an aggregated HTTPS trust interpretation
 
 **To run a health check:**
 

@@ -17,22 +17,26 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 CHECK_GROUPS = [
-    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "active_path"]),
-    ("DNS", ["dns_environment", "dns_"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "client_isolation_hint", "active_path"]),
+    ("DNS", ["dns_environment", "dns_trust_reasoning", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
-    ("Internet", ["captive_", "https_"]),
+    ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_"]),
 ]
 CHECK_LABELS = {
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
     "gateway_exposure": "Gateway exposure",
     "local_peer_visibility": "Local peer visibility",
+    "client_isolation_hint": "Client isolation hint",
     "active_path": "Active path",
     "dns_environment": "DNS servers",
+    "dns_trust_reasoning": "DNS trust reasoning",
     "wifi_environment": "Wi-Fi environment",
     "wifi_stability": "Wi-Fi stability",
     "captive_gstatic_204": "Gstatic probe",
     "captive_apple_captive": "Apple probe",
+    "captive_trust_reasoning": "Captive portal reasoning",
+    "https_trust_reasoning": "HTTPS trust reasoning",
     "https_example_https": "Example HTTPS",
     "https_google_204_https": "Google HTTPS 204",
 }
@@ -75,6 +79,8 @@ def format_gateway_exposure_details(details):
         f"  gateway: {details.get('gateway_ip')}",
         f"  interface: {details.get('interface')}",
     ]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
     reachable = details.get("reachable_services", [])
     if not reachable:
         lines.append("  reachable local services: none detected")
@@ -108,6 +114,8 @@ def format_local_peer_visibility_details(details):
         f"  interface: {details.get('interface')}",
         f"  gateway: {details.get('gateway_ip')}",
     ]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
     peers = details.get("visible_peers", [])
     if not peers:
         lines.append("  visible peers: none")
@@ -118,6 +126,24 @@ def format_local_peer_visibility_details(details):
     extra_count = max(0, len(peers) - 8)
     if extra_count:
         lines.append(f"    - ... {extra_count} more")
+    return lines
+
+
+def format_client_isolation_hint_details(details):
+    lines = [
+        f"  interface: {details.get('interface')}",
+        f"  gateway: {details.get('gateway_ip')}",
+        f"  hint level: {details.get('hint_level')}",
+        f"  visible peers: {details.get('visible_peer_count', 0)}",
+        f"  risky gateway services: {details.get('risky_gateway_service_count', 0)}",
+    ]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
+    peers = details.get("visible_peers", [])
+    if peers:
+        lines.append("  peer samples:")
+        for peer in peers[:5]:
+            lines.append(f"    - {peer['ip']} ({peer['mac']})")
     return lines
 
 
@@ -150,6 +176,43 @@ def format_dns_environment_details(details):
         for risk in details["analysis"]["risks"]:
             lines.append(f"    - {risk['server']}: {risk['reason']}")
     lines.append(f"  source: {details.get('source')}")
+    return lines
+
+
+def format_dns_trust_reasoning_details(details):
+    lines = [f"  hint level: {details.get('hint_level')}"]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
+    if details.get("nameservers"):
+        lines.append(f"  nameservers: {', '.join(details['nameservers'])}")
+    if details.get("resolver_profile"):
+        lines.append(f"  resolver profile: {', '.join(details['resolver_profile'])}")
+    lines.append(f"  resolver risks: {details.get('risk_count', 0)}")
+    lines.append(f"  resolution issues: {details.get('resolution_issue_count', 0)}")
+    if details.get("affected_domains"):
+        lines.append(f"  affected domains: {', '.join(details['affected_domains'])}")
+    return lines
+
+
+def format_captive_trust_reasoning_details(details):
+    lines = [f"  hint level: {details.get('hint_level')}"]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
+    lines.append(f"  probes: {details.get('probe_count', 0)}")
+    lines.append(f"  affected probes: {details.get('alert_probe_count', 0)}")
+    if details.get("affected_probes"):
+        lines.append(f"  probe names: {', '.join(details['affected_probes'])}")
+    return lines
+
+
+def format_https_trust_reasoning_details(details):
+    lines = [f"  hint level: {details.get('hint_level')}"]
+    if details.get("context_note"):
+        lines.append(f"  context: {details['context_note']}")
+    lines.append(f"  probes: {details.get('probe_count', 0)}")
+    lines.append(f"  affected probes: {details.get('alert_probe_count', 0)}")
+    if details.get("affected_probes"):
+        lines.append(f"  probe names: {', '.join(details['affected_probes'])}")
     return lines
 
 
@@ -263,10 +326,18 @@ def format_check_details(check):
         return format_gateway_exposure_details(details)
     if name == "local_peer_visibility":
         return format_local_peer_visibility_details(details)
+    if name == "client_isolation_hint":
+        return format_client_isolation_hint_details(details)
     if name == "active_path":
         return format_active_path_details(details)
     if name == "dns_environment":
         return format_dns_environment_details(details)
+    if name == "dns_trust_reasoning":
+        return format_dns_trust_reasoning_details(details)
+    if name == "captive_trust_reasoning":
+        return format_captive_trust_reasoning_details(details)
+    if name == "https_trust_reasoning":
+        return format_https_trust_reasoning_details(details)
     if name == "wifi_environment":
         return format_wifi_environment_details(details)
     if name == "wifi_stability":

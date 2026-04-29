@@ -180,6 +180,7 @@ def inspect_gateway_http_surface(host, port, timeout=2):
 def build_gateway_exposure_check(timeout=2, probes=None):
     """Inspect only the default gateway for a small set of local services."""
     gateway_ip, interface = get_default_gateway()
+    is_private_gateway = not is_public_ip(gateway_ip)
     reachable_services = []
     risky_services = []
 
@@ -202,7 +203,7 @@ def build_gateway_exposure_check(timeout=2, probes=None):
             risky_services.append(service)
 
     if risky_services:
-        if is_public_ip(gateway_ip):
+        if not is_private_gateway:
             status = "alert"
             summary = (
                 f"Gateway exposes {len(risky_services)} local web/admin service(s) "
@@ -212,7 +213,7 @@ def build_gateway_exposure_check(timeout=2, probes=None):
             status = "notice"
             summary = (
                 f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
-                f"to the client on {gateway_ip}"
+                f"to the client on {gateway_ip}; this is often expected on a home LAN"
             )
     elif reachable_services:
         status = "ok"
@@ -231,6 +232,12 @@ def build_gateway_exposure_check(timeout=2, probes=None):
         "details": {
             "gateway_ip": gateway_ip,
             "interface": interface,
+            "is_private_gateway": is_private_gateway,
+            "context_note": (
+                "often expected on a private/home LAN"
+                if is_private_gateway and risky_services
+                else None
+            ),
             "reachable_services": reachable_services,
             "risky_services": risky_services,
         },
@@ -263,6 +270,7 @@ def parse_arp_cache_entries(raw_output):
 def build_local_peer_visibility_check():
     """Inspect the passive ARP cache for visible local peers on the current interface."""
     gateway_ip, interface = get_default_gateway()
+    is_private_gateway = not is_public_ip(gateway_ip)
     try:
         entries = parse_arp_cache_entries(run_command(["arp", "-an"]))
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -305,7 +313,80 @@ def build_local_peer_visibility_check():
         "details": {
             "interface": interface,
             "gateway_ip": gateway_ip,
+            "is_private_gateway": is_private_gateway,
+            "context_note": (
+                "often normal on a private/home LAN"
+                if is_private_gateway and visible_peers
+                else None
+            ),
             "visible_peers": visible_peers,
+        },
+    }
+
+
+def build_client_isolation_hint_check(gateway_exposure_check, local_peer_visibility_check):
+    """Summarize whether the current segment appears to expose peer devices to the client."""
+    exposure_details = gateway_exposure_check.get("details", {})
+    peer_details = local_peer_visibility_check.get("details", {})
+    interface = peer_details.get("interface") or exposure_details.get("interface")
+    gateway_ip = peer_details.get("gateway_ip") or exposure_details.get("gateway_ip")
+    is_private_gateway = peer_details.get("is_private_gateway")
+    if is_private_gateway is None:
+        is_private_gateway = exposure_details.get("is_private_gateway")
+    visible_peers = peer_details.get("visible_peers", [])
+    risky_services = exposure_details.get("risky_services", [])
+
+    if visible_peers:
+        status = "notice"
+        hint_level = "peer_visibility_detected"
+        if is_private_gateway:
+            summary = (
+                f"Local peers are already visible to this client on {interface}; this is typical "
+                "for a private/home LAN and suggests client isolation is not enforced"
+            )
+        else:
+            summary = (
+                f"Local peers are already visible to this client on {interface}; client isolation "
+                "is likely absent or relaxed on the current segment"
+            )
+    elif risky_services:
+        status = "ok"
+        hint_level = "gateway_only_visibility"
+        if is_private_gateway:
+            summary = (
+                f"Only gateway-local services are visible on {interface}; no passive peer "
+                "visibility has been observed yet on this private/home LAN"
+            )
+        else:
+            summary = (
+                f"Only gateway-local services are visible on {interface}; no passive peer "
+                "visibility has been observed yet"
+            )
+    else:
+        status = "ok"
+        hint_level = "no_peer_visibility"
+        summary = (
+            f"No local peer visibility is currently evident on {interface}; client isolation may "
+            "be present or peer traffic has not been observed yet"
+        )
+
+    return {
+        "name": "client_isolation_hint",
+        "status": status,
+        "summary": summary,
+        "details": {
+            "interface": interface,
+            "gateway_ip": gateway_ip,
+            "is_private_gateway": bool(is_private_gateway),
+            "hint_level": hint_level,
+            "visible_peer_count": len(visible_peers),
+            "visible_peers": visible_peers[:8],
+            "risky_gateway_service_count": len(risky_services),
+            "context_note": (
+                "typical for a private/home LAN"
+                if is_private_gateway and hint_level == "peer_visibility_detected"
+                else None
+            ),
         },
     }
 
@@ -655,6 +736,122 @@ def build_dns_environment_check():
     }
 
 
+def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks):
+    """Summarize DNS trust posture from resolver classification and domain lookups."""
+    details = dns_environment_check.get("details", {})
+    analysis = details.get("analysis", {})
+    classifications = analysis.get("classifications", [])
+    nameservers = details.get("nameservers", [])
+    classification_types = [item.get("classification") for item in classifications]
+    resolution_alerts = [check for check in dns_resolution_checks if check.get("status") == "alert"]
+    risk_count = len(analysis.get("risks", []))
+
+    if not nameservers:
+        return {
+            "name": "dns_trust_reasoning",
+            "status": "alert",
+            "summary": "DNS trust cannot be assessed because no active DNS servers were detected",
+            "details": {
+                "hint_level": "dns_unavailable",
+                "nameservers": [],
+                "resolver_profile": [],
+                "risk_count": 0,
+                "resolution_issue_count": 0,
+                "affected_domains": [],
+                "context_note": None,
+            },
+        }
+
+    if resolution_alerts:
+        return {
+            "name": "dns_trust_reasoning",
+            "status": "alert",
+            "summary": f"DNS trust is degraded: {len(resolution_alerts)} domain lookup issue(s) were observed",
+            "details": {
+                "hint_level": "resolution_failure",
+                "nameservers": nameservers,
+                "resolver_profile": classification_types,
+                "risk_count": risk_count,
+                "resolution_issue_count": len(resolution_alerts),
+                "affected_domains": [
+                    check.get("details", {}).get("domain")
+                    for check in resolution_alerts
+                    if check.get("details", {}).get("domain")
+                ],
+                "context_note": "public name resolution did not behave normally",
+            },
+        }
+
+    if "public_upstream" in classification_types:
+        local_classes = {"gateway_dns", "local_private", "on_link", "directly_reachable"}
+        mixed_local_and_public = any(item in local_classes for item in classification_types)
+        return {
+            "name": "dns_trust_reasoning",
+            "status": "alert",
+            "summary": (
+                "DNS path mixes local/private and public upstream resolvers"
+                if mixed_local_and_public
+                else "System resolver points directly at public upstream DNS"
+            ),
+            "details": {
+                "hint_level": "mixed_dns_path" if mixed_local_and_public else "public_upstream_dns_present",
+                "nameservers": nameservers,
+                "resolver_profile": classification_types,
+                "risk_count": risk_count,
+                "resolution_issue_count": 0,
+                "affected_domains": [],
+                "context_note": "can be legitimate, but is less typical for private/home LANs and some guest networks",
+            },
+        }
+
+    if "gateway_dns" in classification_types:
+        return {
+            "name": "dns_trust_reasoning",
+            "status": "ok",
+            "summary": "DNS path looks local and expected: the current gateway is acting as resolver",
+            "details": {
+                "hint_level": "gateway_dns_expected",
+                "nameservers": nameservers,
+                "resolver_profile": classification_types,
+                "risk_count": risk_count,
+                "resolution_issue_count": 0,
+                "affected_domains": [],
+                "context_note": "typical for private/home LANs and many managed networks",
+            },
+        }
+
+    if any(item in {"local_private", "on_link", "directly_reachable"} for item in classification_types):
+        return {
+            "name": "dns_trust_reasoning",
+            "status": "ok",
+            "summary": "DNS path looks local/on-link and does not currently show trust anomalies",
+            "details": {
+                "hint_level": "private_local_dns_expected",
+                "nameservers": nameservers,
+                "resolver_profile": classification_types,
+                "risk_count": risk_count,
+                "resolution_issue_count": 0,
+                "affected_domains": [],
+                "context_note": "consistent with local or directly reachable resolvers",
+            },
+        }
+
+    return {
+        "name": "dns_trust_reasoning",
+        "status": "ok",
+        "summary": "DNS path does not currently show a strong trust signal in either direction",
+        "details": {
+            "hint_level": "dns_path_unclear",
+            "nameservers": nameservers,
+            "resolver_profile": classification_types,
+            "risk_count": risk_count,
+            "resolution_issue_count": 0,
+            "affected_domains": [],
+            "context_note": None,
+        },
+    }
+
+
 def fetch_url(url, timeout=5, context=None):
     handlers = [NoRedirectHandler]
     if context is not None:
@@ -711,6 +908,65 @@ def run_captive_portal_checks(probes=None, timeout=5):
             }
         )
     return checks
+
+
+def build_captive_trust_reasoning_check(captive_checks):
+    """Summarize captive-portal probe results into one trust interpretation."""
+    alerts = [check for check in captive_checks if check.get("status") == "alert"]
+    if not captive_checks:
+        return {
+            "name": "captive_trust_reasoning",
+            "status": "ok",
+            "summary": "No captive-portal probes were run",
+            "details": {
+                "hint_level": "no_probes",
+                "probe_count": 0,
+                "alert_probe_count": 0,
+                "affected_probes": [],
+                "context_note": None,
+            },
+        }
+
+    if not alerts:
+        return {
+            "name": "captive_trust_reasoning",
+            "status": "ok",
+            "summary": "Captive-portal probes look normal; no HTTP interception is evident",
+            "details": {
+                "hint_level": "normal_internet_path",
+                "probe_count": len(captive_checks),
+                "alert_probe_count": 0,
+                "affected_probes": [],
+                "context_note": "connectivity-check endpoints behaved as expected",
+            },
+        }
+
+    alert_names = [check["name"].replace("captive_", "") for check in alerts]
+    if len(alerts) == len(captive_checks):
+        hint_level = "likely_captive_portal"
+        summary = (
+            f"All captive-portal probes behaved unexpectedly; captive portal or broad HTTP interception is likely"
+        )
+        context_note = "multiple independent connectivity checks were affected"
+    else:
+        hint_level = "partial_http_interception"
+        summary = (
+            f"{len(alerts)} of {len(captive_checks)} captive-portal probe(s) behaved unexpectedly; partial interception or a portal edge case is possible"
+        )
+        context_note = "some HTTP checks were affected while others still looked normal"
+
+    return {
+        "name": "captive_trust_reasoning",
+        "status": "alert",
+        "summary": summary,
+        "details": {
+            "hint_level": hint_level,
+            "probe_count": len(captive_checks),
+            "alert_probe_count": len(alerts),
+            "affected_probes": alert_names,
+            "context_note": context_note,
+        },
+    }
 
 
 def probe_https_endpoint(url, timeout=5):
@@ -1426,6 +1682,83 @@ def run_https_tls_checks(probes=None, timeout=5):
     return checks
 
 
+def build_https_trust_reasoning_check(https_checks):
+    """Summarize HTTPS/TLS probe results into one trust interpretation."""
+    alerts = [check for check in https_checks if check.get("status") == "alert"]
+    if not https_checks:
+        return {
+            "name": "https_trust_reasoning",
+            "status": "ok",
+            "summary": "No HTTPS/TLS probes were run",
+            "details": {
+                "hint_level": "no_probes",
+                "probe_count": 0,
+                "alert_probe_count": 0,
+                "affected_probes": [],
+                "context_note": None,
+            },
+        }
+
+    if not alerts:
+        return {
+            "name": "https_trust_reasoning",
+            "status": "ok",
+            "summary": "HTTPS/TLS probes look normal; certificate-validated web access appears healthy",
+            "details": {
+                "hint_level": "normal_https_path",
+                "probe_count": len(https_checks),
+                "alert_probe_count": 0,
+                "affected_probes": [],
+                "context_note": "TLS validation and expected HTTPS responses both succeeded",
+            },
+        }
+
+    alert_names = [check["name"].replace("https_", "") for check in alerts]
+    tls_failures = [
+        check for check in alerts if "TLS verification failed" in check.get("summary", "")
+    ]
+
+    if tls_failures:
+        return {
+            "name": "https_trust_reasoning",
+            "status": "alert",
+            "summary": (
+                f"{len(tls_failures)} HTTPS probe(s) failed certificate validation; TLS interception or trust problems are possible"
+            ),
+            "details": {
+                "hint_level": "certificate_validation_failure",
+                "probe_count": len(https_checks),
+                "alert_probe_count": len(alerts),
+                "affected_probes": alert_names,
+                "context_note": "certificate validation should normally succeed on a healthy internet path",
+            },
+        }
+
+    if len(alerts) == len(https_checks):
+        hint_level = "broad_https_failure"
+        summary = "All HTTPS probes failed or returned unexpected responses; secure web access looks degraded"
+        context_note = "this can indicate broader connectivity problems, interception, or upstream filtering"
+    else:
+        hint_level = "partial_https_failure"
+        summary = (
+            f"{len(alerts)} of {len(https_checks)} HTTPS probe(s) failed or returned unexpected responses; selective HTTPS disruption is possible"
+        )
+        context_note = "some HTTPS endpoints still behaved normally while others did not"
+
+    return {
+        "name": "https_trust_reasoning",
+        "status": "alert",
+        "summary": summary,
+        "details": {
+            "hint_level": hint_level,
+            "probe_count": len(https_checks),
+            "alert_probe_count": len(alerts),
+            "affected_probes": alert_names,
+            "context_note": context_note,
+        },
+    }
+
+
 def run_network_health_checks(
     *,
     dns_domains=None,
@@ -1433,19 +1766,41 @@ def run_network_health_checks(
     wifi_stability_seconds=0,
     wifi_stability_progress_callback=None,
 ):
+    gateway_identity_check = resolve_gateway_identity()
+    gateway_fingerprint_check = resolve_gateway_fingerprint()
+    gateway_exposure_check = build_gateway_exposure_check(timeout=timeout)
+    local_peer_visibility_check = build_local_peer_visibility_check()
+    client_isolation_hint_check = build_client_isolation_hint_check(
+        gateway_exposure_check,
+        local_peer_visibility_check,
+    )
+    dns_environment_check = build_dns_environment_check()
+    dns_resolution_checks = run_dns_consistency_checks(dns_domains)
+    dns_trust_reasoning_check = build_dns_trust_reasoning_check(
+        dns_environment_check,
+        dns_resolution_checks,
+    )
+    captive_checks = run_captive_portal_checks(timeout=timeout)
+    captive_trust_reasoning_check = build_captive_trust_reasoning_check(captive_checks)
+    https_checks = run_https_tls_checks(timeout=timeout)
+    https_trust_reasoning_check = build_https_trust_reasoning_check(https_checks)
     checks = [
-        resolve_gateway_identity(),
-        resolve_gateway_fingerprint(),
-        build_gateway_exposure_check(timeout=timeout),
-        build_local_peer_visibility_check(),
-        build_dns_environment_check(),
+        gateway_identity_check,
+        gateway_fingerprint_check,
+        gateway_exposure_check,
+        local_peer_visibility_check,
+        client_isolation_hint_check,
+        dns_environment_check,
+        dns_trust_reasoning_check,
     ]
     wifi_environment_check = build_wifi_environment_check()
     checks.append(wifi_environment_check)
     checks.append(build_active_path_check(wifi_environment_check.get("details")))
-    checks.extend(run_dns_consistency_checks(dns_domains))
-    checks.extend(run_captive_portal_checks(timeout=timeout))
-    checks.extend(run_https_tls_checks(timeout=timeout))
+    checks.extend(dns_resolution_checks)
+    checks.extend(captive_checks)
+    checks.append(captive_trust_reasoning_check)
+    checks.extend(https_checks)
+    checks.append(https_trust_reasoning_check)
     if wifi_stability_seconds and wifi_stability_seconds > 0:
         stability_check = run_wifi_stability_diagnostics(
             duration_seconds=wifi_stability_seconds,
