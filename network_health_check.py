@@ -504,15 +504,25 @@ def print_alert_report(summary):
 
 def build_health_markdown_report(scan_context, checks, summary):
     """Build a Markdown report for network health checks."""
+    assessment = build_trust_assessment(summary)
     lines = [
         "# Network Health Report",
         "",
         "## Scan Context",
         "",
         render_markdown_table(
-            ["Interface", "CIDR", "Alerts", "Total checks"],
-            [[scan_context.get("interface"), scan_context.get("cidr"), summary["alert_checks"], summary["total_checks"]]],
+            ["Interface", "CIDR", "Trust", "Alerts", "Notices", "Total checks"],
+            [[
+                scan_context.get("interface"),
+                scan_context.get("cidr"),
+                assessment["level"],
+                summary["alert_checks"],
+                summary.get("notice_checks", 0),
+                summary["total_checks"],
+            ]],
         ),
+        "",
+        assessment["summary"],
         "",
         "## Health Checks",
         "",
@@ -635,10 +645,12 @@ def run_health_check_collection(args):
         ),
     )
     summary = build_health_summary(checks)
+    trust_assessment = build_trust_assessment(summary)
     payload = {
         "scan_context": scan_context,
         "health_checks": checks,
         "health_summary": summary,
+        "trust_assessment": trust_assessment,
     }
     return scan_context, checks, summary, payload
 

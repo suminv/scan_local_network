@@ -954,9 +954,11 @@ Wi-Fi:
                 markdown = handle.read()
             self.assertEqual(payload["scan_context"]["interface"], "en0")
             self.assertEqual(payload["health_summary"]["alert_checks"], 0)
+            self.assertEqual(payload["trust_assessment"]["level"], "trusted")
             self.assertIn("# Network Health Report", markdown)
             self.assertIn("## Health Checks", markdown)
             self.assertIn("| Check | Status | Summary |", markdown)
+            self.assertIn("No active alerts detected in network, DNS, Wi-Fi, or internet probes.", markdown)
 
     def test_build_trust_assessment_maps_alert_counts(self):
         self.assertEqual(

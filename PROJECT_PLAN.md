@@ -146,6 +146,7 @@ Completed:
 - Port scan JSON export includes both the full snapshot and the diff summary.
 - Minimal ARP diff summary added for new devices, returned devices, missing devices, and IP changes.
 - ARP scanner supports explicit DB and JSON output paths.
+- Port scanner now also supports an explicit shared DB path.
 - ARP JSON export now includes both the full snapshot and the diff summary.
 - Shared reporting helpers are now used by both scanners for JSON report generation.
 - Shared reporting helpers are now also used for diff-style console summaries.

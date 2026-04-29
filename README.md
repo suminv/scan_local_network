@@ -212,13 +212,19 @@ This tool discovers devices and then scans them for open TCP ports and running s
 **Recommended Synology NAS run:**
 
 ```bash
-sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24
+sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24 --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
 ```
 
 **To save a machine-readable port scan report:**
 
 ```bash
 ./scan-ports --json-out data/reports/port_scan_result.json
+```
+
+**To store port-scan history in an explicit SQLite database path:**
+
+```bash
+./scan-ports --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
 ```
 
 **To also export the port snapshot as CSV:**
@@ -434,7 +440,7 @@ The standard report now also includes a top-level trust assessment:
 
 **What gets stored after each health run:**
 
-- full JSON export at the configured `--json-out` path with `scan_context`, `health_checks`, and `health_summary`
+- full JSON export at the configured `--json-out` path with `scan_context`, `health_checks`, `health_summary`, and `trust_assessment`
 - optional Markdown export at the configured `--md-out` path
 
 ## ⚙️ Configuration
@@ -453,6 +459,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.
 -   **`network_health_check.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.
+-   **`port_scan.py --db-file`**: Optional SQLite database path for shared scan history.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
