@@ -237,6 +237,79 @@ def build_gateway_exposure_check(timeout=2, probes=None):
     }
 
 
+def parse_arp_cache_entries(raw_output):
+    """Parse `arp -an` output into structured entries."""
+    entries = []
+    pattern = re.compile(
+        r"\?\s+\((?P<ip>[^)]+)\)\s+at\s+(?P<mac>\S+)\s+on\s+(?P<interface>\S+)"
+    )
+    for line in raw_output.splitlines():
+        match = pattern.search(line.strip())
+        if not match:
+            continue
+        mac = match.group("mac")
+        if mac == "(incomplete)":
+            continue
+        entries.append(
+            {
+                "ip": match.group("ip"),
+                "mac": mac,
+                "interface": match.group("interface"),
+            }
+        )
+    return entries
+
+
+def build_local_peer_visibility_check():
+    """Inspect the passive ARP cache for visible local peers on the current interface."""
+    gateway_ip, interface = get_default_gateway()
+    try:
+        entries = parse_arp_cache_entries(run_command(["arp", "-an"]))
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return {
+            "name": "local_peer_visibility",
+            "status": "ok",
+            "summary": "ARP cache inspection is unavailable on this platform/setup",
+            "details": {"interface": interface, "gateway_ip": gateway_ip, "visible_peers": []},
+        }
+
+    visible_peers = []
+    for entry in entries:
+        if entry["interface"] != interface:
+            continue
+        if entry["ip"] == gateway_ip:
+            continue
+        try:
+            ip_obj = ipaddress.ip_address(entry["ip"])
+        except ValueError:
+            continue
+        if ip_obj.version != 4 or ip_obj.is_loopback or ip_obj.is_link_local:
+            continue
+        if not ip_obj.is_private:
+            continue
+        visible_peers.append(entry)
+
+    if visible_peers:
+        status = "notice"
+        summary = (
+            f"ARP cache shows {len(visible_peers)} local peer(s) besides the gateway on {interface}"
+        )
+    else:
+        status = "ok"
+        summary = f"No additional local peers are currently visible in ARP cache on {interface}"
+
+    return {
+        "name": "local_peer_visibility",
+        "status": status,
+        "summary": summary,
+        "details": {
+            "interface": interface,
+            "gateway_ip": gateway_ip,
+            "visible_peers": visible_peers,
+        },
+    }
+
+
 def lookup_arp_mac(ip, interface=None):
     try:
         output = run_command(["arp", "-an"])
@@ -1364,6 +1437,7 @@ def run_network_health_checks(
         resolve_gateway_identity(),
         resolve_gateway_fingerprint(),
         build_gateway_exposure_check(timeout=timeout),
+        build_local_peer_visibility_check(),
         build_dns_environment_check(),
     ]
     wifi_environment_check = build_wifi_environment_check()

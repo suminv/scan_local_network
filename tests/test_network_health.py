@@ -148,6 +148,44 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["status"], "alert")
         self.assertIn("Gateway exposes 1 local web/admin service", result["summary"])
 
+    def test_parse_arp_cache_entries_extracts_completed_rows(self):
+        entries = network_health.parse_arp_cache_entries(
+            "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
+            "? (192.168.2.20) at (incomplete) on en0 ifscope [ethernet]\n"
+            "? (192.168.2.21) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+        )
+
+        self.assertEqual(
+            entries,
+            [
+                {"ip": "192.168.2.1", "mac": "40:3f:8c:c6:39:37", "interface": "en0"},
+                {"ip": "192.168.2.21", "mac": "aa:bb:cc:dd:ee:ff", "interface": "en0"},
+            ],
+        )
+
+    def test_build_local_peer_visibility_check_marks_visible_private_peers_as_notice(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.run_command",
+                return_value=(
+                    "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
+                    "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+                    "? (10.0.0.8) at 11:22:33:44:55:66 on en1 ifscope [ethernet]\n"
+                ),
+            ):
+                result = network_health.build_local_peer_visibility_check()
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["visible_peers"][0]["ip"], "192.168.2.22")
+
+    def test_build_local_peer_visibility_check_marks_empty_cache_ok(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch("network_health.run_command", return_value=""):
+                result = network_health.build_local_peer_visibility_check()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["visible_peers"], [])
+
     def test_parse_scutil_dns_extracts_nameservers(self):
         resolvers = network_health.parse_scutil_dns(
             """
@@ -753,29 +791,31 @@ Wi-Fi:
         with mock.patch("network_health.resolve_gateway_identity", return_value={"name": "gateway_identity", "status": "ok"}):
             with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
                 with mock.patch("network_health.build_gateway_exposure_check", return_value={"name": "gateway_exposure", "status": "ok"}):
-                    with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
-                        with mock.patch(
-                            "network_health.build_wifi_environment_check",
-                            return_value={
-                                "name": "wifi_environment",
-                                "status": "ok",
-                                "details": {
-                                    "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
-                                    "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
-                                },
-                            },
-                        ):
+                    with mock.patch("network_health.build_local_peer_visibility_check", return_value={"name": "local_peer_visibility", "status": "ok"}):
+                        with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
                             with mock.patch(
-                                "network_health.build_active_path_check",
-                                return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                                "network_health.build_wifi_environment_check",
+                                return_value={
+                                    "name": "wifi_environment",
+                                    "status": "ok",
+                                    "details": {
+                                        "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
+                                        "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+                                    },
+                                },
                             ):
-                                with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
-                                    with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
-                                        with mock.patch("network_health.run_https_tls_checks", return_value=[]):
-                                            checks = network_health.run_network_health_checks()
+                                with mock.patch(
+                                    "network_health.build_active_path_check",
+                                    return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                                ):
+                                    with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
+                                        with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
+                                            with mock.patch("network_health.run_https_tls_checks", return_value=[]):
+                                                checks = network_health.run_network_health_checks()
 
         self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
         self.assertTrue(any(check["name"] == "gateway_exposure" for check in checks))
+        self.assertTrue(any(check["name"] == "local_peer_visibility" for check in checks))
 
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -1095,6 +1135,33 @@ Wi-Fi:
         self.assertIn("title: Router Login", output)
         self.assertIn("page_hint: html document", output)
         self.assertIn("Notices: 1", output)
+
+    def test_print_health_report_renders_local_peer_visibility_check(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "local_peer_visibility",
+                "status": "notice",
+                "summary": "ARP cache shows 2 local peer(s) besides the gateway on en0",
+                "details": {
+                    "interface": "en0",
+                    "gateway_ip": "192.168.2.1",
+                    "visible_peers": [
+                        {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
+                        {"ip": "192.168.2.23", "mac": "11:22:33:44:55:66"},
+                    ],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": checks}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(checks, summary)
+
+        output = buffer.getvalue()
+        self.assertIn("Local peer visibility", output)
+        self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
+        self.assertIn("[~]", output)
 
     def test_print_health_report_formats_wifi_nearby_networks_compactly(self):
         buffer = StringIO()

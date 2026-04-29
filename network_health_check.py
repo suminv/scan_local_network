@@ -17,7 +17,7 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 CHECK_GROUPS = [
-    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "active_path"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "active_path"]),
     ("DNS", ["dns_environment", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_", "https_"]),
@@ -26,6 +26,7 @@ CHECK_LABELS = {
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
     "gateway_exposure": "Gateway exposure",
+    "local_peer_visibility": "Local peer visibility",
     "active_path": "Active path",
     "dns_environment": "DNS servers",
     "wifi_environment": "Wi-Fi environment",
@@ -99,6 +100,24 @@ def format_gateway_exposure_details(details):
             lines.append(f"      page_hint: {http_probe['page_hint']}")
         if http_probe.get("error"):
             lines.append(f"      probe_error: {http_probe['error']}")
+    return lines
+
+
+def format_local_peer_visibility_details(details):
+    lines = [
+        f"  interface: {details.get('interface')}",
+        f"  gateway: {details.get('gateway_ip')}",
+    ]
+    peers = details.get("visible_peers", [])
+    if not peers:
+        lines.append("  visible peers: none")
+        return lines
+    lines.append("  visible peers:")
+    for peer in peers[:8]:
+        lines.append(f"    - {peer['ip']} ({peer['mac']})")
+    extra_count = max(0, len(peers) - 8)
+    if extra_count:
+        lines.append(f"    - ... {extra_count} more")
     return lines
 
 
@@ -242,6 +261,8 @@ def format_check_details(check):
         return format_gateway_fingerprint_details(details)
     if name == "gateway_exposure":
         return format_gateway_exposure_details(details)
+    if name == "local_peer_visibility":
+        return format_local_peer_visibility_details(details)
     if name == "active_path":
         return format_active_path_details(details)
     if name == "dns_environment":

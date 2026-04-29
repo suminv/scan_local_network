@@ -95,7 +95,7 @@ Current role:
 Remaining work:
 
 - expand macOS-first Wi-Fi environment detail where the platform allows it
-- improve guest/open-network exposure assessment beyond the current gateway-local visibility check without crossing into broad active scanning
+- improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
 - keep refining dual-connectivity, mesh instability, and route/path diagnostics
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
@@ -171,6 +171,7 @@ Completed:
 - Mesh-oriented Wi-Fi stability diagnostics are now an explicit follow-up track for `network-health-check`.
 - `network-health-check` now raises an explicit `active_path` alert for dual-connected macOS scenarios where Ethernet is active while Wi-Fi is also connected.
 - `network-health-check` now includes a gateway-local exposure check to show whether the current gateway exposes DNS and web/admin surfaces directly to the client.
+- `network-health-check` now includes a passive `local_peer_visibility` check based on the current ARP cache to show whether peer devices are already visible on the local segment without broad active probing.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
