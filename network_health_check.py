@@ -492,7 +492,15 @@ def print_alert_report(summary):
     print("=== Network Health Alerts ===")
     alerts = summary["alerts"]
     if not alerts:
-        print("No actionable health alerts detected.")
+        notices = summary.get("notices", [])
+        if notices:
+            print("No actionable health alerts detected.")
+            print(f"Notices present: {len(notices)}")
+            for check in notices:
+                print(f"\n{format_status_badge('NOTICE')} {format_check_label(check['name'])}")
+                print(check["summary"])
+        else:
+            print("No actionable health alerts detected.")
         print("=============================")
         return
     print(f"Alerts: {len(alerts)}")
@@ -676,7 +684,9 @@ def maybe_send_health_webhook(webhook_url, timeout, scan_context, summary):
         scan_context=scan_context,
         alert_summary={
             "has_alerts": True,
+            "has_notices": bool(summary.get("notice_checks", 0)),
             "alert_checks": summary.get("alert_checks", 0),
+            "notice_checks": summary.get("notice_checks", 0),
             "total_checks": summary.get("total_checks", 0),
         },
         alerts={"health_alerts": summary.get("alerts", [])},

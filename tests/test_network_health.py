@@ -392,6 +392,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
     def test_maybe_send_health_webhook_sends_expected_payload(self):
         summary = {
             "alert_checks": 1,
+            "notice_checks": 1,
             "total_checks": 4,
             "alerts": [{"name": "active_path", "status": "alert", "summary": "Default route mismatch"}],
         }
@@ -408,6 +409,8 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         payload = sender.call_args.args[1]
         self.assertEqual(payload["source"], "network_health_check")
         self.assertEqual(payload["alert_summary"]["alert_checks"], 1)
+        self.assertEqual(payload["alert_summary"]["notice_checks"], 1)
+        self.assertTrue(payload["alert_summary"]["has_notices"])
         self.assertEqual(payload["alerts"]["health_alerts"], summary["alerts"])
         self.assertEqual(sender.call_args.kwargs["timeout"], 12)
 
@@ -834,6 +837,28 @@ Wi-Fi:
             network_health_check.print_alert_report({"alerts": []})
 
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
+
+    def test_print_alert_report_includes_notices_without_escalating(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            network_health_check.print_alert_report(
+                {
+                    "alerts": [],
+                    "notices": [
+                        {
+                            "name": "gateway_exposure",
+                            "status": "notice",
+                            "summary": "Private/local gateway exposes 2 local web/admin service(s) to the client on 192.168.2.254",
+                        }
+                    ],
+                }
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("No actionable health alerts detected.", output)
+        self.assertIn("Notices present: 1", output)
+        self.assertIn("Gateway exposure", output)
+        self.assertIn("[~]", output)
 
     def test_resolve_report_output_paths_uses_defaults_and_optional_overrides(self):
         args = mock.Mock(json_out=None, md_out="health.md")
