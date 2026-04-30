@@ -1384,6 +1384,39 @@ Wi-Fi:
             "untrusted",
         )
 
+    def test_build_trust_assessment_marks_guest_local_exposure_combo_as_suspicious(self):
+        assessment = network_health_check.build_trust_assessment(
+            {
+                "alert_checks": 0,
+                "notice_checks": 2,
+                "notices": [
+                    {"name": "gateway_exposure"},
+                    {"name": "overall_trust_explanation"},
+                ],
+            },
+            scan_context={"network_profile": "guest"},
+        )
+
+        self.assertEqual(assessment["level"], "suspicious")
+        self.assertIn("guest network", assessment["summary"])
+        self.assertIn("Primary reasons: Gateway exposure, Overall trust explanation", assessment["summary"])
+
+    def test_format_notice_reason_labels_returns_human_readable_summary(self):
+        labels = network_health_check.format_notice_reason_labels(
+            {
+                "notices": [
+                    {"name": "gateway_exposure"},
+                    {"name": "overall_trust_explanation"},
+                    {"name": "client_isolation_hint"},
+                ]
+            }
+        )
+
+        self.assertEqual(
+            labels,
+            "Primary reasons: Gateway exposure, Overall trust explanation, Client isolation hint",
+        )
+
     def test_print_health_report_formats_dns_without_raw_resolver_dump(self):
         buffer = StringIO()
         checks = [

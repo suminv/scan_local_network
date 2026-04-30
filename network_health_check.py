@@ -461,10 +461,45 @@ def format_top_notice_summary(summary):
     return f"Notice areas: {', '.join(labels)}{suffix}"
 
 
-def build_trust_assessment(summary):
+def format_notice_reason_labels(summary, limit=3):
+    notices = summary.get("notices", [])
+    if not notices:
+        return None
+    labels = [format_check_label(check["name"]) for check in notices[:limit]]
+    suffix = " ..." if len(notices) > limit else ""
+    return f"Primary reasons: {', '.join(labels)}{suffix}"
+
+
+def build_trust_assessment(summary, scan_context=None):
     alert_count = summary.get("alert_checks", 0)
     notice_count = summary.get("notice_checks", 0)
+    network_profile = format_network_profile_label(scan_context)
+    notice_names = {check["name"] for check in summary.get("notices", [])}
     if alert_count == 0:
+        if network_profile in {"guest", "travel"}:
+            local_segment_notice_count = len(
+                notice_names.intersection(
+                    {
+                        "gateway_exposure",
+                        "local_peer_visibility",
+                        "client_isolation_hint",
+                        "overall_trust_explanation",
+                    }
+                )
+            )
+            if local_segment_notice_count >= 2 and (
+                "overall_trust_explanation" in notice_names
+                or "client_isolation_hint" in notice_names
+            ):
+                reason_labels = format_notice_reason_labels(summary)
+                reason_suffix = f" {reason_labels}." if reason_labels else ""
+                return {
+                    "level": "suspicious",
+                    "summary": (
+                        f"No hard alerts are active, but the local segment looks more exposed than expected "
+                        f"for a {network_profile} network.{reason_suffix}"
+                    ),
+                }
         if notice_count:
             return {
                 "level": "trusted",
@@ -520,7 +555,7 @@ def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
 
 
 def print_health_report(checks, summary, scan_context=None):
-    assessment = build_trust_assessment(summary)
+    assessment = build_trust_assessment(summary, scan_context=scan_context)
     print("=== Network Health Check ===")
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
@@ -542,7 +577,7 @@ def print_health_report(checks, summary, scan_context=None):
 
 
 def print_focus_health_report(checks, summary, scan_context=None):
-    assessment = build_trust_assessment(summary)
+    assessment = build_trust_assessment(summary, scan_context=scan_context)
     print("=== Network Health Focus ===")
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
@@ -678,7 +713,7 @@ def print_alert_report(summary, scan_context=None):
 
 def build_health_markdown_report(scan_context, checks, summary):
     """Build a Markdown report for network health checks."""
-    assessment = build_trust_assessment(summary)
+    assessment = build_trust_assessment(summary, scan_context=scan_context)
     lines = [
         "# Network Health Report",
         "",
@@ -831,7 +866,7 @@ def run_health_check_collection(args):
         ),
     )
     summary = build_health_summary(checks)
-    trust_assessment = build_trust_assessment(summary)
+    trust_assessment = build_trust_assessment(summary, scan_context=scan_context)
     payload = {
         "scan_context": scan_context,
         "health_checks": checks,
