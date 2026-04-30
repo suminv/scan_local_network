@@ -1880,14 +1880,8 @@ def build_overall_trust_explanation_check(
     }
 
 
-def run_network_health_checks(
-    *,
-    dns_domains=None,
-    timeout=5,
-    network_profile=DEFAULT_NETWORK_PROFILE,
-    wifi_stability_seconds=0,
-    wifi_stability_progress_callback=None,
-):
+def collect_local_segment_checks(*, timeout=5, network_profile=DEFAULT_NETWORK_PROFILE):
+    """Collect gateway and local-segment trust checks as one composable bundle."""
     network_profile = normalize_network_profile(network_profile)
     gateway_identity_check = resolve_gateway_identity()
     gateway_fingerprint_check = resolve_gateway_fingerprint()
@@ -1903,6 +1897,17 @@ def run_network_health_checks(
         local_peer_visibility_check,
         network_profile=network_profile,
     )
+    return {
+        "gateway_identity": gateway_identity_check,
+        "gateway_fingerprint": gateway_fingerprint_check,
+        "gateway_exposure": gateway_exposure_check,
+        "local_peer_visibility": local_peer_visibility_check,
+        "client_isolation_hint": client_isolation_hint_check,
+    }
+
+
+def collect_internet_path_checks(*, dns_domains=None, timeout=5):
+    """Collect DNS, captive-portal, and HTTPS trust checks as one composable bundle."""
     dns_environment_check = build_dns_environment_check()
     dns_resolution_checks = run_dns_consistency_checks(dns_domains)
     dns_trust_reasoning_check = build_dns_trust_reasoning_check(
@@ -1913,30 +1918,58 @@ def run_network_health_checks(
     captive_trust_reasoning_check = build_captive_trust_reasoning_check(captive_checks)
     https_checks = run_https_tls_checks(timeout=timeout)
     https_trust_reasoning_check = build_https_trust_reasoning_check(https_checks)
+    return {
+        "dns_environment": dns_environment_check,
+        "dns_resolution_checks": dns_resolution_checks,
+        "dns_trust_reasoning": dns_trust_reasoning_check,
+        "captive_checks": captive_checks,
+        "captive_trust_reasoning": captive_trust_reasoning_check,
+        "https_checks": https_checks,
+        "https_trust_reasoning": https_trust_reasoning_check,
+    }
+
+
+def run_network_health_checks(
+    *,
+    dns_domains=None,
+    timeout=5,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+    wifi_stability_seconds=0,
+    wifi_stability_progress_callback=None,
+):
+    network_profile = normalize_network_profile(network_profile)
+    local_segment = collect_local_segment_checks(
+        timeout=timeout,
+        network_profile=network_profile,
+    )
+    internet_path = collect_internet_path_checks(
+        dns_domains=dns_domains,
+        timeout=timeout,
+    )
     checks = [
-        gateway_identity_check,
-        gateway_fingerprint_check,
-        gateway_exposure_check,
-        local_peer_visibility_check,
-        client_isolation_hint_check,
-        dns_environment_check,
-        dns_trust_reasoning_check,
+        local_segment["gateway_identity"],
+        local_segment["gateway_fingerprint"],
+        local_segment["gateway_exposure"],
+        local_segment["local_peer_visibility"],
+        local_segment["client_isolation_hint"],
+        internet_path["dns_environment"],
+        internet_path["dns_trust_reasoning"],
     ]
     wifi_environment_check = build_wifi_environment_check()
     checks.append(wifi_environment_check)
     active_path_check = build_active_path_check(wifi_environment_check.get("details"))
     checks.append(active_path_check)
-    checks.extend(dns_resolution_checks)
-    checks.extend(captive_checks)
-    checks.append(captive_trust_reasoning_check)
-    checks.extend(https_checks)
-    checks.append(https_trust_reasoning_check)
+    checks.extend(internet_path["dns_resolution_checks"])
+    checks.extend(internet_path["captive_checks"])
+    checks.append(internet_path["captive_trust_reasoning"])
+    checks.extend(internet_path["https_checks"])
+    checks.append(internet_path["https_trust_reasoning"])
     checks.append(
         build_overall_trust_explanation_check(
-            client_isolation_hint_check,
-            dns_trust_reasoning_check,
-            captive_trust_reasoning_check,
-            https_trust_reasoning_check,
+            local_segment["client_isolation_hint"],
+            internet_path["dns_trust_reasoning"],
+            internet_path["captive_trust_reasoning"],
+            internet_path["https_trust_reasoning"],
             active_path_check=active_path_check,
             network_profile=network_profile,
         )

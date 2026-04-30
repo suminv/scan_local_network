@@ -1127,6 +1127,48 @@ Wi-Fi:
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["affected_components"], ["DNS", "HTTPS", "Active path"])
 
+    def test_collect_local_segment_checks_returns_expected_bundle(self):
+        with mock.patch("network_health.resolve_gateway_identity", return_value={"name": "gateway_identity", "status": "ok"}):
+            with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
+                with mock.patch("network_health.build_gateway_exposure_check", return_value={"name": "gateway_exposure", "status": "ok"}):
+                    with mock.patch("network_health.build_local_peer_visibility_check", return_value={"name": "local_peer_visibility", "status": "ok"}):
+                        with mock.patch("network_health.build_client_isolation_hint_check", return_value={"name": "client_isolation_hint", "status": "ok"}):
+                            checks = network_health.collect_local_segment_checks(
+                                timeout=3,
+                                network_profile="guest",
+                            )
+
+        self.assertEqual(sorted(checks.keys()), [
+            "client_isolation_hint",
+            "gateway_exposure",
+            "gateway_fingerprint",
+            "gateway_identity",
+            "local_peer_visibility",
+        ])
+
+    def test_collect_internet_path_checks_returns_expected_bundle(self):
+        with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
+            with mock.patch("network_health.run_dns_consistency_checks", return_value=[{"name": "dns_example.com", "status": "ok"}]):
+                with mock.patch("network_health.build_dns_trust_reasoning_check", return_value={"name": "dns_trust_reasoning", "status": "ok"}):
+                    with mock.patch("network_health.run_captive_portal_checks", return_value=[{"name": "captive_gstatic_204", "status": "ok"}]):
+                        with mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}):
+                            with mock.patch("network_health.run_https_tls_checks", return_value=[{"name": "https_example_https", "status": "ok"}]):
+                                with mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
+                                    checks = network_health.collect_internet_path_checks(
+                                        dns_domains=["example.com"],
+                                        timeout=4,
+                                    )
+
+        self.assertEqual(sorted(checks.keys()), [
+            "captive_checks",
+            "captive_trust_reasoning",
+            "dns_environment",
+            "dns_resolution_checks",
+            "dns_trust_reasoning",
+            "https_checks",
+            "https_trust_reasoning",
+        ])
+
     def test_build_health_summary_counts_alerts(self):
         summary = network_health.build_health_summary(
             [
