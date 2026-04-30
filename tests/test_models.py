@@ -10,6 +10,16 @@ class ModelTests(unittest.TestCase):
             {"interface": "en0", "cidr": "192.168.2.0/24"},
         )
 
+    def test_build_scan_context_includes_network_profile_when_given(self):
+        self.assertEqual(
+            models.build_scan_context(
+                interface="en0",
+                cidr="192.168.2.0/24",
+                network_profile="guest",
+            ),
+            {"interface": "en0", "cidr": "192.168.2.0/24", "network_profile": "guest"},
+        )
+
     def test_build_device_snapshot_keeps_optional_fields_only_when_given(self):
         device = models.build_device_snapshot(
             ip="192.168.2.10",

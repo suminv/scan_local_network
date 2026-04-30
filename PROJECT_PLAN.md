@@ -70,7 +70,7 @@ If active probing of open/public networks becomes a real goal, that should be a 
 
 Priority:
 
-- High
+- Secondary / maintenance
 
 Current role:
 
@@ -95,7 +95,7 @@ Backlog:
 
 Priority:
 
-- High
+- Primary
 
 Current role:
 
@@ -104,11 +104,11 @@ Current role:
 
 Remaining work:
 
-- expand macOS-first Wi-Fi environment detail where the platform allows it
-- improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
-- add a concise overall trust/path explanation on top of the current gateway, peer-visibility, DNS, captive, and HTTPS reasoning layers
+- add environment-aware interpretation so `home`, `guest`, and `travel` expectations can differ without changing the underlying probes
 - continue refining the operator-facing wording now that the overall trust/path explanation exists
 - keep refining dual-connectivity, mesh instability, and route/path diagnostics
+- expand macOS-first Wi-Fi environment detail where the platform allows it
+- improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
 Backlog:
@@ -118,14 +118,24 @@ Backlog:
 
 ## Release Direction
 
+### `v1.1` Direction
+
+Primary focus: `network-health-check`
+
+1. Environment-aware trust interpretation for `home`, `guest`, and `travel`.
+2. Better operator output and shorter focus-mode wording.
+3. Continue safe local-segment reasoning without broad active probing.
+4. Improve route/path interpretation for dual-connected and unstable Wi-Fi cases.
+5. Keep `network_scan` in maintenance mode unless a clear operational need appears.
+
 ### Near Term
 
 Focus:
 
-- cleanup and internal structure
-- extend alert delivery beyond the initial webhook path
-- history model decision
 - `network-health-check` capability expansion within safe bounds
+- operator UX and interpretation quality
+- selective cleanup and internal structure
+- keep alert delivery and `network_scan` history model as secondary concerns
 
 ### Later
 
@@ -137,10 +147,10 @@ Focus:
 
 ## Immediate Next Tasks
 
-1. Decide whether `network_scan` should stay on snapshot tables or move toward observation/event modeling.
-2. Continue selective cleanup in `network_health.py`, especially around macOS Wi-Fi collectors and trust-check composition.
-3. Refine the new overall trust summary so it stays concise and useful across private LAN, guest Wi-Fi, and degraded-path scenarios.
-4. Decide whether the next alert channel should be Telegram or email on top of the current webhook path.
+1. Refine focus-mode and alert-only output so notices stay useful without feeling noisy.
+2. Continue selective cleanup in `network_health.py`, especially around trust-check composition.
+3. Improve guest/travel interpretation beyond the first `network profile` layer.
+4. Revisit `network_scan` history modeling only if operational pressure appears.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
 ## Progress Snapshot
@@ -187,6 +197,7 @@ Completed:
 - `network-health-check` now includes a derived `client_isolation_hint` that summarizes whether the current segment appears to expose peer devices to the client based on passive visibility signals.
 - `network-health-check` now includes aggregated `dns_trust_reasoning`, `captive_trust_reasoning`, and `https_trust_reasoning` checks on top of the existing probe results.
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
+- `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.

@@ -7,6 +7,8 @@ from colorama import Fore, Style, init
 from models import build_scan_context
 from network_health import (
     DEFAULT_DNS_DOMAINS,
+    DEFAULT_NETWORK_PROFILE,
+    NETWORK_PROFILES,
     build_health_summary,
     run_network_health_checks,
 )
@@ -220,6 +222,8 @@ def format_https_trust_reasoning_details(details):
 
 def format_overall_trust_explanation_details(details):
     lines = []
+    if details.get("network_profile"):
+        lines.append(f"  network profile: {details['network_profile']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
     if details.get("local_segment"):
@@ -448,6 +452,15 @@ def format_top_alert_summary(summary):
     return f"Risk summary: {len(alerts)} alert(s) in {', '.join(labels)}{suffix}"
 
 
+def format_top_notice_summary(summary):
+    notices = summary.get("notices", [])
+    if not notices:
+        return None
+    labels = [format_check_label(check["name"]) for check in notices[:4]]
+    suffix = " ..." if len(notices) > 4 else ""
+    return f"Notice areas: {', '.join(labels)}{suffix}"
+
+
 def build_trust_assessment(summary):
     alert_count = summary.get("alert_checks", 0)
     notice_count = summary.get("notice_checks", 0)
@@ -476,6 +489,25 @@ def indent_detail_line(line):
     return f"    {line.lstrip()}"
 
 
+def format_network_profile_label(scan_context):
+    if not scan_context:
+        return None
+    profile = scan_context.get("network_profile")
+    if not profile:
+        return None
+    return profile
+
+
+def get_focus_detail_limit(check):
+    if check["name"] == "overall_trust_explanation":
+        return 5
+    if check["status"] == "alert":
+        return 6
+    if check["status"] == "notice":
+        return 3
+    return 2
+
+
 def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
     message = (
         f"\rRunning Wi-Fi stability diagnostics: sample {current_step}/{total_steps} "
@@ -487,9 +519,12 @@ def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
     sys.stdout.flush()
 
 
-def print_health_report(checks, summary):
+def print_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary)
     print("=== Network Health Check ===")
+    network_profile = format_network_profile_label(scan_context)
+    if network_profile:
+        print(f"Network profile: {network_profile}")
     print(
         f"Checks: {summary['total_checks']} | OK: {summary['ok_checks']} | Notices: {summary.get('notice_checks', 0)} | Alerts: {summary['alert_checks']}"
     )
@@ -506,12 +541,18 @@ def print_health_report(checks, summary):
     print("============================")
 
 
-def print_focus_health_report(checks, summary):
+def print_focus_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary)
     print("=== Network Health Focus ===")
+    network_profile = format_network_profile_label(scan_context)
+    if network_profile:
+        print(f"Network profile: {network_profile}")
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
+    notice_summary = format_top_notice_summary(summary)
+    if notice_summary and summary.get("alert_checks", 0) == 0:
+        print(notice_summary)
 
     key_checks = [
         check
@@ -527,7 +568,7 @@ def print_focus_health_report(checks, summary):
         seen.add(check["name"])
         print(f"\n{format_check_heading(check)}")
         print(f"  {check['summary']}")
-        for line in format_check_details(check)[:6]:
+        for line in format_check_details(check)[: get_focus_detail_limit(check)]:
             print(indent_detail_line(line))
     print("============================")
 
@@ -605,17 +646,25 @@ def print_wifi_debug_report(checks):
     print("===================")
 
 
-def print_alert_report(summary):
+def print_alert_report(summary, scan_context=None):
     print("=== Network Health Alerts ===")
+    network_profile = format_network_profile_label(scan_context)
+    if network_profile:
+        print(f"Network profile: {network_profile}")
     alerts = summary["alerts"]
     if not alerts:
         notices = summary.get("notices", [])
         if notices:
             print("No actionable health alerts detected.")
             print(f"Notices present: {len(notices)}")
-            for check in notices:
+            notice_summary = format_top_notice_summary(summary)
+            if notice_summary:
+                print(notice_summary)
+            for check in notices[:4]:
                 print(f"\n{format_status_badge('NOTICE')} {format_check_label(check['name'])}")
                 print(check["summary"])
+            if len(notices) > 4:
+                print(f"\n... {len(notices) - 4} more notice(s)")
         else:
             print("No actionable health alerts detected.")
         print("=============================")
@@ -674,6 +723,13 @@ def build_parser():
         "--cidr",
         type=str,
         help="Optional CIDR context for the report. No broad scanning is performed.",
+    )
+    parser.add_argument(
+        "--network-profile",
+        type=str,
+        default=DEFAULT_NETWORK_PROFILE,
+        choices=NETWORK_PROFILES,
+        help="Interpret the network as auto, home, guest, or travel. Defaults to auto.",
     )
     parser.add_argument(
         "--json-out",
@@ -757,13 +813,18 @@ def normalize_wifi_stability_seconds(raw_value):
 def run_health_check_collection(args):
     """Collect scan context, run health checks, and build summary/payload data."""
     interface, cidr = resolve_scan_target(args.iface, args.cidr)
-    scan_context = build_scan_context(interface=interface, cidr=cidr)
+    scan_context = build_scan_context(
+        interface=interface,
+        cidr=cidr,
+        network_profile=args.network_profile,
+    )
     wifi_stability_seconds = normalize_wifi_stability_seconds(
         getattr(args, "wifi_stability_seconds", 0)
     )
     checks = run_network_health_checks(
         dns_domains=args.dns_domains or DEFAULT_DNS_DOMAINS,
         timeout=args.timeout,
+        network_profile=args.network_profile,
         wifi_stability_seconds=wifi_stability_seconds,
         wifi_stability_progress_callback=(
             print_wifi_stability_progress if wifi_stability_seconds > 0 else None
@@ -780,15 +841,15 @@ def run_health_check_collection(args):
     return scan_context, checks, summary, payload
 
 
-def render_health_report(args, checks, summary):
+def render_health_report(args, checks, summary, scan_context=None):
     """Render health report output and return the appropriate exit code."""
     if args.alerts_only:
-        print_alert_report(summary)
+        print_alert_report(summary, scan_context=scan_context)
         return 2 if summary["alert_checks"] else 0
     if args.output == "focus":
-        print_focus_health_report(checks, summary)
+        print_focus_health_report(checks, summary, scan_context=scan_context)
     else:
-        print_health_report(checks, summary)
+        print_health_report(checks, summary, scan_context=scan_context)
     return 0
 
 
@@ -831,7 +892,7 @@ def main():
         scan_context,
         summary,
     )
-    exit_code = render_health_report(args, checks, summary)
+    exit_code = render_health_report(args, checks, summary, scan_context=scan_context)
     if args.debug_wifi:
         print_wifi_debug_report(checks)
     sys.exit(exit_code)

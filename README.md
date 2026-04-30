@@ -370,6 +370,22 @@ It currently checks:
 ./scan-health
 ```
 
+**To tell the tool what kind of network you expect:**
+
+```bash
+./scan-health --network-profile home
+```
+
+```bash
+./scan-health --network-profile guest
+```
+
+```bash
+./scan-health --network-profile travel
+```
+
+Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
+
 On macOS, the report now includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details and nearby SSID/BSSID visibility are collected on a best-effort basis because Apple exposes them differently across macOS versions, and some details may require `sudo`.
 
 For nearby Wi-Fi inventory on modern macOS, the tool now first tries an optional `PyObjC/CoreWLAN` backend. If that bridge is not installed or macOS denies access, it falls back to older system mechanisms when available.
@@ -464,6 +480,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`arp_scanner.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
 -   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
+-   **`network_health_check.py --network-profile`**: Interprets the network as `auto`, `home`, `guest`, or `travel`. Defaults to `auto`.
 -   **`network_health_check.py --alerts-only`**: Alert-only console output with exit code `2` when actionable health findings are detected.
 -   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.
 -   **`network_health_check.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.

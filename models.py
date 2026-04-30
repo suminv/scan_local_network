@@ -1,9 +1,12 @@
-def build_scan_context(interface=None, cidr=None):
+def build_scan_context(interface=None, cidr=None, network_profile=None):
     """Create a normalized scan-context dictionary."""
-    return {
+    context = {
         "interface": interface,
         "cidr": cidr,
     }
+    if network_profile is not None:
+        context["network_profile"] = network_profile
+    return context
 
 
 def build_device_snapshot(

@@ -22,6 +22,13 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(args.md_out, "health.md")
         self.assertEqual(args.output, "focus")
 
+    def test_build_parser_supports_network_profile(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(["--network-profile", "guest"])
+
+        self.assertEqual(args.network_profile, "guest")
+
     def test_build_parser_supports_webhook_flags(self):
         parser = network_health_check.build_parser()
 
@@ -1082,6 +1089,25 @@ Wi-Fi:
         self.assertEqual(result["status"], "ok")
         self.assertIn("typical private/home LAN", result["summary"])
 
+    def test_build_overall_trust_explanation_marks_guest_peer_visibility_as_notice(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "notice",
+                "details": {
+                    "hint_level": "peer_visibility_detected",
+                    "is_private_gateway": True,
+                },
+            },
+            {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
+            {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
+            {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
+            network_profile="guest",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("guest network", result["summary"])
+
     def test_build_overall_trust_explanation_marks_internet_anomalies_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
             {
@@ -1118,8 +1144,9 @@ Wi-Fi:
     def test_print_alert_report_reports_empty_state(self):
         buffer = StringIO()
         with redirect_stdout(buffer):
-            network_health_check.print_alert_report({"alerts": []})
+            network_health_check.print_alert_report({"alerts": []}, scan_context={"network_profile": "travel"})
 
+        self.assertIn("Network profile: travel", buffer.getvalue())
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
 
     def test_print_alert_report_includes_notices_without_escalating(self):
@@ -1141,6 +1168,7 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("No actionable health alerts detected.", output)
         self.assertIn("Notices present: 1", output)
+        self.assertIn("Notice areas: Gateway exposure", output)
         self.assertIn("Gateway exposure", output)
         self.assertIn("[~]", output)
 
@@ -1163,13 +1191,14 @@ Wi-Fi:
         with mock.patch("network_health_check.print_alert_report") as print_alert_report:
             exit_code = network_health_check.render_health_report(args, [], summary)
 
-        print_alert_report.assert_called_once_with(summary)
+        print_alert_report.assert_called_once_with(summary, scan_context=None)
         self.assertEqual(exit_code, 2)
 
     def test_run_health_check_collection_builds_payload_from_context_and_checks(self):
         args = mock.Mock(
             iface=None,
             cidr=None,
+            network_profile="guest",
             dns_domains=None,
             timeout=5,
             wifi_stability_seconds=0,
@@ -1182,13 +1211,15 @@ Wi-Fi:
             with mock.patch(
                 "network_health_check.run_network_health_checks",
                 return_value=[{"name": "gateway_identity", "status": "ok", "summary": "ok"}],
-            ):
+            ) as run_checks:
                 scan_context, checks, summary, payload = network_health_check.run_health_check_collection(args)
 
         self.assertEqual(scan_context["interface"], "en0")
+        self.assertEqual(scan_context["network_profile"], "guest")
         self.assertEqual(checks[0]["name"], "gateway_identity")
         self.assertEqual(summary["alert_checks"], 0)
         self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
+        self.assertEqual(run_checks.call_args.kwargs["network_profile"], "guest")
 
     def test_print_alert_report_uses_human_labels(self):
         buffer = StringIO()
@@ -1205,10 +1236,12 @@ Wi-Fi:
                             "summary": "TLS verification failed for https://example.com",
                         },
                     ]
-                }
+                },
+                scan_context={"network_profile": "guest"},
             )
 
         output = buffer.getvalue()
+        self.assertIn("Network profile: guest", output)
         self.assertIn("Active path", output)
         self.assertIn("HTTPS", output)
         self.assertNotIn("https_example_https", output)
@@ -1237,6 +1270,7 @@ Wi-Fi:
                     cidr=None,
                     json_out=output_path,
                     md_out=markdown_path,
+                    network_profile="home",
                     dns_domains=None,
                     timeout=5,
                     alerts_only=False,
@@ -1262,6 +1296,7 @@ Wi-Fi:
             with open(markdown_path, "r", encoding="utf-8") as handle:
                 markdown = handle.read()
             self.assertEqual(payload["scan_context"]["interface"], "en0")
+            self.assertEqual(payload["scan_context"]["network_profile"], "home")
             self.assertEqual(payload["health_summary"]["alert_checks"], 0)
             self.assertEqual(payload["trust_assessment"]["level"], "trusted")
             self.assertIn("# Network Health Report", markdown)
@@ -1464,9 +1499,14 @@ Wi-Fi:
         summary = {"total_checks": 1, "ok_checks": 1, "notice_checks": 0, "alert_checks": 0, "alerts": [], "notices": []}
 
         with redirect_stdout(buffer):
-            network_health_check.print_health_report(checks, summary)
+            network_health_check.print_health_report(
+                checks,
+                summary,
+                scan_context={"network_profile": "home"},
+            )
 
         output = buffer.getvalue()
+        self.assertIn("Network profile: home", output)
         self.assertIn("DNS trust reasoning", output)
         self.assertIn("hint level: gateway_dns_expected", output)
         self.assertIn("resolver profile: gateway_dns", output)
@@ -1635,15 +1675,75 @@ Wi-Fi:
         summary = {"total_checks": 2, "ok_checks": 1, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": [checks[1]]}
 
         with redirect_stdout(buffer):
-            network_health_check.print_focus_health_report(checks, summary)
+            network_health_check.print_focus_health_report(
+                checks,
+                summary,
+                scan_context={"network_profile": "guest"},
+            )
 
         output = buffer.getvalue()
         self.assertIn("=== Network Health Focus ===", output)
+        self.assertIn("Network profile: guest", output)
         self.assertIn("Trust assessment: trusted", output)
+        self.assertIn("Notice areas: Wi-Fi environment", output)
         self.assertIn("Wi-Fi environment", output)
         self.assertIn("[~]", output)
         self.assertIn("Gateway", output)
         self.assertIn("[OK]", output)
+
+    def test_print_focus_health_report_limits_notice_detail_lines(self):
+        buffer = StringIO()
+        checks = [
+            {
+                "name": "gateway_exposure",
+                "status": "notice",
+                "summary": "Private/local gateway exposes 2 local web/admin service(s) to the client on 192.168.2.254",
+                "details": {
+                    "gateway_ip": "192.168.2.254",
+                    "interface": "en0",
+                    "context_note": "often expected on a private/home LAN",
+                    "reachable_services": [
+                        {
+                            "port": 80,
+                            "label": "HTTP admin/web",
+                            "risk": True,
+                            "http_probe": {
+                                "url": "http://192.168.2.254:80/",
+                                "status_code": 200,
+                                "content_type": "text/html",
+                                "page_hint": "single-page app shell",
+                            },
+                        }
+                    ],
+                },
+            }
+        ]
+        summary = {"total_checks": 1, "ok_checks": 0, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": checks}
+
+        with redirect_stdout(buffer):
+            network_health_check.print_focus_health_report(checks, summary, scan_context={"network_profile": "home"})
+
+        output = buffer.getvalue()
+        self.assertIn("gateway: 192.168.2.254", output)
+        self.assertIn("interface: en0", output)
+        self.assertIn("context: often expected on a private/home LAN", output)
+        self.assertNotIn("reachable local services:", output)
+
+    def test_print_alert_report_truncates_long_notice_lists(self):
+        buffer = StringIO()
+        notices = [
+            {"name": f"notice_{index}", "summary": f"notice {index}"}
+            for index in range(6)
+        ]
+        with redirect_stdout(buffer):
+            network_health_check.print_alert_report(
+                {"alerts": [], "notices": notices},
+                scan_context={"network_profile": "travel"},
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Notices present: 6", output)
+        self.assertIn("... 2 more notice(s)", output)
 
     def test_print_health_report_renders_active_path_check(self):
         buffer = StringIO()

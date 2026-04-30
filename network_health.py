@@ -16,6 +16,8 @@ from arp_scanner import LocalMacVendorLookup, get_vendor
 
 
 DEFAULT_DNS_DOMAINS = ["example.com", "openai.com"]
+DEFAULT_NETWORK_PROFILE = "auto"
+NETWORK_PROFILES = ["auto", "home", "guest", "travel"]
 DEFAULT_HTTP_PROBES = [
     {
         "name": "gstatic_204",
@@ -86,6 +88,12 @@ def is_public_ip(ip):
         return ipaddress.ip_address(ip).is_global
     except ValueError:
         return False
+
+
+def normalize_network_profile(network_profile):
+    if network_profile in NETWORK_PROFILES:
+        return network_profile
+    return DEFAULT_NETWORK_PROFILE
 
 
 def get_default_gateway():
@@ -177,8 +185,9 @@ def inspect_gateway_http_surface(host, port, timeout=2):
     }
 
 
-def build_gateway_exposure_check(timeout=2, probes=None):
+def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT_NETWORK_PROFILE):
     """Inspect only the default gateway for a small set of local services."""
+    network_profile = normalize_network_profile(network_profile)
     gateway_ip, interface = get_default_gateway()
     is_private_gateway = not is_public_ip(gateway_ip)
     reachable_services = []
@@ -211,10 +220,16 @@ def build_gateway_exposure_check(timeout=2, probes=None):
             )
         else:
             status = "notice"
-            summary = (
-                f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
-                f"to the client on {gateway_ip}; this is often expected on a home LAN"
-            )
+            if network_profile in {"guest", "travel"}:
+                summary = (
+                    f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
+                    f"to the client on {gateway_ip}; this is more sensitive on guest or travel networks"
+                )
+            else:
+                summary = (
+                    f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
+                    f"to the client on {gateway_ip}; this is often expected on a home LAN"
+                )
     elif reachable_services:
         status = "ok"
         summary = (
@@ -232,11 +247,16 @@ def build_gateway_exposure_check(timeout=2, probes=None):
         "details": {
             "gateway_ip": gateway_ip,
             "interface": interface,
+            "network_profile": network_profile,
             "is_private_gateway": is_private_gateway,
             "context_note": (
-                "often expected on a private/home LAN"
-                if is_private_gateway and risky_services
-                else None
+                "worth closer review on guest or travel networks"
+                if is_private_gateway and risky_services and network_profile in {"guest", "travel"}
+                else (
+                    "often expected on a private/home LAN"
+                    if is_private_gateway and risky_services
+                    else None
+                )
             ),
             "reachable_services": reachable_services,
             "risky_services": risky_services,
@@ -267,8 +287,9 @@ def parse_arp_cache_entries(raw_output):
     return entries
 
 
-def build_local_peer_visibility_check():
+def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
     """Inspect the passive ARP cache for visible local peers on the current interface."""
+    network_profile = normalize_network_profile(network_profile)
     gateway_ip, interface = get_default_gateway()
     is_private_gateway = not is_public_ip(gateway_ip)
     try:
@@ -299,9 +320,15 @@ def build_local_peer_visibility_check():
 
     if visible_peers:
         status = "notice"
-        summary = (
-            f"ARP cache shows {len(visible_peers)} local peer(s) besides the gateway on {interface}"
-        )
+        if network_profile in {"guest", "travel"}:
+            summary = (
+                f"ARP cache already shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
+                "this is more open than expected on many guest or travel networks"
+            )
+        else:
+            summary = (
+                f"ARP cache shows {len(visible_peers)} local peer(s) besides the gateway on {interface}"
+            )
     else:
         status = "ok"
         summary = f"No additional local peers are currently visible in ARP cache on {interface}"
@@ -313,19 +340,29 @@ def build_local_peer_visibility_check():
         "details": {
             "interface": interface,
             "gateway_ip": gateway_ip,
+            "network_profile": network_profile,
             "is_private_gateway": is_private_gateway,
             "context_note": (
-                "often normal on a private/home LAN"
-                if is_private_gateway and visible_peers
-                else None
+                "worth closer review on guest or travel networks"
+                if visible_peers and network_profile in {"guest", "travel"}
+                else (
+                    "often normal on a private/home LAN"
+                    if is_private_gateway and visible_peers
+                    else None
+                )
             ),
             "visible_peers": visible_peers,
         },
     }
 
 
-def build_client_isolation_hint_check(gateway_exposure_check, local_peer_visibility_check):
+def build_client_isolation_hint_check(
+    gateway_exposure_check,
+    local_peer_visibility_check,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
     """Summarize whether the current segment appears to expose peer devices to the client."""
+    network_profile = normalize_network_profile(network_profile)
     exposure_details = gateway_exposure_check.get("details", {})
     peer_details = local_peer_visibility_check.get("details", {})
     interface = peer_details.get("interface") or exposure_details.get("interface")
@@ -339,7 +376,12 @@ def build_client_isolation_hint_check(gateway_exposure_check, local_peer_visibil
     if visible_peers:
         status = "notice"
         hint_level = "peer_visibility_detected"
-        if is_private_gateway:
+        if network_profile in {"guest", "travel"}:
+            summary = (
+                f"Local peers are already visible to this client on {interface}; this is more open than expected "
+                "for many guest or travel networks and suggests client isolation is not enforced"
+            )
+        elif is_private_gateway:
             summary = (
                 f"Local peers are already visible to this client on {interface}; this is typical "
                 "for a private/home LAN and suggests client isolation is not enforced"
@@ -377,15 +419,20 @@ def build_client_isolation_hint_check(gateway_exposure_check, local_peer_visibil
         "details": {
             "interface": interface,
             "gateway_ip": gateway_ip,
+            "network_profile": network_profile,
             "is_private_gateway": bool(is_private_gateway),
             "hint_level": hint_level,
             "visible_peer_count": len(visible_peers),
             "visible_peers": visible_peers[:8],
             "risky_gateway_service_count": len(risky_services),
             "context_note": (
-                "typical for a private/home LAN"
-                if is_private_gateway and hint_level == "peer_visibility_detected"
-                else None
+                "worth closer review on guest or travel networks"
+                if hint_level == "peer_visibility_detected" and network_profile in {"guest", "travel"}
+                else (
+                    "typical for a private/home LAN"
+                    if is_private_gateway and hint_level == "peer_visibility_detected"
+                    else None
+                )
             ),
         },
     }
@@ -1765,8 +1812,10 @@ def build_overall_trust_explanation_check(
     captive_trust_reasoning_check,
     https_trust_reasoning_check,
     active_path_check=None,
+    network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Build one short human-oriented explanation across local, DNS, captive, and HTTPS trust layers."""
+    network_profile = normalize_network_profile(network_profile)
     local_details = client_isolation_hint_check.get("details", {})
     dns_details = dns_trust_reasoning_check.get("details", {})
     captive_details = captive_trust_reasoning_check.get("details", {})
@@ -1794,6 +1843,13 @@ def build_overall_trust_explanation_check(
             f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
         )
         context_note = "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related"
+    elif local_hint == "peer_visibility_detected" and network_profile in {"guest", "travel"}:
+        status = "notice"
+        summary = (
+            "Internet trust path looks healthy, but the local segment is more open than expected "
+            f"for a {network_profile} network"
+        )
+        context_note = "peer visibility may be normal on a home LAN, but it deserves more attention on guest or travel networks"
     elif local_hint == "peer_visibility_detected" and is_private_gateway:
         status = "ok"
         summary = "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN"
@@ -1813,6 +1869,7 @@ def build_overall_trust_explanation_check(
         "summary": summary,
         "details": {
             "local_segment": local_hint,
+            "network_profile": network_profile,
             "dns_path": dns_hint,
             "captive_path": captive_hint,
             "https_path": https_hint,
@@ -1827,16 +1884,24 @@ def run_network_health_checks(
     *,
     dns_domains=None,
     timeout=5,
+    network_profile=DEFAULT_NETWORK_PROFILE,
     wifi_stability_seconds=0,
     wifi_stability_progress_callback=None,
 ):
+    network_profile = normalize_network_profile(network_profile)
     gateway_identity_check = resolve_gateway_identity()
     gateway_fingerprint_check = resolve_gateway_fingerprint()
-    gateway_exposure_check = build_gateway_exposure_check(timeout=timeout)
-    local_peer_visibility_check = build_local_peer_visibility_check()
+    gateway_exposure_check = build_gateway_exposure_check(
+        timeout=timeout,
+        network_profile=network_profile,
+    )
+    local_peer_visibility_check = build_local_peer_visibility_check(
+        network_profile=network_profile,
+    )
     client_isolation_hint_check = build_client_isolation_hint_check(
         gateway_exposure_check,
         local_peer_visibility_check,
+        network_profile=network_profile,
     )
     dns_environment_check = build_dns_environment_check()
     dns_resolution_checks = run_dns_consistency_checks(dns_domains)
@@ -1873,6 +1938,7 @@ def run_network_health_checks(
             captive_trust_reasoning_check,
             https_trust_reasoning_check,
             active_path_check=active_path_check,
+            network_profile=network_profile,
         )
     )
     if wifi_stability_seconds and wifi_stability_seconds > 0:
