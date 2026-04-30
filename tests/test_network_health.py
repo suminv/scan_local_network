@@ -1108,6 +1108,26 @@ Wi-Fi:
         self.assertEqual(result["status"], "notice")
         self.assertIn("guest network", result["summary"])
 
+    def test_build_overall_trust_explanation_marks_guest_gateway_only_visibility_as_notice(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "ok",
+                "details": {
+                    "hint_level": "gateway_only_visibility",
+                    "is_private_gateway": True,
+                    "risky_gateway_service_count": 2,
+                },
+            },
+            {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
+            {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
+            {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
+            network_profile="travel",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("gateway-local admin/web surfaces", result["summary"])
+
     def test_build_overall_trust_explanation_marks_internet_anomalies_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
             {

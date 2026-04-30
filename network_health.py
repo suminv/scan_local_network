@@ -1822,6 +1822,7 @@ def build_overall_trust_explanation_check(
     https_details = https_trust_reasoning_check.get("details", {})
 
     local_hint = local_details.get("hint_level")
+    risky_gateway_service_count = local_details.get("risky_gateway_service_count", 0)
     dns_hint = dns_details.get("hint_level")
     captive_hint = captive_details.get("hint_level")
     https_hint = https_details.get("hint_level")
@@ -1843,6 +1844,17 @@ def build_overall_trust_explanation_check(
             f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
         )
         context_note = "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related"
+    elif (
+        local_hint == "gateway_only_visibility"
+        and network_profile in {"guest", "travel"}
+        and risky_gateway_service_count > 0
+    ):
+        status = "notice"
+        summary = (
+            "Internet trust path looks healthy, but gateway-local admin/web surfaces are more exposed "
+            f"than expected for a {network_profile} network"
+        )
+        context_note = "this can be fine on a home LAN, but deserves more attention on guest or travel networks"
     elif local_hint == "peer_visibility_detected" and network_profile in {"guest", "travel"}:
         status = "notice"
         summary = (
@@ -1870,6 +1882,7 @@ def build_overall_trust_explanation_check(
         "details": {
             "local_segment": local_hint,
             "network_profile": network_profile,
+            "risky_gateway_service_count": risky_gateway_service_count,
             "dns_path": dns_hint,
             "captive_path": captive_hint,
             "https_path": https_hint,
