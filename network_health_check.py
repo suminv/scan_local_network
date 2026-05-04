@@ -21,6 +21,21 @@ DEFAULT_OUTPUT_FORMAT = "full"
 FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
 FOCUS_CONTEXT_CHECKS = {"gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
 NOTICE_REPORT_LIMIT = 3
+FOCUS_NOTICE_LIMIT = 4
+FINDING_PRIORITY = {
+    "active_path": 10,
+    "gateway_exposure": 30,
+    "local_peer_visibility": 40,
+    "overall_trust_explanation": 55,
+    "client_isolation_hint": 56,
+    "dns_trust_reasoning": 60,
+    "dns_environment": 65,
+    "captive_trust_reasoning": 70,
+    "https_trust_reasoning": 80,
+    "wifi_stability": 90,
+    "wifi_environment": 100,
+    "gateway_fingerprint": 110,
+}
 CHECK_GROUPS = [
     ("Summary", ["overall_trust_explanation"]),
     ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "client_isolation_hint", "active_path"]),
@@ -428,8 +443,8 @@ def format_check_label(check_name):
 
 
 def format_top_alert_summary(summary):
-    alerts = summary.get("alerts", [])
-    notices = summary.get("notices", [])
+    alerts = prioritize_findings(summary.get("alerts", []))
+    notices = prioritize_findings(summary.get("notices", []))
     if not alerts:
         if notices:
             labels = [format_check_label(check["name"]) for check in notices[:4]]
@@ -456,7 +471,7 @@ def format_top_alert_summary(summary):
 
 
 def format_top_notice_summary(summary):
-    notices = summary.get("notices", [])
+    notices = prioritize_findings(summary.get("notices", []))
     if not notices:
         return None
     labels = [format_check_label(check["name"]) for check in notices[:4]]
@@ -465,7 +480,7 @@ def format_top_notice_summary(summary):
 
 
 def format_notice_reason_labels(summary, limit=3):
-    notices = summary.get("notices", [])
+    notices = prioritize_findings(summary.get("notices", []))
     if not notices:
         return None
     labels = [format_check_label(check["name"]) for check in notices[:limit]]
@@ -480,6 +495,58 @@ def format_health_count_summary(summary, include_ok=False):
     parts.append(f"Notices: {summary.get('notice_checks', 0)}")
     parts.append(f"Alerts: {summary['alert_checks']}")
     return " | ".join(parts)
+
+
+def get_finding_priority(check):
+    name = check.get("name", "")
+    if name.startswith("captive_") and name != "captive_trust_reasoning":
+        return 75
+    if name.startswith("https_") and name != "https_trust_reasoning":
+        return 85
+    if name.startswith("dns_") and name != "dns_environment":
+        return 66
+    return FINDING_PRIORITY.get(name, 500)
+
+
+def prioritize_findings(checks):
+    return sorted(
+        checks,
+        key=lambda check: (
+            get_finding_priority(check),
+            format_check_label(check.get("name", "")),
+        ),
+    )
+
+
+def select_focus_checks(checks):
+    """Return the compact operator-facing subset in a stable risk-first order."""
+    alerts = prioritize_findings([check for check in checks if check["status"] == "alert"])
+    notices = prioritize_findings([check for check in checks if check["status"] == "notice"])
+    baseline = [
+        check
+        for check in checks
+        if check["status"] == "ok" and check["name"] in FOCUS_BASELINE_CHECKS
+    ]
+    context = [
+        check
+        for check in checks
+        if (
+            check["status"] not in {"alert", "notice"}
+            and check["name"] in FOCUS_CONTEXT_CHECKS
+            and check.get("details")
+            and check["status"] != "ok"
+        )
+    ]
+    selected = alerts + notices[:FOCUS_NOTICE_LIMIT] + baseline + context
+    deduped = []
+    seen = set()
+    for check in selected:
+        if check["name"] in seen:
+            continue
+        seen.add(check["name"])
+        deduped.append(check)
+    hidden_notice_count = max(0, len(notices) - FOCUS_NOTICE_LIMIT)
+    return deduped, hidden_notice_count
 
 
 def build_trust_assessment(summary, scan_context=None):
@@ -555,17 +622,6 @@ def get_focus_detail_limit(check):
     return 2
 
 
-def should_show_focus_check(check):
-    """Return whether a check is useful enough for the short operator view."""
-    if check["status"] in {"alert", "notice"}:
-        return True
-    if check["name"] in FOCUS_BASELINE_CHECKS:
-        return True
-    if check["name"] in FOCUS_CONTEXT_CHECKS and check.get("details"):
-        return check["status"] != "ok"
-    return False
-
-
 def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
     message = (
         f"\rRunning Wi-Fi stability diagnostics: sample {current_step}/{total_steps} "
@@ -607,24 +663,15 @@ def print_focus_health_report(checks, summary, scan_context=None):
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
-    notice_summary = format_top_notice_summary(summary)
-    if notice_summary and summary.get("alert_checks", 0) == 0:
-        print(notice_summary)
 
-    key_checks = [
-        check
-        for check in checks
-        if should_show_focus_check(check)
-    ]
-    seen = set()
+    key_checks, hidden_notice_count = select_focus_checks(checks)
     for check in key_checks:
-        if check["name"] in seen:
-            continue
-        seen.add(check["name"])
         print(f"\n{format_check_heading(check)}")
         print(f"  {check['summary']}")
         for line in format_check_details(check)[: get_focus_detail_limit(check)]:
             print(indent_detail_line(line))
+    if hidden_notice_count:
+        print(f"\n... {hidden_notice_count} more notice(s); use --output full for complete detail")
     print("============================")
 
 
@@ -716,15 +763,15 @@ def print_alert_report(summary, scan_context=None):
         notices = summary.get("notices", [])
         if notices:
             assessment = build_trust_assessment(report_summary, scan_context=scan_context)
+            prioritized_notices = prioritize_findings(notices)
             print("No actionable health alerts detected.")
             print(f"Trust assessment: {assessment['level']}")
             print(assessment["summary"])
-            print(f"Notices present: {len(notices)}")
             notice_summary = format_top_notice_summary(summary)
             if notice_summary:
-                print(notice_summary)
-            print("Top notices:")
-            for check in notices[:NOTICE_REPORT_LIMIT]:
+                print(f"{notice_summary} ({len(notices)} total)")
+            print("Review notices:")
+            for check in prioritized_notices[:NOTICE_REPORT_LIMIT]:
                 print(f"- {format_check_label(check['name'])}: {check['summary']}")
             if len(notices) > NOTICE_REPORT_LIMIT:
                 print(f"... {len(notices) - NOTICE_REPORT_LIMIT} more notice(s)")

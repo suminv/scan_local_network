@@ -147,8 +147,8 @@ Focus:
 
 ## Immediate Next Tasks
 
-1. Refine focus-mode and alert-only output so notices stay useful without feeling noisy.
-2. Continue selective cleanup in `network_health.py`, especially around trust-check composition.
+1. Continue small refinements to focus-mode and alert-only wording as real network runs expose confusing cases.
+2. Continue selective cleanup in `network_health.py` as new trust-check behavior is added.
 3. Improve guest/travel interpretation beyond the first `network profile` layer.
 4. Revisit `network_scan` history modeling only if operational pressure appears.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
@@ -200,9 +200,11 @@ Completed:
 - `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - `network-health-check` focus and alert-only output now use tighter operator-oriented summaries that suppress routine OK detail and keep notice-only reports compact.
+- `network-health-check` focus and alert-only output now prioritize notice-only findings, avoid duplicate notice summary lines, and truncate long notice lists with an explicit remaining count.
 - `network_health.py` cleanup has started by centralizing health-check result construction through a shared helper.
 - Aggregate captive-portal and HTTPS reasoning checks now share a common details builder to reduce repeated payload construction.
 - DNS trust reasoning now uses a shared details builder to keep resolver interpretation payloads consistent.
+- Trust-check composition in `network_health.py` now uses shared alert filtering, common probe-reasoning construction, and separate signal/decision/detail helpers for the overall trust explanation.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

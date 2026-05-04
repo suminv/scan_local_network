@@ -408,6 +408,7 @@ The gateway exposure check only inspects the current default gateway and only fo
 ```
 
 This mode is intended for scheduled runs. It prints compact check/notices/alerts counters, the trust assessment when findings exist, and only the top alert or notice reasons.
+Notice-only output is sorted by operational priority so local exposure and path findings appear before lower-priority context, and long notice lists are truncated with a remaining count.
 
 **To use the short operator view:**
 
@@ -416,6 +417,7 @@ This mode is intended for scheduled runs. It prints compact check/notices/alerts
 ```
 
 This mode keeps the trust assessment and important context while suppressing routine OK details.
+When many notices are present, focus mode shows the highest-priority notices first and points to `--output full` for complete detail.
 
 **To run short Wi-Fi stability diagnostics for mesh or roaming problems:**
 

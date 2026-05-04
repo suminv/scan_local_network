@@ -144,6 +144,69 @@ def build_dns_reasoning_details(
     }
 
 
+def get_alert_checks(checks):
+    """Return checks that carry an actionable alert status."""
+    return [check for check in checks if check.get("status") == "alert"]
+
+
+def build_probe_trust_reasoning_check(
+    *,
+    name,
+    checks,
+    probe_prefix,
+    no_probe_summary,
+    normal_hint,
+    normal_summary,
+    normal_context_note,
+    all_alert_hint,
+    all_alert_summary,
+    all_alert_context_note,
+    partial_alert_hint,
+    partial_alert_summary,
+    partial_alert_context_note,
+):
+    """Build a common aggregate trust check for HTTP/HTTPS-style probes."""
+    alerts = get_alert_checks(checks)
+    if not checks:
+        return build_check(
+            name,
+            "ok",
+            no_probe_summary,
+            build_probe_reasoning_details("no_probes", 0),
+        )
+
+    if not alerts:
+        return build_check(
+            name,
+            "ok",
+            normal_summary,
+            build_probe_reasoning_details(
+                normal_hint,
+                len(checks),
+                context_note=normal_context_note,
+            ),
+        )
+
+    alert_names = [check["name"].replace(probe_prefix, "") for check in alerts]
+    all_probes_alerted = len(alerts) == len(checks)
+    return build_check(
+        name,
+        "alert",
+        all_alert_summary if all_probes_alerted else partial_alert_summary,
+        build_probe_reasoning_details(
+            all_alert_hint if all_probes_alerted else partial_alert_hint,
+            len(checks),
+            alert_probe_count=len(alerts),
+            affected_probes=alert_names,
+            context_note=(
+                all_alert_context_note
+                if all_probes_alerted
+                else partial_alert_context_note
+            ),
+        ),
+    )
+
+
 def get_default_gateway():
     gateways = netifaces.gateways()
     default_gateway = gateways["default"][netifaces.AF_INET]
@@ -838,7 +901,7 @@ def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks
     classifications = analysis.get("classifications", [])
     nameservers = details.get("nameservers", [])
     classification_types = [item.get("classification") for item in classifications]
-    resolution_alerts = [check for check in dns_resolution_checks if check.get("status") == "alert"]
+    resolution_alerts = get_alert_checks(dns_resolution_checks)
     risk_count = len(analysis.get("risks", []))
 
     if not nameservers:
@@ -990,53 +1053,25 @@ def run_captive_portal_checks(probes=None, timeout=5):
 
 def build_captive_trust_reasoning_check(captive_checks):
     """Summarize captive-portal probe results into one trust interpretation."""
-    alerts = [check for check in captive_checks if check.get("status") == "alert"]
-    if not captive_checks:
-        return {
-            "name": "captive_trust_reasoning",
-            "status": "ok",
-            "summary": "No captive-portal probes were run",
-            "details": build_probe_reasoning_details("no_probes", 0),
-        }
-
-    if not alerts:
-        return {
-            "name": "captive_trust_reasoning",
-            "status": "ok",
-            "summary": "Captive-portal probes look normal; no HTTP interception is evident",
-            "details": build_probe_reasoning_details(
-                "normal_internet_path",
-                len(captive_checks),
-                context_note="connectivity-check endpoints behaved as expected",
-            ),
-        }
-
-    alert_names = [check["name"].replace("captive_", "") for check in alerts]
-    if len(alerts) == len(captive_checks):
-        hint_level = "likely_captive_portal"
-        summary = (
-            f"All captive-portal probes behaved unexpectedly; captive portal or broad HTTP interception is likely"
-        )
-        context_note = "multiple independent connectivity checks were affected"
-    else:
-        hint_level = "partial_http_interception"
-        summary = (
-            f"{len(alerts)} of {len(captive_checks)} captive-portal probe(s) behaved unexpectedly; partial interception or a portal edge case is possible"
-        )
-        context_note = "some HTTP checks were affected while others still looked normal"
-
-    return {
-        "name": "captive_trust_reasoning",
-        "status": "alert",
-        "summary": summary,
-        "details": build_probe_reasoning_details(
-            hint_level,
-            len(captive_checks),
-            alert_probe_count=len(alerts),
-            affected_probes=alert_names,
-            context_note=context_note,
+    alert_count = len(get_alert_checks(captive_checks))
+    return build_probe_trust_reasoning_check(
+        name="captive_trust_reasoning",
+        checks=captive_checks,
+        probe_prefix="captive_",
+        no_probe_summary="No captive-portal probes were run",
+        normal_hint="normal_internet_path",
+        normal_summary="Captive-portal probes look normal; no HTTP interception is evident",
+        normal_context_note="connectivity-check endpoints behaved as expected",
+        all_alert_hint="likely_captive_portal",
+        all_alert_summary="All captive-portal probes behaved unexpectedly; captive portal or broad HTTP interception is likely",
+        all_alert_context_note="multiple independent connectivity checks were affected",
+        partial_alert_hint="partial_http_interception",
+        partial_alert_summary=(
+            f"{alert_count} of {len(captive_checks)} captive-portal probe(s) behaved unexpectedly; "
+            "partial interception or a portal edge case is possible"
         ),
-    }
+        partial_alert_context_note="some HTTP checks were affected while others still looked normal",
+    )
 
 
 def probe_https_endpoint(url, timeout=5):
@@ -1749,26 +1784,8 @@ def run_https_tls_checks(probes=None, timeout=5):
 
 def build_https_trust_reasoning_check(https_checks):
     """Summarize HTTPS/TLS probe results into one trust interpretation."""
-    alerts = [check for check in https_checks if check.get("status") == "alert"]
-    if not https_checks:
-        return {
-            "name": "https_trust_reasoning",
-            "status": "ok",
-            "summary": "No HTTPS/TLS probes were run",
-            "details": build_probe_reasoning_details("no_probes", 0),
-        }
-
-    if not alerts:
-        return {
-            "name": "https_trust_reasoning",
-            "status": "ok",
-            "summary": "HTTPS/TLS probes look normal; certificate-validated web access appears healthy",
-            "details": build_probe_reasoning_details(
-                "normal_https_path",
-                len(https_checks),
-                context_note="TLS validation and expected HTTPS responses both succeeded",
-            ),
-        }
+    alerts = get_alert_checks(https_checks)
+    alert_count = len(alerts)
 
     alert_names = [check["name"].replace("https_", "") for check in alerts]
     tls_failures = [
@@ -1791,28 +1808,134 @@ def build_https_trust_reasoning_check(https_checks):
             ),
         }
 
-    if len(alerts) == len(https_checks):
-        hint_level = "broad_https_failure"
-        summary = "All HTTPS probes failed or returned unexpected responses; secure web access looks degraded"
-        context_note = "this can indicate broader connectivity problems, interception, or upstream filtering"
-    else:
-        hint_level = "partial_https_failure"
-        summary = (
-            f"{len(alerts)} of {len(https_checks)} HTTPS probe(s) failed or returned unexpected responses; selective HTTPS disruption is possible"
-        )
-        context_note = "some HTTPS endpoints still behaved normally while others did not"
+    return build_probe_trust_reasoning_check(
+        name="https_trust_reasoning",
+        checks=https_checks,
+        probe_prefix="https_",
+        no_probe_summary="No HTTPS/TLS probes were run",
+        normal_hint="normal_https_path",
+        normal_summary="HTTPS/TLS probes look normal; certificate-validated web access appears healthy",
+        normal_context_note="TLS validation and expected HTTPS responses both succeeded",
+        all_alert_hint="broad_https_failure",
+        all_alert_summary="All HTTPS probes failed or returned unexpected responses; secure web access looks degraded",
+        all_alert_context_note="this can indicate broader connectivity problems, interception, or upstream filtering",
+        partial_alert_hint="partial_https_failure",
+        partial_alert_summary=(
+            f"{alert_count} of {len(https_checks)} HTTPS probe(s) failed or returned unexpected responses; "
+            "selective HTTPS disruption is possible"
+        ),
+        partial_alert_context_note="some HTTPS endpoints still behaved normally while others did not",
+    )
+
+
+def collect_overall_trust_signals(
+    client_isolation_hint_check,
+    dns_trust_reasoning_check,
+    captive_trust_reasoning_check,
+    https_trust_reasoning_check,
+    active_path_check=None,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
+    """Extract the normalized signal set used by the overall trust explanation."""
+    network_profile = normalize_network_profile(network_profile)
+    local_details = client_isolation_hint_check.get("details", {})
+    dns_details = dns_trust_reasoning_check.get("details", {})
+    captive_details = captive_trust_reasoning_check.get("details", {})
+    https_details = https_trust_reasoning_check.get("details", {})
+
+    affected_components = []
+    component_checks = [
+        ("DNS", dns_trust_reasoning_check),
+        ("Captive portal", captive_trust_reasoning_check),
+        ("HTTPS", https_trust_reasoning_check),
+        ("Active path", active_path_check),
+    ]
+    for label, check in component_checks:
+        if check and check.get("status") == "alert":
+            affected_components.append(label)
 
     return {
-        "name": "https_trust_reasoning",
-        "status": "alert",
-        "summary": summary,
-        "details": build_probe_reasoning_details(
-            hint_level,
-            len(https_checks),
-            alert_probe_count=len(alerts),
-            affected_probes=alert_names,
-            context_note=context_note,
-        ),
+        "local_hint": local_details.get("hint_level"),
+        "network_profile": network_profile,
+        "risky_gateway_service_count": local_details.get("risky_gateway_service_count", 0),
+        "is_private_gateway": local_details.get("is_private_gateway", False),
+        "dns_hint": dns_details.get("hint_level"),
+        "captive_hint": captive_details.get("hint_level"),
+        "https_hint": https_details.get("hint_level"),
+        "active_path_status": active_path_check.get("status") if active_path_check else None,
+        "affected_components": affected_components,
+    }
+
+
+def classify_overall_trust_signals(signals):
+    """Choose the operator-facing status, summary, and context from normalized signals."""
+    affected_components = signals["affected_components"]
+    local_hint = signals["local_hint"]
+    network_profile = signals["network_profile"]
+    risky_gateway_service_count = signals["risky_gateway_service_count"]
+    is_private_gateway = signals["is_private_gateway"]
+
+    if affected_components:
+        return {
+            "status": "notice",
+            "summary": (
+                f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
+            ),
+            "context_note": "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related",
+        }
+    if (
+        local_hint == "gateway_only_visibility"
+        and network_profile in {"guest", "travel"}
+        and risky_gateway_service_count > 0
+    ):
+        return {
+            "status": "notice",
+            "summary": (
+                "Internet trust path looks healthy, but gateway-local admin/web surfaces are more exposed "
+                f"than expected for a {network_profile} network"
+            ),
+            "context_note": "this can be fine on a home LAN, but deserves more attention on guest or travel networks",
+        }
+    if local_hint == "peer_visibility_detected" and network_profile in {"guest", "travel"}:
+        return {
+            "status": "notice",
+            "summary": (
+                "Internet trust path looks healthy, but the local segment is more open than expected "
+                f"for a {network_profile} network"
+            ),
+            "context_note": "peer visibility may be normal on a home LAN, but it deserves more attention on guest or travel networks",
+        }
+    if local_hint == "peer_visibility_detected" and is_private_gateway:
+        return {
+            "status": "ok",
+            "summary": "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN",
+            "context_note": "peer visibility and gateway web surfaces are expected on many home LANs",
+        }
+    if local_hint == "peer_visibility_detected":
+        return {
+            "status": "notice",
+            "summary": "Internet trust path looks healthy, but the local segment appears openly visible to nearby peers",
+            "context_note": "this can be fine on trusted LANs, but deserves attention on guest or public networks",
+        }
+    return {
+        "status": "ok",
+        "summary": "Internet trust path looks healthy and the local segment does not currently show strong trust anomalies",
+        "context_note": "DNS, captive-portal, and HTTPS checks all behaved normally",
+    }
+
+
+def build_overall_trust_details(signals, decision):
+    """Build the stable details payload for the overall trust explanation."""
+    return {
+        "local_segment": signals["local_hint"],
+        "network_profile": signals["network_profile"],
+        "risky_gateway_service_count": signals["risky_gateway_service_count"],
+        "dns_path": signals["dns_hint"],
+        "captive_path": signals["captive_hint"],
+        "https_path": signals["https_hint"],
+        "active_path": signals["active_path_status"],
+        "affected_components": signals["affected_components"],
+        "context_note": decision["context_note"],
     }
 
 
@@ -1825,82 +1948,21 @@ def build_overall_trust_explanation_check(
     network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Build one short human-oriented explanation across local, DNS, captive, and HTTPS trust layers."""
-    network_profile = normalize_network_profile(network_profile)
-    local_details = client_isolation_hint_check.get("details", {})
-    dns_details = dns_trust_reasoning_check.get("details", {})
-    captive_details = captive_trust_reasoning_check.get("details", {})
-    https_details = https_trust_reasoning_check.get("details", {})
-
-    local_hint = local_details.get("hint_level")
-    risky_gateway_service_count = local_details.get("risky_gateway_service_count", 0)
-    dns_hint = dns_details.get("hint_level")
-    captive_hint = captive_details.get("hint_level")
-    https_hint = https_details.get("hint_level")
-    is_private_gateway = local_details.get("is_private_gateway", False)
-
-    affected_components = []
-    if dns_trust_reasoning_check.get("status") == "alert":
-        affected_components.append("DNS")
-    if captive_trust_reasoning_check.get("status") == "alert":
-        affected_components.append("Captive portal")
-    if https_trust_reasoning_check.get("status") == "alert":
-        affected_components.append("HTTPS")
-    if active_path_check and active_path_check.get("status") == "alert":
-        affected_components.append("Active path")
-
-    if affected_components:
-        status = "notice"
-        summary = (
-            f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
-        )
-        context_note = "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related"
-    elif (
-        local_hint == "gateway_only_visibility"
-        and network_profile in {"guest", "travel"}
-        and risky_gateway_service_count > 0
-    ):
-        status = "notice"
-        summary = (
-            "Internet trust path looks healthy, but gateway-local admin/web surfaces are more exposed "
-            f"than expected for a {network_profile} network"
-        )
-        context_note = "this can be fine on a home LAN, but deserves more attention on guest or travel networks"
-    elif local_hint == "peer_visibility_detected" and network_profile in {"guest", "travel"}:
-        status = "notice"
-        summary = (
-            "Internet trust path looks healthy, but the local segment is more open than expected "
-            f"for a {network_profile} network"
-        )
-        context_note = "peer visibility may be normal on a home LAN, but it deserves more attention on guest or travel networks"
-    elif local_hint == "peer_visibility_detected" and is_private_gateway:
-        status = "ok"
-        summary = "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN"
-        context_note = "peer visibility and gateway web surfaces are expected on many home LANs"
-    elif local_hint == "peer_visibility_detected":
-        status = "notice"
-        summary = "Internet trust path looks healthy, but the local segment appears openly visible to nearby peers"
-        context_note = "this can be fine on trusted LANs, but deserves attention on guest or public networks"
-    else:
-        status = "ok"
-        summary = "Internet trust path looks healthy and the local segment does not currently show strong trust anomalies"
-        context_note = "DNS, captive-portal, and HTTPS checks all behaved normally"
-
-    return {
-        "name": "overall_trust_explanation",
-        "status": status,
-        "summary": summary,
-        "details": {
-            "local_segment": local_hint,
-            "network_profile": network_profile,
-            "risky_gateway_service_count": risky_gateway_service_count,
-            "dns_path": dns_hint,
-            "captive_path": captive_hint,
-            "https_path": https_hint,
-            "active_path": active_path_check.get("status") if active_path_check else None,
-            "affected_components": affected_components,
-            "context_note": context_note,
-        },
-    }
+    signals = collect_overall_trust_signals(
+        client_isolation_hint_check,
+        dns_trust_reasoning_check,
+        captive_trust_reasoning_check,
+        https_trust_reasoning_check,
+        active_path_check=active_path_check,
+        network_profile=network_profile,
+    )
+    decision = classify_overall_trust_signals(signals)
+    return build_check(
+        "overall_trust_explanation",
+        decision["status"],
+        decision["summary"],
+        build_overall_trust_details(signals, decision),
+    )
 
 
 def collect_local_segment_checks(*, timeout=5, network_profile=DEFAULT_NETWORK_PROFILE):
