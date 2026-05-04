@@ -385,6 +385,7 @@ It currently checks:
 ```
 
 Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
+`guest` and `travel` are interpreted separately: guest networks are expected to reduce peer visibility and gateway-management exposure, while travel networks are treated with stricter local-exposure assumptions.
 
 On macOS, the report now includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details and nearby SSID/BSSID visibility are collected on a best-effort basis because Apple exposes them differently across macOS versions, and some details may require `sudo`.
 

@@ -244,6 +244,8 @@ def format_overall_trust_explanation_details(details):
         lines.append(f"  network profile: {details['network_profile']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
+    if details.get("profile_expectation"):
+        lines.append(f"  profile expectation: {details['profile_expectation']}")
     if details.get("local_segment"):
         lines.append(f"  local segment: {details['local_segment']}")
     if details.get("dns_path"):

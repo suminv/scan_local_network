@@ -256,6 +256,24 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["risky_services"][0]["port"], 443)
         self.assertEqual(result["details"]["context_note"], "often expected on a private/home LAN")
 
+    def test_build_gateway_exposure_check_uses_travel_profile_expectation(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 443,
+            ):
+                result = network_health.build_gateway_exposure_check(
+                    timeout=3,
+                    network_profile="travel",
+                )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("higher-risk on travel networks", result["summary"])
+        self.assertEqual(
+            result["details"]["profile_expectation"],
+            "travel networks should be treated as untrusted when gateway admin/web surfaces are visible",
+        )
+
     def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
         with mock.patch("network_health.get_default_gateway", return_value=("8.8.8.8", "en0")):
             with mock.patch(
@@ -298,6 +316,24 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["visible_peers"][0]["ip"], "192.168.2.22")
         self.assertEqual(result["details"]["context_note"], "often normal on a private/home LAN")
 
+    def test_build_local_peer_visibility_check_uses_guest_profile_expectation(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.run_command",
+                return_value=(
+                    "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
+                    "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+                ),
+            ):
+                result = network_health.build_local_peer_visibility_check(network_profile="guest")
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("more open than expected on many guest networks", result["summary"])
+        self.assertEqual(
+            result["details"]["profile_expectation"],
+            "guest networks usually limit client-to-client visibility",
+        )
+
     def test_build_local_peer_visibility_check_marks_empty_cache_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch("network_health.run_command", return_value=""):
@@ -334,6 +370,38 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["hint_level"], "peer_visibility_detected")
         self.assertEqual(result["details"]["visible_peer_count"], 1)
         self.assertIn("typical for a private/home LAN", result["summary"])
+
+    def test_build_client_isolation_hint_uses_travel_profile_expectation(self):
+        result = network_health.build_client_isolation_hint_check(
+            {
+                "name": "gateway_exposure",
+                "status": "notice",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "risky_services": [{"port": 80, "label": "HTTP admin/web", "risk": True}],
+                },
+            },
+            {
+                "name": "local_peer_visibility",
+                "status": "notice",
+                "details": {
+                    "gateway_ip": "192.168.2.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "visible_peers": [{"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"}],
+                },
+            },
+            network_profile="travel",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("travel network", result["summary"])
+        self.assertEqual(
+            result["details"]["profile_expectation"],
+            "travel networks should not be assumed to isolate clients unless evidence supports it",
+        )
 
     def test_build_client_isolation_hint_marks_gateway_only_visibility_ok(self):
         result = network_health.build_client_isolation_hint_check(
@@ -1217,6 +1285,10 @@ Wi-Fi:
 
         self.assertEqual(result["status"], "notice")
         self.assertIn("guest network", result["summary"])
+        self.assertEqual(
+            result["details"]["profile_expectation"],
+            "guest networks should minimize local peer and gateway-management exposure",
+        )
 
     def test_build_overall_trust_explanation_marks_guest_gateway_only_visibility_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
@@ -1237,6 +1309,11 @@ Wi-Fi:
 
         self.assertEqual(result["status"], "notice")
         self.assertIn("gateway-local admin/web surfaces", result["summary"])
+        self.assertIn("travel network", result["summary"])
+        self.assertEqual(
+            result["details"]["profile_expectation"],
+            "travel networks should be assessed with stricter local-exposure expectations",
+        )
 
     def test_build_overall_trust_explanation_marks_internet_anomalies_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
@@ -1276,6 +1353,10 @@ Wi-Fi:
         )
 
         self.assertEqual(signals["network_profile"], "travel")
+        self.assertEqual(
+            signals["profile_expectation"],
+            "travel networks should be assessed with stricter local-exposure expectations",
+        )
         self.assertEqual(signals["local_hint"], "gateway_only_visibility")
         self.assertEqual(signals["risky_gateway_service_count"], 1)
         self.assertEqual(signals["dns_hint"], "mixed_dns_path")
@@ -1853,6 +1934,7 @@ Wi-Fi:
                 "summary": "Internet trust path looks healthy and the local segment behaves like a typical private/home LAN",
                 "details": {
                     "context_note": "peer visibility and gateway web surfaces are expected on many home LANs",
+                    "profile_expectation": "home LANs commonly expose peers and gateway-local services to trusted clients",
                     "local_segment": "peer_visibility_detected",
                     "dns_path": "gateway_dns_expected",
                     "captive_path": "normal_internet_path",
@@ -1869,6 +1951,7 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("Overall trust explanation", output)
+        self.assertIn("profile expectation: home LANs commonly expose peers and gateway-local services to trusted clients", output)
         self.assertIn("local segment: peer_visibility_detected", output)
         self.assertIn("DNS path: gateway_dns_expected", output)
 

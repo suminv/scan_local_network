@@ -18,6 +18,32 @@ from arp_scanner import LocalMacVendorLookup, get_vendor
 DEFAULT_DNS_DOMAINS = ["example.com", "openai.com"]
 DEFAULT_NETWORK_PROFILE = "auto"
 NETWORK_PROFILES = ["auto", "home", "guest", "travel"]
+NETWORK_PROFILE_EXPECTATIONS = {
+    "auto": {
+        "gateway_exposure": None,
+        "peer_visibility": None,
+        "client_isolation": None,
+        "overall": None,
+    },
+    "home": {
+        "gateway_exposure": "often expected on a private/home LAN",
+        "peer_visibility": "often normal on a private/home LAN",
+        "client_isolation": "typical for a private/home LAN",
+        "overall": "home LANs commonly expose peers and gateway-local services to trusted clients",
+    },
+    "guest": {
+        "gateway_exposure": "guest networks usually hide gateway admin/web surfaces from clients",
+        "peer_visibility": "guest networks usually limit client-to-client visibility",
+        "client_isolation": "client isolation is expected on many guest networks",
+        "overall": "guest networks should minimize local peer and gateway-management exposure",
+    },
+    "travel": {
+        "gateway_exposure": "travel networks should be treated as untrusted when gateway admin/web surfaces are visible",
+        "peer_visibility": "travel networks should be treated as untrusted when other local peers are visible",
+        "client_isolation": "travel networks should not be assumed to isolate clients unless evidence supports it",
+        "overall": "travel networks should be assessed with stricter local-exposure expectations",
+    },
+}
 DEFAULT_HTTP_PROBES = [
     {
         "name": "gstatic_204",
@@ -94,6 +120,20 @@ def normalize_network_profile(network_profile):
     if network_profile in NETWORK_PROFILES:
         return network_profile
     return DEFAULT_NETWORK_PROFILE
+
+
+def get_profile_expectation(network_profile, topic):
+    network_profile = normalize_network_profile(network_profile)
+    return NETWORK_PROFILE_EXPECTATIONS.get(network_profile, {}).get(topic)
+
+
+def is_untrusted_profile(network_profile):
+    return normalize_network_profile(network_profile) in {"guest", "travel"}
+
+
+def build_profile_context_note(network_profile, topic, fallback=None):
+    expectation = get_profile_expectation(network_profile, topic)
+    return expectation if expectation is not None else fallback
 
 
 def build_check(name, status, summary, details=None):
@@ -331,10 +371,15 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
             )
         else:
             status = "notice"
-            if network_profile in {"guest", "travel"}:
+            if network_profile == "travel":
                 summary = (
                     f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
-                    f"to the client on {gateway_ip}; this is more sensitive on guest or travel networks"
+                    f"to the client on {gateway_ip}; treat this as higher-risk on travel networks"
+                )
+            elif network_profile == "guest":
+                summary = (
+                    f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
+                    f"to the client on {gateway_ip}; this is more sensitive on guest networks"
                 )
             else:
                 summary = (
@@ -361,13 +406,21 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
             "network_profile": network_profile,
             "is_private_gateway": is_private_gateway,
             "context_note": (
-                "worth closer review on guest or travel networks"
-                if is_private_gateway and risky_services and network_profile in {"guest", "travel"}
+                build_profile_context_note(network_profile, "gateway_exposure")
+                if is_private_gateway and risky_services and is_untrusted_profile(network_profile)
                 else (
-                    "often expected on a private/home LAN"
+                    build_profile_context_note(
+                        network_profile,
+                        "gateway_exposure",
+                        fallback="often expected on a private/home LAN",
+                    )
                     if is_private_gateway and risky_services
                     else None
                 )
+            ),
+            "profile_expectation": build_profile_context_note(
+                network_profile,
+                "gateway_exposure",
             ),
             "reachable_services": reachable_services,
             "risky_services": risky_services,
@@ -431,10 +484,15 @@ def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
 
     if visible_peers:
         status = "notice"
-        if network_profile in {"guest", "travel"}:
+        if network_profile == "travel":
             summary = (
                 f"ARP cache already shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
-                "this is more open than expected on many guest or travel networks"
+                "treat local peers as untrusted on travel networks"
+            )
+        elif network_profile == "guest":
+            summary = (
+                f"ARP cache already shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
+                "this is more open than expected on many guest networks"
             )
         else:
             summary = (
@@ -454,13 +512,21 @@ def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
             "network_profile": network_profile,
             "is_private_gateway": is_private_gateway,
             "context_note": (
-                "worth closer review on guest or travel networks"
-                if visible_peers and network_profile in {"guest", "travel"}
+                build_profile_context_note(network_profile, "peer_visibility")
+                if visible_peers and is_untrusted_profile(network_profile)
                 else (
-                    "often normal on a private/home LAN"
+                    build_profile_context_note(
+                        network_profile,
+                        "peer_visibility",
+                        fallback="often normal on a private/home LAN",
+                    )
                     if is_private_gateway and visible_peers
                     else None
                 )
+            ),
+            "profile_expectation": build_profile_context_note(
+                network_profile,
+                "peer_visibility",
             ),
             "visible_peers": visible_peers,
         },
@@ -487,10 +553,15 @@ def build_client_isolation_hint_check(
     if visible_peers:
         status = "notice"
         hint_level = "peer_visibility_detected"
-        if network_profile in {"guest", "travel"}:
+        if network_profile == "travel":
+            summary = (
+                f"Local peers are already visible to this client on {interface}; on a travel network, "
+                "treat the local segment as untrusted and assume client isolation is absent or relaxed"
+            )
+        elif network_profile == "guest":
             summary = (
                 f"Local peers are already visible to this client on {interface}; this is more open than expected "
-                "for many guest or travel networks and suggests client isolation is not enforced"
+                "for many guest networks and suggests client isolation is not enforced"
             )
         elif is_private_gateway:
             summary = (
@@ -537,13 +608,21 @@ def build_client_isolation_hint_check(
             "visible_peers": visible_peers[:8],
             "risky_gateway_service_count": len(risky_services),
             "context_note": (
-                "worth closer review on guest or travel networks"
-                if hint_level == "peer_visibility_detected" and network_profile in {"guest", "travel"}
+                build_profile_context_note(network_profile, "client_isolation")
+                if hint_level == "peer_visibility_detected" and is_untrusted_profile(network_profile)
                 else (
-                    "typical for a private/home LAN"
+                    build_profile_context_note(
+                        network_profile,
+                        "client_isolation",
+                        fallback="typical for a private/home LAN",
+                    )
                     if is_private_gateway and hint_level == "peer_visibility_detected"
                     else None
                 )
+            ),
+            "profile_expectation": build_profile_context_note(
+                network_profile,
+                "client_isolation",
             ),
         },
     }
@@ -1857,6 +1936,7 @@ def collect_overall_trust_signals(
     return {
         "local_hint": local_details.get("hint_level"),
         "network_profile": network_profile,
+        "profile_expectation": get_profile_expectation(network_profile, "overall"),
         "risky_gateway_service_count": local_details.get("risky_gateway_service_count", 0),
         "is_private_gateway": local_details.get("is_private_gateway", False),
         "dns_hint": dns_details.get("hint_level"),
@@ -1885,25 +1965,39 @@ def classify_overall_trust_signals(signals):
         }
     if (
         local_hint == "gateway_only_visibility"
-        and network_profile in {"guest", "travel"}
+        and is_untrusted_profile(network_profile)
         and risky_gateway_service_count > 0
     ):
-        return {
-            "status": "notice",
-            "summary": (
+        if network_profile == "travel":
+            summary = (
+                "Internet trust path looks healthy, but a travel network exposes gateway-local "
+                "admin/web surfaces; avoid trusting the local segment"
+            )
+        else:
+            summary = (
                 "Internet trust path looks healthy, but gateway-local admin/web surfaces are more exposed "
                 f"than expected for a {network_profile} network"
-            ),
-            "context_note": "this can be fine on a home LAN, but deserves more attention on guest or travel networks",
-        }
-    if local_hint == "peer_visibility_detected" and network_profile in {"guest", "travel"}:
+            )
         return {
             "status": "notice",
-            "summary": (
+            "summary": summary,
+            "context_note": get_profile_expectation(network_profile, "overall"),
+        }
+    if local_hint == "peer_visibility_detected" and is_untrusted_profile(network_profile):
+        if network_profile == "travel":
+            summary = (
+                "Internet trust path looks healthy, but local peers are visible on a travel network; "
+                "treat nearby devices as untrusted"
+            )
+        else:
+            summary = (
                 "Internet trust path looks healthy, but the local segment is more open than expected "
                 f"for a {network_profile} network"
-            ),
-            "context_note": "peer visibility may be normal on a home LAN, but it deserves more attention on guest or travel networks",
+            )
+        return {
+            "status": "notice",
+            "summary": summary,
+            "context_note": get_profile_expectation(network_profile, "overall"),
         }
     if local_hint == "peer_visibility_detected" and is_private_gateway:
         return {
@@ -1929,6 +2023,7 @@ def build_overall_trust_details(signals, decision):
     return {
         "local_segment": signals["local_hint"],
         "network_profile": signals["network_profile"],
+        "profile_expectation": signals["profile_expectation"],
         "risky_gateway_service_count": signals["risky_gateway_service_count"],
         "dns_path": signals["dns_hint"],
         "captive_path": signals["captive_hint"],

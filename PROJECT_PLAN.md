@@ -149,7 +149,7 @@ Focus:
 
 1. Continue small refinements to focus-mode and alert-only wording as real network runs expose confusing cases.
 2. Continue selective cleanup in `network_health.py` as new trust-check behavior is added.
-3. Improve guest/travel interpretation beyond the first `network profile` layer.
+3. Continue improving guest/travel interpretation as more real-world network examples are observed.
 4. Revisit `network_scan` history modeling only if operational pressure appears.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
@@ -198,6 +198,7 @@ Completed:
 - `network-health-check` now includes aggregated `dns_trust_reasoning`, `captive_trust_reasoning`, and `https_trust_reasoning` checks on top of the existing probe results.
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
 - `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
+- `network-health-check` now carries separate profile expectations for `home`, `guest`, and `travel` into local exposure, client isolation, and overall trust details.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - `network-health-check` focus and alert-only output now use tighter operator-oriented summaries that suppress routine OK detail and keep notice-only reports compact.
 - `network-health-check` focus and alert-only output now prioritize notice-only findings, avoid duplicate notice summary lines, and truncate long notice lists with an explicit remaining count.
