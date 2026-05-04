@@ -199,6 +199,10 @@ Completed:
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
 - `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
+- `network-health-check` focus and alert-only output now use tighter operator-oriented summaries that suppress routine OK detail and keep notice-only reports compact.
+- `network_health.py` cleanup has started by centralizing health-check result construction through a shared helper.
+- Aggregate captive-portal and HTTPS reasoning checks now share a common details builder to reduce repeated payload construction.
+- DNS trust reasoning now uses a shared details builder to keep resolver interpretation payloads consistent.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

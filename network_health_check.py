@@ -18,6 +18,9 @@ from reporting import render_markdown_table, save_json_report, save_markdown_rep
 JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
+FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
+FOCUS_CONTEXT_CHECKS = {"gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
+NOTICE_REPORT_LIMIT = 3
 CHECK_GROUPS = [
     ("Summary", ["overall_trust_explanation"]),
     ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "client_isolation_hint", "active_path"]),
@@ -470,6 +473,15 @@ def format_notice_reason_labels(summary, limit=3):
     return f"Primary reasons: {', '.join(labels)}{suffix}"
 
 
+def format_health_count_summary(summary, include_ok=False):
+    parts = [f"Checks: {summary['total_checks']}"]
+    if include_ok:
+        parts.append(f"OK: {summary['ok_checks']}")
+    parts.append(f"Notices: {summary.get('notice_checks', 0)}")
+    parts.append(f"Alerts: {summary['alert_checks']}")
+    return " | ".join(parts)
+
+
 def build_trust_assessment(summary, scan_context=None):
     alert_count = summary.get("alert_checks", 0)
     notice_count = summary.get("notice_checks", 0)
@@ -543,6 +555,17 @@ def get_focus_detail_limit(check):
     return 2
 
 
+def should_show_focus_check(check):
+    """Return whether a check is useful enough for the short operator view."""
+    if check["status"] in {"alert", "notice"}:
+        return True
+    if check["name"] in FOCUS_BASELINE_CHECKS:
+        return True
+    if check["name"] in FOCUS_CONTEXT_CHECKS and check.get("details"):
+        return check["status"] != "ok"
+    return False
+
+
 def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
     message = (
         f"\rRunning Wi-Fi stability diagnostics: sample {current_step}/{total_steps} "
@@ -560,9 +583,7 @@ def print_health_report(checks, summary, scan_context=None):
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
         print(f"Network profile: {network_profile}")
-    print(
-        f"Checks: {summary['total_checks']} | OK: {summary['ok_checks']} | Notices: {summary.get('notice_checks', 0)} | Alerts: {summary['alert_checks']}"
-    )
+    print(format_health_count_summary(summary, include_ok=True))
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
@@ -582,6 +603,7 @@ def print_focus_health_report(checks, summary, scan_context=None):
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
         print(f"Network profile: {network_profile}")
+    print(format_health_count_summary(summary))
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
@@ -592,9 +614,7 @@ def print_focus_health_report(checks, summary, scan_context=None):
     key_checks = [
         check
         for check in checks
-        if check["status"] == "alert"
-        or check["status"] == "notice"
-        or check["name"] in {"overall_trust_explanation", "gateway_identity", "gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
+        if should_show_focus_check(check)
     ]
     seen = set()
     for check in key_checks:
@@ -687,23 +707,35 @@ def print_alert_report(summary, scan_context=None):
     if network_profile:
         print(f"Network profile: {network_profile}")
     alerts = summary["alerts"]
+    report_summary = dict(summary)
+    report_summary.setdefault("alert_checks", len(alerts))
+    report_summary.setdefault("notice_checks", len(report_summary.get("notices", [])))
+    if "total_checks" in report_summary:
+        print(format_health_count_summary(report_summary))
     if not alerts:
         notices = summary.get("notices", [])
         if notices:
+            assessment = build_trust_assessment(report_summary, scan_context=scan_context)
             print("No actionable health alerts detected.")
+            print(f"Trust assessment: {assessment['level']}")
+            print(assessment["summary"])
             print(f"Notices present: {len(notices)}")
             notice_summary = format_top_notice_summary(summary)
             if notice_summary:
                 print(notice_summary)
-            for check in notices[:4]:
-                print(f"\n{format_status_badge('NOTICE')} {format_check_label(check['name'])}")
-                print(check["summary"])
-            if len(notices) > 4:
-                print(f"\n... {len(notices) - 4} more notice(s)")
+            print("Top notices:")
+            for check in notices[:NOTICE_REPORT_LIMIT]:
+                print(f"- {format_check_label(check['name'])}: {check['summary']}")
+            if len(notices) > NOTICE_REPORT_LIMIT:
+                print(f"... {len(notices) - NOTICE_REPORT_LIMIT} more notice(s)")
         else:
             print("No actionable health alerts detected.")
         print("=============================")
         return
+    assessment = build_trust_assessment(report_summary, scan_context=scan_context)
+    print(f"Trust assessment: {assessment['level']}")
+    print(assessment["summary"])
+    print(format_top_alert_summary(report_summary))
     print(f"Alerts: {len(alerts)}")
     for check in alerts:
         print(f"\n{format_status_badge('ALERT')} {format_check_label(check['name'])}")

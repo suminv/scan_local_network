@@ -96,6 +96,54 @@ def normalize_network_profile(network_profile):
     return DEFAULT_NETWORK_PROFILE
 
 
+def build_check(name, status, summary, details=None):
+    """Build a normalized health check result."""
+    return {
+        "name": name,
+        "status": status,
+        "summary": summary,
+        "details": details or {},
+    }
+
+
+def build_probe_reasoning_details(
+    hint_level,
+    probe_count,
+    alert_probe_count=0,
+    affected_probes=None,
+    context_note=None,
+):
+    """Build the common details payload for aggregate probe reasoning checks."""
+    return {
+        "hint_level": hint_level,
+        "probe_count": probe_count,
+        "alert_probe_count": alert_probe_count,
+        "affected_probes": affected_probes or [],
+        "context_note": context_note,
+    }
+
+
+def build_dns_reasoning_details(
+    hint_level,
+    nameservers=None,
+    resolver_profile=None,
+    risk_count=0,
+    resolution_issue_count=0,
+    affected_domains=None,
+    context_note=None,
+):
+    """Build the common details payload for DNS trust reasoning checks."""
+    return {
+        "hint_level": hint_level,
+        "nameservers": nameservers or [],
+        "resolver_profile": resolver_profile or [],
+        "risk_count": risk_count,
+        "resolution_issue_count": resolution_issue_count,
+        "affected_domains": affected_domains or [],
+        "context_note": context_note,
+    }
+
+
 def get_default_gateway():
     gateways = netifaces.gateways()
     default_gateway = gateways["default"][netifaces.AF_INET]
@@ -110,21 +158,21 @@ def resolve_gateway_identity():
     except (socket.herror, socket.gaierror, OSError):
         hostname = None
 
-    return {
-        "name": "gateway_identity",
-        "status": "ok" if not is_public_ip(gateway_ip) else "alert",
-        "summary": (
+    return build_check(
+        "gateway_identity",
+        "ok" if not is_public_ip(gateway_ip) else "alert",
+        (
             f"Default gateway {gateway_ip} on {interface}"
             if hostname is None
             else f"Default gateway {gateway_ip} ({hostname}) on {interface}"
         ),
-        "details": {
+        {
             "gateway_ip": gateway_ip,
             "interface": interface,
             "hostname": hostname,
             "is_public_ip": is_public_ip(gateway_ip),
         },
-    }
+    )
 
 
 def extract_html_title(body):
@@ -760,27 +808,27 @@ def build_dns_environment_check():
     dns_config["analysis"] = analysis
 
     if not nameservers:
-        return {
-            "name": "dns_environment",
-            "status": "alert",
-            "summary": "No DNS servers could be determined from the current environment",
-            "details": dns_config,
-        }
+        return build_check(
+            "dns_environment",
+            "alert",
+            "No DNS servers could be determined from the current environment",
+            dns_config,
+        )
 
     if analysis["risks"]:
-        return {
-            "name": "dns_environment",
-            "status": "alert",
-            "summary": f"DNS environment exposes {len(analysis['risks'])} risk signal(s)",
-            "details": dns_config,
-        }
+        return build_check(
+            "dns_environment",
+            "alert",
+            f"DNS environment exposes {len(analysis['risks'])} risk signal(s)",
+            dns_config,
+        )
 
-    return {
-        "name": "dns_environment",
-        "status": "ok",
-        "summary": f"Detected {len(nameservers)} DNS server(s) from {dns_config['source']}",
-        "details": dns_config,
-    }
+    return build_check(
+        "dns_environment",
+        "ok",
+        f"Detected {len(nameservers)} DNS server(s) from {dns_config['source']}",
+        dns_config,
+    )
 
 
 def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks):
@@ -794,109 +842,92 @@ def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks
     risk_count = len(analysis.get("risks", []))
 
     if not nameservers:
-        return {
-            "name": "dns_trust_reasoning",
-            "status": "alert",
-            "summary": "DNS trust cannot be assessed because no active DNS servers were detected",
-            "details": {
-                "hint_level": "dns_unavailable",
-                "nameservers": [],
-                "resolver_profile": [],
-                "risk_count": 0,
-                "resolution_issue_count": 0,
-                "affected_domains": [],
-                "context_note": None,
-            },
-        }
+        return build_check(
+            "dns_trust_reasoning",
+            "alert",
+            "DNS trust cannot be assessed because no active DNS servers were detected",
+            build_dns_reasoning_details("dns_unavailable"),
+        )
 
     if resolution_alerts:
-        return {
-            "name": "dns_trust_reasoning",
-            "status": "alert",
-            "summary": f"DNS trust is degraded: {len(resolution_alerts)} domain lookup issue(s) were observed",
-            "details": {
-                "hint_level": "resolution_failure",
-                "nameservers": nameservers,
-                "resolver_profile": classification_types,
-                "risk_count": risk_count,
-                "resolution_issue_count": len(resolution_alerts),
-                "affected_domains": [
+        return build_check(
+            "dns_trust_reasoning",
+            "alert",
+            f"DNS trust is degraded: {len(resolution_alerts)} domain lookup issue(s) were observed",
+            build_dns_reasoning_details(
+                "resolution_failure",
+                nameservers=nameservers,
+                resolver_profile=classification_types,
+                risk_count=risk_count,
+                resolution_issue_count=len(resolution_alerts),
+                affected_domains=[
                     check.get("details", {}).get("domain")
                     for check in resolution_alerts
                     if check.get("details", {}).get("domain")
                 ],
-                "context_note": "public name resolution did not behave normally",
-            },
-        }
+                context_note="public name resolution did not behave normally",
+            ),
+        )
 
     if "public_upstream" in classification_types:
         local_classes = {"gateway_dns", "local_private", "on_link", "directly_reachable"}
         mixed_local_and_public = any(item in local_classes for item in classification_types)
-        return {
-            "name": "dns_trust_reasoning",
-            "status": "alert",
-            "summary": (
+        return build_check(
+            "dns_trust_reasoning",
+            "alert",
+            (
                 "DNS path mixes local/private and public upstream resolvers"
                 if mixed_local_and_public
                 else "System resolver points directly at public upstream DNS"
             ),
-            "details": {
-                "hint_level": "mixed_dns_path" if mixed_local_and_public else "public_upstream_dns_present",
-                "nameservers": nameservers,
-                "resolver_profile": classification_types,
-                "risk_count": risk_count,
-                "resolution_issue_count": 0,
-                "affected_domains": [],
-                "context_note": "can be legitimate, but is less typical for private/home LANs and some guest networks",
-            },
-        }
+            build_dns_reasoning_details(
+                "mixed_dns_path" if mixed_local_and_public else "public_upstream_dns_present",
+                nameservers=nameservers,
+                resolver_profile=classification_types,
+                risk_count=risk_count,
+                context_note="can be legitimate, but is less typical for private/home LANs and some guest networks",
+            ),
+        )
 
     if "gateway_dns" in classification_types:
-        return {
-            "name": "dns_trust_reasoning",
-            "status": "ok",
-            "summary": "DNS path looks local and expected: the current gateway is acting as resolver",
-            "details": {
-                "hint_level": "gateway_dns_expected",
-                "nameservers": nameservers,
-                "resolver_profile": classification_types,
-                "risk_count": risk_count,
-                "resolution_issue_count": 0,
-                "affected_domains": [],
-                "context_note": "typical for private/home LANs and many managed networks",
-            },
-        }
+        return build_check(
+            "dns_trust_reasoning",
+            "ok",
+            "DNS path looks local and expected: the current gateway is acting as resolver",
+            build_dns_reasoning_details(
+                "gateway_dns_expected",
+                nameservers=nameservers,
+                resolver_profile=classification_types,
+                risk_count=risk_count,
+                context_note="typical for private/home LANs and many managed networks",
+            ),
+        )
 
     if any(item in {"local_private", "on_link", "directly_reachable"} for item in classification_types):
-        return {
-            "name": "dns_trust_reasoning",
-            "status": "ok",
-            "summary": "DNS path looks local/on-link and does not currently show trust anomalies",
-            "details": {
-                "hint_level": "private_local_dns_expected",
-                "nameservers": nameservers,
-                "resolver_profile": classification_types,
-                "risk_count": risk_count,
-                "resolution_issue_count": 0,
-                "affected_domains": [],
-                "context_note": "consistent with local or directly reachable resolvers",
-            },
-        }
+        return build_check(
+            "dns_trust_reasoning",
+            "ok",
+            "DNS path looks local/on-link and does not currently show trust anomalies",
+            build_dns_reasoning_details(
+                "private_local_dns_expected",
+                nameservers=nameservers,
+                resolver_profile=classification_types,
+                risk_count=risk_count,
+                context_note="consistent with local or directly reachable resolvers",
+            ),
+        )
 
-    return {
-        "name": "dns_trust_reasoning",
-        "status": "ok",
-        "summary": "DNS path does not currently show a strong trust signal in either direction",
-        "details": {
-            "hint_level": "dns_path_unclear",
-            "nameservers": nameservers,
-            "resolver_profile": classification_types,
-            "risk_count": risk_count,
-            "resolution_issue_count": 0,
-            "affected_domains": [],
-            "context_note": None,
-        },
-    }
+    return build_check(
+        "dns_trust_reasoning",
+        "ok",
+        "DNS path does not currently show a strong trust signal in either direction",
+        build_dns_reasoning_details(
+            "dns_path_unclear",
+            nameservers=nameservers,
+            resolver_profile=classification_types,
+            risk_count=risk_count,
+        ),
+    )
 
 
 def fetch_url(url, timeout=5, context=None):
@@ -938,21 +969,21 @@ def run_captive_portal_checks(probes=None, timeout=5):
         )
         suspicious = response["status_code"] != expected_status or redirected or body_mismatch
         checks.append(
-            {
-                "name": f"captive_{probe['name']}",
-                "status": "alert" if suspicious else "ok",
-                "summary": (
+            build_check(
+                f"captive_{probe['name']}",
+                "alert" if suspicious else "ok",
+                (
                     f"Unexpected captive-portal probe response for {probe['url']}"
                     if suspicious
                     else f"Connectivity probe looked normal for {probe['url']}"
                 ),
-                "details": {
+                {
                     "url": probe["url"],
                     "status_code": response["status_code"],
                     "location": location,
                     "body_preview": body,
                 },
-            }
+            )
         )
     return checks
 
@@ -965,13 +996,7 @@ def build_captive_trust_reasoning_check(captive_checks):
             "name": "captive_trust_reasoning",
             "status": "ok",
             "summary": "No captive-portal probes were run",
-            "details": {
-                "hint_level": "no_probes",
-                "probe_count": 0,
-                "alert_probe_count": 0,
-                "affected_probes": [],
-                "context_note": None,
-            },
+            "details": build_probe_reasoning_details("no_probes", 0),
         }
 
     if not alerts:
@@ -979,13 +1004,11 @@ def build_captive_trust_reasoning_check(captive_checks):
             "name": "captive_trust_reasoning",
             "status": "ok",
             "summary": "Captive-portal probes look normal; no HTTP interception is evident",
-            "details": {
-                "hint_level": "normal_internet_path",
-                "probe_count": len(captive_checks),
-                "alert_probe_count": 0,
-                "affected_probes": [],
-                "context_note": "connectivity-check endpoints behaved as expected",
-            },
+            "details": build_probe_reasoning_details(
+                "normal_internet_path",
+                len(captive_checks),
+                context_note="connectivity-check endpoints behaved as expected",
+            ),
         }
 
     alert_names = [check["name"].replace("captive_", "") for check in alerts]
@@ -1006,13 +1029,13 @@ def build_captive_trust_reasoning_check(captive_checks):
         "name": "captive_trust_reasoning",
         "status": "alert",
         "summary": summary,
-        "details": {
-            "hint_level": hint_level,
-            "probe_count": len(captive_checks),
-            "alert_probe_count": len(alerts),
-            "affected_probes": alert_names,
-            "context_note": context_note,
-        },
+        "details": build_probe_reasoning_details(
+            hint_level,
+            len(captive_checks),
+            alert_probe_count=len(alerts),
+            affected_probes=alert_names,
+            context_note=context_note,
+        ),
     }
 
 
@@ -1668,22 +1691,17 @@ def summarize_wifi_environment(wifi_environment):
 def build_wifi_environment_check():
     wifi = collect_wifi_environment()
     if wifi is None:
-        return {
-            "name": "wifi_environment",
-            "status": "ok",
-            "summary": "Wi-Fi environment inspection is only implemented for macOS in this version",
-            "details": {"platform": platform.system()},
-        }
+        return build_check(
+            "wifi_environment",
+            "ok",
+            "Wi-Fi environment inspection is only implemented for macOS in this version",
+            {"platform": platform.system()},
+        )
 
     wifi = build_wifi_environment_analysis(wifi)
     status, summary = summarize_wifi_environment(wifi)
 
-    return {
-        "name": "wifi_environment",
-        "status": status,
-        "summary": summary,
-        "details": wifi,
-    }
+    return build_check("wifi_environment", status, summary, wifi)
 
 
 def run_https_tls_checks(probes=None, timeout=5):
@@ -1694,37 +1712,37 @@ def run_https_tls_checks(probes=None, timeout=5):
             expected_statuses = probe["expected_statuses"]
             suspicious = response["status_code"] not in expected_statuses
             checks.append(
-                {
-                    "name": f"https_{probe['name']}",
-                    "status": "alert" if suspicious else "ok",
-                    "summary": (
+                build_check(
+                    f"https_{probe['name']}",
+                    "alert" if suspicious else "ok",
+                    (
                         f"Unexpected HTTPS response for {probe['url']}"
                         if suspicious
                         else f"HTTPS probe succeeded for {probe['url']}"
                     ),
-                    "details": {
+                    {
                         "url": probe["url"],
                         "status_code": response["status_code"],
                     },
-                }
+                )
             )
         except ssl.SSLError as exc:
             checks.append(
-                {
-                    "name": f"https_{probe['name']}",
-                    "status": "alert",
-                    "summary": f"TLS verification failed for {probe['url']}",
-                    "details": {"url": probe["url"], "error": str(exc)},
-                }
+                build_check(
+                    f"https_{probe['name']}",
+                    "alert",
+                    f"TLS verification failed for {probe['url']}",
+                    {"url": probe["url"], "error": str(exc)},
+                )
             )
         except (urllib.error.URLError, OSError) as exc:
             checks.append(
-                {
-                    "name": f"https_{probe['name']}",
-                    "status": "alert",
-                    "summary": f"HTTPS probe failed for {probe['url']}",
-                    "details": {"url": probe["url"], "error": str(exc)},
-                }
+                build_check(
+                    f"https_{probe['name']}",
+                    "alert",
+                    f"HTTPS probe failed for {probe['url']}",
+                    {"url": probe["url"], "error": str(exc)},
+                )
             )
     return checks
 
@@ -1737,13 +1755,7 @@ def build_https_trust_reasoning_check(https_checks):
             "name": "https_trust_reasoning",
             "status": "ok",
             "summary": "No HTTPS/TLS probes were run",
-            "details": {
-                "hint_level": "no_probes",
-                "probe_count": 0,
-                "alert_probe_count": 0,
-                "affected_probes": [],
-                "context_note": None,
-            },
+            "details": build_probe_reasoning_details("no_probes", 0),
         }
 
     if not alerts:
@@ -1751,13 +1763,11 @@ def build_https_trust_reasoning_check(https_checks):
             "name": "https_trust_reasoning",
             "status": "ok",
             "summary": "HTTPS/TLS probes look normal; certificate-validated web access appears healthy",
-            "details": {
-                "hint_level": "normal_https_path",
-                "probe_count": len(https_checks),
-                "alert_probe_count": 0,
-                "affected_probes": [],
-                "context_note": "TLS validation and expected HTTPS responses both succeeded",
-            },
+            "details": build_probe_reasoning_details(
+                "normal_https_path",
+                len(https_checks),
+                context_note="TLS validation and expected HTTPS responses both succeeded",
+            ),
         }
 
     alert_names = [check["name"].replace("https_", "") for check in alerts]
@@ -1772,13 +1782,13 @@ def build_https_trust_reasoning_check(https_checks):
             "summary": (
                 f"{len(tls_failures)} HTTPS probe(s) failed certificate validation; TLS interception or trust problems are possible"
             ),
-            "details": {
-                "hint_level": "certificate_validation_failure",
-                "probe_count": len(https_checks),
-                "alert_probe_count": len(alerts),
-                "affected_probes": alert_names,
-                "context_note": "certificate validation should normally succeed on a healthy internet path",
-            },
+            "details": build_probe_reasoning_details(
+                "certificate_validation_failure",
+                len(https_checks),
+                alert_probe_count=len(alerts),
+                affected_probes=alert_names,
+                context_note="certificate validation should normally succeed on a healthy internet path",
+            ),
         }
 
     if len(alerts) == len(https_checks):
@@ -1796,13 +1806,13 @@ def build_https_trust_reasoning_check(https_checks):
         "name": "https_trust_reasoning",
         "status": "alert",
         "summary": summary,
-        "details": {
-            "hint_level": hint_level,
-            "probe_count": len(https_checks),
-            "alert_probe_count": len(alerts),
-            "affected_probes": alert_names,
-            "context_note": context_note,
-        },
+        "details": build_probe_reasoning_details(
+            hint_level,
+            len(https_checks),
+            alert_probe_count=len(alerts),
+            affected_probes=alert_names,
+            context_note=context_note,
+        ),
     }
 
 

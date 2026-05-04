@@ -407,11 +407,15 @@ The gateway exposure check only inspects the current default gateway and only fo
 ./scan-health --alerts-only
 ```
 
+This mode is intended for scheduled runs. It prints compact check/notices/alerts counters, the trust assessment when findings exist, and only the top alert or notice reasons.
+
 **To use the short operator view:**
 
 ```bash
 ./scan-health --output focus
 ```
+
+This mode keeps the trust assessment and important context while suppressing routine OK details.
 
 **To run short Wi-Fi stability diagnostics for mesh or roaming problems:**
 
@@ -481,7 +485,8 @@ The standard report now also includes a top-level trust assessment:
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
 -   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
 -   **`network_health_check.py --network-profile`**: Interprets the network as `auto`, `home`, `guest`, or `travel`. Defaults to `auto`.
--   **`network_health_check.py --alerts-only`**: Alert-only console output with exit code `2` when actionable health findings are detected.
+-   **`network_health_check.py --alerts-only`**: Compact alert-only console output with exit code `2` when actionable health findings are detected.
+-   **`network_health_check.py --output focus`**: Short operator view with trust assessment, compact counters, and key checks only.
 -   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.
 -   **`network_health_check.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`port_scan.py --json-out`**: Defaults to `"port_scan_result.json"` in the working directory.

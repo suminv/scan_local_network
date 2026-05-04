@@ -14,6 +14,88 @@ import network_health_check
 
 
 class NetworkHealthTests(unittest.TestCase):
+    def test_build_check_uses_consistent_structure(self):
+        self.assertEqual(
+            network_health.build_check(
+                "dns_environment",
+                "ok",
+                "DNS looks normal",
+                {"nameservers": ["192.168.2.1"]},
+            ),
+            {
+                "name": "dns_environment",
+                "status": "ok",
+                "summary": "DNS looks normal",
+                "details": {"nameservers": ["192.168.2.1"]},
+            },
+        )
+        self.assertEqual(
+            network_health.build_check("wifi_environment", "ok", "Wi-Fi skipped")["details"],
+            {},
+        )
+
+    def test_build_probe_reasoning_details_uses_consistent_defaults(self):
+        self.assertEqual(
+            network_health.build_probe_reasoning_details("no_probes", 0),
+            {
+                "hint_level": "no_probes",
+                "probe_count": 0,
+                "alert_probe_count": 0,
+                "affected_probes": [],
+                "context_note": None,
+            },
+        )
+        self.assertEqual(
+            network_health.build_probe_reasoning_details(
+                "partial_https_failure",
+                2,
+                alert_probe_count=1,
+                affected_probes=["example_https"],
+                context_note="one endpoint failed",
+            ),
+            {
+                "hint_level": "partial_https_failure",
+                "probe_count": 2,
+                "alert_probe_count": 1,
+                "affected_probes": ["example_https"],
+                "context_note": "one endpoint failed",
+            },
+        )
+
+    def test_build_dns_reasoning_details_uses_consistent_defaults(self):
+        self.assertEqual(
+            network_health.build_dns_reasoning_details("dns_unavailable"),
+            {
+                "hint_level": "dns_unavailable",
+                "nameservers": [],
+                "resolver_profile": [],
+                "risk_count": 0,
+                "resolution_issue_count": 0,
+                "affected_domains": [],
+                "context_note": None,
+            },
+        )
+        self.assertEqual(
+            network_health.build_dns_reasoning_details(
+                "resolution_failure",
+                nameservers=["192.168.2.1"],
+                resolver_profile=["gateway_dns"],
+                risk_count=1,
+                resolution_issue_count=2,
+                affected_domains=["example.com"],
+                context_note="lookup failed",
+            ),
+            {
+                "hint_level": "resolution_failure",
+                "nameservers": ["192.168.2.1"],
+                "resolver_profile": ["gateway_dns"],
+                "risk_count": 1,
+                "resolution_issue_count": 2,
+                "affected_domains": ["example.com"],
+                "context_note": "lookup failed",
+            },
+        )
+
     def test_build_parser_supports_markdown_and_focus_flags(self):
         parser = network_health_check.build_parser()
 
@@ -1216,6 +1298,7 @@ Wi-Fi:
         with redirect_stdout(buffer):
             network_health_check.print_alert_report(
                 {
+                    "total_checks": 3,
                     "alerts": [],
                     "notices": [
                         {
@@ -1229,10 +1312,36 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("No actionable health alerts detected.", output)
+        self.assertIn("Checks: 3 | Notices: 1 | Alerts: 0", output)
+        self.assertIn("Trust assessment: trusted", output)
+        self.assertIn("No hard alerts detected. 1 notice(s) are present for review.", output)
         self.assertIn("Notices present: 1", output)
         self.assertIn("Notice areas: Gateway exposure", output)
         self.assertIn("Gateway exposure", output)
-        self.assertIn("[~]", output)
+        self.assertIn("Top notices:", output)
+        self.assertIn("- Gateway exposure: Private/local gateway exposes 2 local web/admin service(s) to the client on 192.168.2.254", output)
+        self.assertNotIn("[~]", output)
+
+    def test_print_alert_report_surfaces_suspicious_notice_only_guest_context(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            network_health_check.print_alert_report(
+                {
+                    "total_checks": 4,
+                    "alerts": [],
+                    "notices": [
+                        {"name": "gateway_exposure", "summary": "Gateway exposes web/admin services"},
+                        {"name": "overall_trust_explanation", "summary": "Local segment looks exposed for guest Wi-Fi"},
+                    ],
+                },
+                scan_context={"network_profile": "guest"},
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Checks: 4 | Notices: 2 | Alerts: 0", output)
+        self.assertIn("Trust assessment: suspicious", output)
+        self.assertIn("local segment looks more exposed than expected for a guest network", output)
+        self.assertIn("No actionable health alerts detected.", output)
 
     def test_resolve_report_output_paths_uses_defaults_and_optional_overrides(self):
         args = mock.Mock(json_out=None, md_out="health.md")
@@ -1288,6 +1397,9 @@ Wi-Fi:
         with redirect_stdout(buffer):
             network_health_check.print_alert_report(
                 {
+                    "total_checks": 5,
+                    "notice_checks": 0,
+                    "alert_checks": 2,
                     "alerts": [
                         {
                             "name": "active_path",
@@ -1304,6 +1416,11 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("Network profile: guest", output)
+        self.assertIn("Checks: 5 | Notices: 0 | Alerts: 2", output)
+        self.assertIn("Trust assessment: untrusted", output)
+        self.assertIn("2 alerts are active. Treat this network as untrusted.", output)
+        self.assertIn("Risk summary: 2 alert(s) in Active path, HTTPS", output)
+        self.assertIn("Alerts: 2", output)
         self.assertIn("Active path", output)
         self.assertIn("HTTPS", output)
         self.assertNotIn("https_example_https", output)
@@ -1415,6 +1532,23 @@ Wi-Fi:
         self.assertEqual(
             labels,
             "Primary reasons: Gateway exposure, Overall trust explanation, Client isolation hint",
+        )
+
+    def test_format_health_count_summary_can_include_or_hide_ok_count(self):
+        summary = {
+            "total_checks": 8,
+            "ok_checks": 5,
+            "notice_checks": 2,
+            "alert_checks": 1,
+        }
+
+        self.assertEqual(
+            network_health_check.format_health_count_summary(summary, include_ok=True),
+            "Checks: 8 | OK: 5 | Notices: 2 | Alerts: 1",
+        )
+        self.assertEqual(
+            network_health_check.format_health_count_summary(summary),
+            "Checks: 8 | Notices: 2 | Alerts: 1",
         )
 
     def test_print_health_report_formats_dns_without_raw_resolver_dump(self):
@@ -1766,6 +1900,16 @@ Wi-Fi:
                     "current": {"available": False, "reason": "wdutil info requires sudo on macOS"},
                 },
             },
+            {
+                "name": "dns_environment",
+                "status": "ok",
+                "summary": "DNS resolver inventory looks normal",
+                "details": {
+                    "nameservers": ["192.168.2.254"],
+                    "source": "scutil",
+                    "analysis": {"classifications": [{"server": "192.168.2.254", "classification": "gateway_dns"}]},
+                },
+            },
         ]
         summary = {"total_checks": 2, "ok_checks": 1, "notice_checks": 1, "alert_checks": 0, "alerts": [], "notices": [checks[1]]}
 
@@ -1779,12 +1923,14 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("=== Network Health Focus ===", output)
         self.assertIn("Network profile: guest", output)
+        self.assertIn("Checks: 2 | Notices: 1 | Alerts: 0", output)
         self.assertIn("Trust assessment: trusted", output)
         self.assertIn("Notice areas: Wi-Fi environment", output)
         self.assertIn("Wi-Fi environment", output)
         self.assertIn("[~]", output)
         self.assertIn("Gateway", output)
         self.assertIn("[OK]", output)
+        self.assertNotIn("DNS resolver inventory looks normal", output)
 
     def test_print_focus_health_report_limits_notice_detail_lines(self):
         buffer = StringIO()
@@ -1832,13 +1978,14 @@ Wi-Fi:
         ]
         with redirect_stdout(buffer):
             network_health_check.print_alert_report(
-                {"alerts": [], "notices": notices},
+                {"total_checks": 6, "alerts": [], "notices": notices},
                 scan_context={"network_profile": "travel"},
             )
 
         output = buffer.getvalue()
+        self.assertIn("Checks: 6 | Notices: 6 | Alerts: 0", output)
         self.assertIn("Notices present: 6", output)
-        self.assertIn("... 2 more notice(s)", output)
+        self.assertIn("... 3 more notice(s)", output)
 
     def test_print_health_report_renders_active_path_check(self):
         buffer = StringIO()
