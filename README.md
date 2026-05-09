@@ -354,6 +354,7 @@ It currently checks:
 - default gateway identity
 - default gateway MAC/vendor fingerprint when available from the local ARP cache
 - whether the default gateway exposes common local services such as DNS or web/admin endpoints to the current client
+- basic reachability to the default gateway using a short local ping probe
 - whether the passive ARP cache already shows other local peers besides the gateway on the current interface
 - a client-isolation hint that summarizes whether the current segment appears to expose peer devices to the client
 - whether an active Wi-Fi interface is present while the default route is using a different interface
@@ -401,6 +402,8 @@ The Wi-Fi section now also raises risk signals for:
 On macOS, the report now also raises an alert when an active Wi-Fi interface is present but the system default route is currently using another interface such as Ethernet. This is meant to catch dual-connected situations where a health check might otherwise look healthy because traffic is leaving through the wired path instead of the Wi-Fi path you intended to assess.
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
+
+The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
 
 **To print only actionable health alerts:**
 

@@ -19,11 +19,18 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
-FOCUS_CONTEXT_CHECKS = {"gateway_fingerprint", "active_path", "dns_environment", "wifi_environment"}
+FOCUS_CONTEXT_CHECKS = {
+    "gateway_fingerprint",
+    "gateway_reachability",
+    "active_path",
+    "dns_environment",
+    "wifi_environment",
+}
 NOTICE_REPORT_LIMIT = 3
 FOCUS_NOTICE_LIMIT = 4
 FINDING_PRIORITY = {
     "active_path": 10,
+    "gateway_reachability": 20,
     "gateway_exposure": 30,
     "local_peer_visibility": 40,
     "overall_trust_explanation": 55,
@@ -38,7 +45,7 @@ FINDING_PRIORITY = {
 }
 CHECK_GROUPS = [
     ("Summary", ["overall_trust_explanation"]),
-    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "local_peer_visibility", "client_isolation_hint", "active_path"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "gateway_reachability", "local_peer_visibility", "client_isolation_hint", "active_path"]),
     ("DNS", ["dns_environment", "dns_trust_reasoning", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_"]),
@@ -48,6 +55,7 @@ CHECK_LABELS = {
     "gateway_identity": "Gateway",
     "gateway_fingerprint": "Gateway fingerprint",
     "gateway_exposure": "Gateway exposure",
+    "gateway_reachability": "Gateway reachability",
     "local_peer_visibility": "Local peer visibility",
     "client_isolation_hint": "Client isolation hint",
     "active_path": "Active path",
@@ -128,6 +136,24 @@ def format_gateway_exposure_details(details):
             lines.append(f"      page_hint: {http_probe['page_hint']}")
         if http_probe.get("error"):
             lines.append(f"      probe_error: {http_probe['error']}")
+    return lines
+
+
+def format_gateway_reachability_details(details):
+    ping = details.get("ping", {})
+    lines = [
+        f"  gateway: {details.get('gateway_ip')}",
+        f"  interface: {details.get('interface')}",
+        f"  level: {details.get('level')}",
+    ]
+    if ping.get("transmitted") is not None:
+        lines.append(
+            f"  ping: {ping.get('received')}/{ping.get('transmitted')} received"
+        )
+    if ping.get("loss_percent") is not None:
+        lines.append(f"  packet loss: {ping['loss_percent']:.0f}%")
+    if ping.get("avg_ms") is not None:
+        lines.append(f"  avg latency: {ping['avg_ms']:.1f} ms")
     return lines
 
 
@@ -256,6 +282,8 @@ def format_overall_trust_explanation_details(details):
         lines.append(f"  HTTPS path: {details['https_path']}")
     if details.get("active_path"):
         lines.append(f"  active path: {details['active_path']}")
+    if details.get("gateway_reachability"):
+        lines.append(f"  gateway reachability: {details['gateway_reachability']}")
     if details.get("affected_components"):
         lines.append(f"  affected components: {', '.join(details['affected_components'])}")
     return lines
@@ -369,6 +397,8 @@ def format_check_details(check):
         return format_gateway_fingerprint_details(details)
     if name == "gateway_exposure":
         return format_gateway_exposure_details(details)
+    if name == "gateway_reachability":
+        return format_gateway_reachability_details(details)
     if name == "local_peer_visibility":
         return format_local_peer_visibility_details(details)
     if name == "client_isolation_hint":

@@ -1390,6 +1390,53 @@ def ping_host(host, count=3):
     return parse_ping_summary(output)
 
 
+def build_gateway_reachability_check(ping_count=3):
+    """Check whether the current client can reliably reach the default gateway."""
+    gateway_ip, interface = get_default_gateway()
+    ping_summary = ping_host(gateway_ip, count=ping_count)
+    loss_percent = ping_summary.get("loss_percent")
+    avg_ms = ping_summary.get("avg_ms")
+    received = ping_summary.get("received")
+    transmitted = ping_summary.get("transmitted")
+
+    if transmitted is None or received is None:
+        status = "alert"
+        summary = f"Gateway reachability to {gateway_ip} on {interface} could not be measured"
+        level = "unavailable"
+    elif received == 0 or loss_percent == 100:
+        status = "alert"
+        summary = f"Default gateway {gateway_ip} did not respond to local reachability probes on {interface}"
+        level = "unreachable"
+    elif loss_percent and loss_percent >= 10:
+        status = "alert"
+        summary = f"Default gateway {gateway_ip} showed {loss_percent:.0f}% packet loss on {interface}"
+        level = "lossy"
+    elif loss_percent and loss_percent > 0:
+        status = "notice"
+        summary = f"Default gateway {gateway_ip} showed minor packet loss ({loss_percent:.0f}%) on {interface}"
+        level = "degraded"
+    elif avg_ms is not None and avg_ms >= 50:
+        status = "notice"
+        summary = f"Default gateway {gateway_ip} responded slowly on {interface} ({avg_ms:.1f} ms average)"
+        level = "slow"
+    else:
+        status = "ok"
+        summary = f"Default gateway {gateway_ip} is reachable on {interface}"
+        level = "reachable"
+
+    return build_check(
+        "gateway_reachability",
+        status,
+        summary,
+        {
+            "gateway_ip": gateway_ip,
+            "interface": interface,
+            "level": level,
+            "ping": ping_summary,
+        },
+    )
+
+
 def summarize_wifi_stability(samples, gateway_ip):
     bssids = [sample["wifi"].get("bssid") for sample in samples if sample.get("wifi")]
     bssids = [bssid for bssid in bssids if bssid]
@@ -1913,6 +1960,7 @@ def collect_overall_trust_signals(
     captive_trust_reasoning_check,
     https_trust_reasoning_check,
     active_path_check=None,
+    gateway_reachability_check=None,
     network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Extract the normalized signal set used by the overall trust explanation."""
@@ -1928,6 +1976,7 @@ def collect_overall_trust_signals(
         ("Captive portal", captive_trust_reasoning_check),
         ("HTTPS", https_trust_reasoning_check),
         ("Active path", active_path_check),
+        ("Gateway reachability", gateway_reachability_check),
     ]
     for label, check in component_checks:
         if check and check.get("status") == "alert":
@@ -1943,6 +1992,9 @@ def collect_overall_trust_signals(
         "captive_hint": captive_details.get("hint_level"),
         "https_hint": https_details.get("hint_level"),
         "active_path_status": active_path_check.get("status") if active_path_check else None,
+        "gateway_reachability_status": (
+            gateway_reachability_check.get("status") if gateway_reachability_check else None
+        ),
         "affected_components": affected_components,
     }
 
@@ -2029,6 +2081,7 @@ def build_overall_trust_details(signals, decision):
         "captive_path": signals["captive_hint"],
         "https_path": signals["https_hint"],
         "active_path": signals["active_path_status"],
+        "gateway_reachability": signals["gateway_reachability_status"],
         "affected_components": signals["affected_components"],
         "context_note": decision["context_note"],
     }
@@ -2040,6 +2093,7 @@ def build_overall_trust_explanation_check(
     captive_trust_reasoning_check,
     https_trust_reasoning_check,
     active_path_check=None,
+    gateway_reachability_check=None,
     network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Build one short human-oriented explanation across local, DNS, captive, and HTTPS trust layers."""
@@ -2049,6 +2103,7 @@ def build_overall_trust_explanation_check(
         captive_trust_reasoning_check,
         https_trust_reasoning_check,
         active_path_check=active_path_check,
+        gateway_reachability_check=gateway_reachability_check,
         network_profile=network_profile,
     )
     decision = classify_overall_trust_signals(signals)
@@ -2122,6 +2177,7 @@ def run_network_health_checks(
         timeout=timeout,
         network_profile=network_profile,
     )
+    gateway_reachability_check = build_gateway_reachability_check()
     internet_path = collect_internet_path_checks(
         dns_domains=dns_domains,
         timeout=timeout,
@@ -2130,6 +2186,7 @@ def run_network_health_checks(
         local_segment["gateway_identity"],
         local_segment["gateway_fingerprint"],
         local_segment["gateway_exposure"],
+        gateway_reachability_check,
         local_segment["local_peer_visibility"],
         local_segment["client_isolation_hint"],
         internet_path["dns_environment"],
@@ -2151,6 +2208,7 @@ def run_network_health_checks(
             internet_path["captive_trust_reasoning"],
             internet_path["https_trust_reasoning"],
             active_path_check=active_path_check,
+            gateway_reachability_check=gateway_reachability_check,
             network_profile=network_profile,
         )
     )

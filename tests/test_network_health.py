@@ -619,6 +619,40 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(summary["loss_percent"], 0.0)
         self.assertEqual(summary["avg_ms"], 6.789)
 
+    def test_build_gateway_reachability_check_marks_gateway_packet_loss_as_alert(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.ping_host",
+                return_value={
+                    "transmitted": 3,
+                    "received": 2,
+                    "loss_percent": 33.0,
+                    "avg_ms": 18.2,
+                },
+            ):
+                result = network_health.build_gateway_reachability_check()
+
+        self.assertEqual(result["name"], "gateway_reachability")
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["level"], "lossy")
+        self.assertIn("33% packet loss", result["summary"])
+
+    def test_build_gateway_reachability_check_marks_gateway_reachable_as_ok(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.ping_host",
+                return_value={
+                    "transmitted": 3,
+                    "received": 3,
+                    "loss_percent": 0.0,
+                    "avg_ms": 4.1,
+                },
+            ):
+                result = network_health.build_gateway_reachability_check()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["level"], "reachable")
+
     def test_summarize_wifi_stability_marks_unstable_on_bssid_changes_and_loss(self):
         summary = network_health.summarize_wifi_stability(
             [
@@ -1099,35 +1133,37 @@ Wi-Fi:
         with mock.patch("network_health.resolve_gateway_identity", return_value={"name": "gateway_identity", "status": "ok"}):
             with mock.patch("network_health.resolve_gateway_fingerprint", return_value={"name": "gateway_fingerprint", "status": "ok"}):
                 with mock.patch("network_health.build_gateway_exposure_check", return_value={"name": "gateway_exposure", "status": "ok"}):
-                    with mock.patch("network_health.build_local_peer_visibility_check", return_value={"name": "local_peer_visibility", "status": "ok"}):
-                        with mock.patch("network_health.build_client_isolation_hint_check", return_value={"name": "client_isolation_hint", "status": "ok"}):
-                            with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
-                                with mock.patch("network_health.build_dns_trust_reasoning_check", return_value={"name": "dns_trust_reasoning", "status": "ok"}):
-                                    with mock.patch(
-                                        "network_health.build_wifi_environment_check",
-                                        return_value={
-                                            "name": "wifi_environment",
-                                            "status": "ok",
-                                            "details": {
-                                                "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
-                                                "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
-                                            },
-                                        },
-                                    ):
+                    with mock.patch("network_health.build_gateway_reachability_check", return_value={"name": "gateway_reachability", "status": "ok"}):
+                        with mock.patch("network_health.build_local_peer_visibility_check", return_value={"name": "local_peer_visibility", "status": "ok"}):
+                            with mock.patch("network_health.build_client_isolation_hint_check", return_value={"name": "client_isolation_hint", "status": "ok"}):
+                                with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}):
+                                    with mock.patch("network_health.build_dns_trust_reasoning_check", return_value={"name": "dns_trust_reasoning", "status": "ok"}):
                                         with mock.patch(
-                                            "network_health.build_active_path_check",
-                                            return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                                            "network_health.build_wifi_environment_check",
+                                            return_value={
+                                                "name": "wifi_environment",
+                                                "status": "ok",
+                                                "details": {
+                                                    "inventory": {"interfaces": [{"name": "en1", "status": "spairport_status_active"}]},
+                                                    "current": {"available": True, "interfaces": {"en1": {"ssid": "Hotel WiFi"}}},
+                                                },
+                                            },
                                         ):
-                                            with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
-                                                with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
-                                                    with mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}):
-                                                        with mock.patch("network_health.run_https_tls_checks", return_value=[]):
-                                                            with mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
-                                                                with mock.patch("network_health.build_overall_trust_explanation_check", return_value={"name": "overall_trust_explanation", "status": "ok"}):
-                                                                    checks = network_health.run_network_health_checks()
+                                            with mock.patch(
+                                                "network_health.build_active_path_check",
+                                                return_value={"name": "active_path", "status": "alert", "summary": "mismatch"},
+                                            ):
+                                                with mock.patch("network_health.run_dns_consistency_checks", return_value=[]):
+                                                    with mock.patch("network_health.run_captive_portal_checks", return_value=[]):
+                                                        with mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}):
+                                                            with mock.patch("network_health.run_https_tls_checks", return_value=[]):
+                                                                with mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
+                                                                    with mock.patch("network_health.build_overall_trust_explanation_check", return_value={"name": "overall_trust_explanation", "status": "ok"}):
+                                                                        checks = network_health.run_network_health_checks()
 
         self.assertTrue(any(check["name"] == "active_path" and check["status"] == "alert" for check in checks))
         self.assertTrue(any(check["name"] == "gateway_exposure" for check in checks))
+        self.assertTrue(any(check["name"] == "gateway_reachability" for check in checks))
         self.assertTrue(any(check["name"] == "local_peer_visibility" for check in checks))
         self.assertTrue(any(check["name"] == "client_isolation_hint" for check in checks))
         self.assertTrue(any(check["name"] == "dns_trust_reasoning" for check in checks))
