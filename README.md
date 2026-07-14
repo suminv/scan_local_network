@@ -257,6 +257,19 @@ This will skip the network discovery phase and scan only the specified host. You
 ./scan-ports -t 192.168.1.101 -p 80,443,22
 ```
 
+Target scans show only the current service observations by default. To compare a
+target with a previous scan of the same IP and the same port set, add
+`--show-changes`:
+
+```bash
+./scan-ports -t 192.168.1.101 -p 22,80 --show-changes
+```
+
+For an open HTTP/HTTPS port, the scanner performs one bounded, unauthenticated
+request and reports the status, redirect, server header, content type, and page
+title when available. For SSH it records the pre-authentication banner and a
+host-key SHA-256 fingerprint. It never attempts passwords or logins.
+
 **To specify custom ports or ranges, use the `-p` or `--ports` flag:**
 
 -   Scan specific ports:
@@ -282,6 +295,12 @@ This will skip the network discovery phase and scan only the specified host. You
     ```bash
     ./scan-ports --output focus
     ```
+
+**To show setup, database, vendor, and progress diagnostics:**
+
+```bash
+./scan-ports --verbose
+```
 
 **To enrich port scan results with reverse-DNS hostnames:**
 

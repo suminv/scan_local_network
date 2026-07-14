@@ -1,9 +1,16 @@
+import base64
+import hashlib
+import http.client
+import re
 import socket
 import ssl
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 BANNER_TIMEOUT_SECONDS = 2
 CERT_EXPIRY_WARNING_DAYS = 30
+HTTP_BODY_LIMIT_BYTES = 64 * 1024
+WEB_PORTS = {80, 3000, 5000, 8000, 8080, 8443}
 
 
 def extract_certificate_common_name(cert):
@@ -55,12 +62,83 @@ def build_certificate_validity_status(not_after):
     return "valid"
 
 
-def build_service_result(service, tls=None):
+def build_service_result(service, tls=None, http=None, ssh=None):
     """Build a normalized in-memory service observation."""
     result = {"service": service}
     if tls is not None:
         result["tls"] = tls
+    if http is not None:
+        result["http"] = http
+    if ssh is not None:
+        result["ssh"] = ssh
     return result
+
+
+def extract_html_title(body):
+    """Extract a compact HTML title from a bounded response body."""
+    match = re.search(r"<title[^>]*>\s*(.*?)\s*</title>", body, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    return re.sub(r"\s+", " ", match.group(1)).strip()[:160] or None
+
+
+def get_http_service_details(ip, port, *, use_tls=False):
+    """Perform one bounded unauthenticated request without following redirects."""
+    connection_type = http.client.HTTPSConnection if use_tls else http.client.HTTPConnection
+    kwargs = {"timeout": BANNER_TIMEOUT_SECONDS}
+    if use_tls:
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        kwargs["context"] = context
+    connection = connection_type(ip, port, **kwargs)
+    try:
+        connection.request(
+            "GET",
+            "/",
+            headers={"Host": ip, "User-Agent": "scan-local-network/1.0", "Connection": "close"},
+        )
+        response = connection.getresponse()
+        body = response.read(HTTP_BODY_LIMIT_BYTES).decode("utf-8", errors="ignore")
+        details = {"status": response.status, "reason": response.reason or ""}
+        for header, key in (("Server", "server"), ("Content-Type", "content_type"), ("Location", "location")):
+            value = response.getheader(header)
+            if value:
+                details[key] = value
+        title = extract_html_title(body)
+        if title:
+            details["title"] = title
+        label = "HTTPS" if use_tls else "HTTP"
+        return build_service_result(f"{label} ({response.status} {response.reason})", http=details)
+    except (OSError, socket.timeout, http.client.HTTPException, ssl.SSLError):
+        return None
+    finally:
+        connection.close()
+
+
+def get_ssh_host_key_details(ip):
+    """Read SSH host keys with OpenSSH ssh-keyscan; no authentication is attempted."""
+    try:
+        completed = subprocess.run(
+            ["ssh-keyscan", "-T", str(BANNER_TIMEOUT_SECONDS), "-t", "ed25519,ecdsa,rsa", ip],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=BANNER_TIMEOUT_SECONDS + 1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in completed.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            digest = hashlib.sha256(base64.b64decode(parts[2])).digest()
+        except (ValueError, TypeError):
+            continue
+        fingerprint = base64.b64encode(digest).decode("ascii").rstrip("=")
+        return {"key_type": parts[1], "fingerprint_sha256": f"SHA256:{fingerprint}"}
+    return None
 
 
 def get_tls_service_details(ip, port):
@@ -164,6 +242,10 @@ def get_service_details(ip, port):
     if port == 443:
         tls_result = get_tls_service_details(ip, port)
         if tls_result and not tls_result["service"].startswith("TLS handshake failed"):
+            http_result = get_http_service_details(ip, port, use_tls=True)
+            if http_result:
+                http_result["tls"] = tls_result.get("tls")
+                return http_result
             return tls_result
 
         plaintext_result = get_plaintext_service_banner(ip, port)
@@ -173,7 +255,19 @@ def get_service_details(ip, port):
             return tls_result
         return build_service_result(plaintext_result)
 
-    return build_service_result(get_plaintext_service_banner(ip, port))
+    if port in WEB_PORTS:
+        http_result = get_http_service_details(ip, port)
+        if http_result:
+            return http_result
+
+    banner = get_plaintext_service_banner(ip, port)
+    if banner.startswith("SSH"):
+        return build_service_result(banner, ssh=get_ssh_host_key_details(ip))
+    if banner == "Unknown":
+        http_result = get_http_service_details(ip, port)
+        if http_result:
+            return http_result
+    return build_service_result(banner)
 
 
 def get_service_banner(ip, port):

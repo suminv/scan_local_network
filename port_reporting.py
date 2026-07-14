@@ -19,9 +19,34 @@ def count_open_ports(results):
     return sum(len(device.get("open_ports", [])) for device in results)
 
 
-def normalize_service_entry(port, service):
+def normalize_service_entry(port, service, http=None, ssh=None):
     """Normalize a raw service banner into a display label and detail string."""
     raw_service = (service or "").strip()
+    if http:
+        label = "HTTPS" if port == 443 else "HTTP"
+        status = " ".join(
+            str(part) for part in [http.get("status"), http.get("reason")] if part
+        )
+        details = [status or "HTTP response"]
+        if http.get("location"):
+            details.append(f"→ {http['location']}")
+        if http.get("server"):
+            details.append(http["server"])
+        if http.get("title"):
+            details.append(http["title"])
+        return label, " · ".join(details)
+
+    if ssh:
+        details = []
+        if raw_service:
+            if raw_service.startswith("SSH (") and raw_service.endswith(")"):
+                details.append(raw_service[5:-1])
+        if ssh.get("key_type"):
+            details.append(ssh["key_type"])
+        if ssh.get("fingerprint_sha256"):
+            details.append(ssh["fingerprint_sha256"])
+        return "SSH", " · ".join(details) or "SSH service detected"
+
     if not raw_service:
         if port == 443:
             return "TLS", "open port, no banner"
@@ -429,6 +454,8 @@ def format_device_heading(device):
     vendor = device.get("vendor", "Unknown")
     mac = device.get("mac", "Unknown")
     hostname = device.get("hostname")
+    if mac == "00:00:00:00:00:00" and vendor == "N/A":
+        return device["ip"]
     if hostname:
         return f"{device['ip']}  {hostname}  {vendor}  {mac}"
     return f"{device['ip']}  {vendor}  {mac}"
@@ -446,6 +473,8 @@ def build_port_result_lines(results):
             service_label, details = normalize_service_entry(
                 port_info["port"],
                 port_info.get("service", "Unknown"),
+                http=port_info.get("http"),
+                ssh=port_info.get("ssh"),
             )
             alert_marker = get_tls_alert_marker(port_info.get("tls"))
             line = f"  {port_info['port']}/tcp".ljust(12)
@@ -470,6 +499,8 @@ def build_port_observations(results):
             service_label, details = normalize_service_entry(
                 port_info["port"],
                 port_info.get("service", "Unknown"),
+                http=port_info.get("http"),
+                ssh=port_info.get("ssh"),
             )
             observations.append(
                 {

@@ -10,5 +10,4 @@ if [ ! -f "$VENV_PYTHON" ]; then
     exit 1
 fi
 
-echo "--- Running Network Health Check ---"
 "$VENV_PYTHON" "$SCRIPT_DIR/network_health_check.py" "$@"

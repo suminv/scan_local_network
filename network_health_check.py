@@ -1,4 +1,6 @@
 import argparse
+from contextlib import nullcontext, redirect_stdout
+from io import StringIO
 import sys
 
 from alert_delivery import build_alert_payload, send_webhook_payload
@@ -863,12 +865,12 @@ def build_parser():
     parser.add_argument(
         "--iface",
         type=str,
-        help="Network interface to inspect instead of automatic detection.",
+        help="Interface context for the report. Health probes use the system default route.",
     )
     parser.add_argument(
         "--cidr",
         type=str,
-        help="Optional CIDR context for the report. No broad scanning is performed.",
+        help="CIDR context for the report. No broad scanning is performed.",
     )
     parser.add_argument(
         "--network-profile",
@@ -915,6 +917,11 @@ def build_parser():
         "--debug-wifi",
         action="store_true",
         help="Print raw diagnostic summary for the macOS Wi-Fi backend.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show setup and report-save details in addition to the selected report.",
     )
     parser.add_argument(
         "--wifi-stability-seconds",
@@ -1021,17 +1028,23 @@ def maybe_send_health_webhook(webhook_url, timeout, scan_context, summary):
 def main():
     init(autoreset=True)
     args = parse_args()
+    if args.alerts_only and args.debug_wifi:
+        print("Error: --debug-wifi cannot be combined with --alerts-only.", file=sys.stderr)
+        sys.exit(1)
     global MARKDOWN_OUTPUT_FILE
     output_paths = resolve_report_output_paths(args)
     MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
-    scan_context, checks, summary, payload = run_health_check_collection(args)
-    save_json_report(output_paths["json"], payload, label="Network health report")
-    if MARKDOWN_OUTPUT_FILE:
-        save_markdown_report(
-            MARKDOWN_OUTPUT_FILE,
-            build_health_markdown_report(scan_context, checks, summary),
-            label="Network health Markdown report",
-        )
+    quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
+    with quiet_output:
+        scan_context, checks, summary, payload = run_health_check_collection(args)
+    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+        save_json_report(output_paths["json"], payload, label="Network health report")
+        if MARKDOWN_OUTPUT_FILE:
+            save_markdown_report(
+                MARKDOWN_OUTPUT_FILE,
+                build_health_markdown_report(scan_context, checks, summary),
+                label="Network health Markdown report",
+            )
     maybe_send_health_webhook(
         args.webhook_url,
         args.webhook_timeout,

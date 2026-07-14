@@ -1,4 +1,6 @@
 import argparse
+from contextlib import nullcontext, redirect_stdout
+from io import StringIO
 import ipaddress
 import json
 import os
@@ -313,6 +315,14 @@ def init_db():
     )
     '''
     )
+    if not column_exists(conn, "scan_runs", "target"):
+        cursor.execute("ALTER TABLE scan_runs ADD COLUMN target TEXT")
+    if not column_exists(conn, "scan_runs", "ports_json"):
+        cursor.execute("ALTER TABLE scan_runs ADD COLUMN ports_json TEXT")
+    if not column_exists(conn, "scan_runs", "hostname_resolution"):
+        cursor.execute(
+            "ALTER TABLE scan_runs ADD COLUMN hostname_resolution INTEGER NOT NULL DEFAULT 0"
+        )
     cursor.execute(
         '''
     CREATE TABLE IF NOT EXISTS scan_run_devices (
@@ -338,6 +348,8 @@ def init_db():
         port INTEGER NOT NULL,
         service TEXT,
         tls_json TEXT,
+        http_json TEXT,
+        ssh_json TEXT,
         PRIMARY KEY (scan_run_id, mac, port),
         FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
     )
@@ -347,19 +359,44 @@ def init_db():
         cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN hostname TEXT")
     if not column_exists(conn, "scan_run_ports", "tls_json"):
         cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN tls_json TEXT")
+    if not column_exists(conn, "scan_run_ports", "http_json"):
+        cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN http_json TEXT")
+    if not column_exists(conn, "scan_run_ports", "ssh_json"):
+        cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN ssh_json TEXT")
     conn.commit()
     return conn
 
-def create_scan_run(conn, interface, ip_range, scan_type=SCAN_TYPE_ARP):
+def create_scan_run(
+    conn,
+    interface,
+    ip_range,
+    scan_type=SCAN_TYPE_ARP,
+    *,
+    target=None,
+    ports=None,
+    resolve_hostnames=False,
+):
     """Create a scan run record and return its identifier."""
     started_at = datetime.now().isoformat()
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO scan_runs (scan_type, started_at, interface, cidr, status)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO scan_runs (
+            scan_type, started_at, interface, cidr, target, ports_json,
+            hostname_resolution, status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (scan_type, started_at, interface, ip_range, "running"),
+        (
+            scan_type,
+            started_at,
+            interface,
+            ip_range,
+            target,
+            json.dumps(sorted(ports)) if ports is not None else None,
+            int(resolve_hostnames),
+            "running",
+        ),
     )
     conn.commit()
     return cursor.lastrowid
@@ -417,37 +454,57 @@ def save_scan_run_ports(conn, scan_run_id, devices):
                         if port_info.get("tls") is not None
                         else None
                     ),
+                    (
+                        json.dumps(port_info.get("http"), sort_keys=True)
+                        if port_info.get("http") is not None
+                        else None
+                    ),
+                    (
+                        json.dumps(port_info.get("ssh"), sort_keys=True)
+                        if port_info.get("ssh") is not None
+                        else None
+                    ),
                 )
             )
     cursor = conn.cursor()
     cursor.executemany(
         """
-        INSERT OR REPLACE INTO scan_run_ports (scan_run_id, mac, ip, hostname, port, service, tls_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO scan_run_ports (
+            scan_run_id, mac, ip, hostname, port, service, tls_json, http_json, ssh_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows,
     )
     conn.commit()
 
 def load_previous_scan_ports(conn, current_scan_run_id):
-    """Load the most recent successful port-scan snapshot before the current run."""
+    """Load the previous port snapshot only when its scan scope is identical."""
     cursor = conn.cursor()
     row = cursor.execute(
         """
-        SELECT id
-        FROM scan_runs
-        WHERE scan_type = ? AND status = 'success' AND id < ?
-        ORDER BY id DESC
+        SELECT previous.id
+        FROM scan_runs AS current
+        JOIN scan_runs AS previous
+          ON previous.scan_type = current.scan_type
+         AND previous.interface IS current.interface
+         AND previous.cidr IS current.cidr
+         AND previous.target IS current.target
+         AND previous.ports_json IS current.ports_json
+        WHERE current.id = ?
+          AND previous.status = 'success'
+          AND previous.id < current.id
+        ORDER BY previous.id DESC
         LIMIT 1
         """,
-        (SCAN_TYPE_PORT, current_scan_run_id),
+        (current_scan_run_id,),
     ).fetchone()
     if row is None:
         return []
     previous_scan_run_id = row[0]
     rows = cursor.execute(
         """
-        SELECT mac, ip, hostname, port, service, tls_json
+        SELECT mac, ip, hostname, port, service, tls_json, http_json, ssh_json
         FROM scan_run_ports
         WHERE scan_run_id = ?
         ORDER BY ip, mac, port
@@ -462,26 +519,34 @@ def load_previous_scan_ports(conn, current_scan_run_id):
             port=port,
             service=service,
             tls=json.loads(tls_json) if tls_json else None,
+            http=json.loads(http_json) if http_json else None,
+            ssh=json.loads(ssh_json) if ssh_json else None,
         )
-        for mac, ip, hostname, port, service, tls_json in rows
+        for mac, ip, hostname, port, service, tls_json, http_json, ssh_json in rows
     ]
 
 def load_previous_scan_devices(conn, current_scan_run_id):
-    """Load the most recent successful ARP scan snapshot before the current run."""
+    """Load the previous ARP snapshot only from the same interface and CIDR."""
     cursor = conn.cursor()
     row = cursor.execute(
         """
-        SELECT id
-        FROM scan_runs
-        WHERE scan_type = ? AND status = 'success' AND id < ?
-        ORDER BY id DESC
+        SELECT previous.id, previous.hostname_resolution
+        FROM scan_runs AS current
+        JOIN scan_runs AS previous
+          ON previous.scan_type = current.scan_type
+         AND previous.interface IS current.interface
+         AND previous.cidr IS current.cidr
+        WHERE current.id = ?
+          AND previous.status = 'success'
+          AND previous.id < current.id
+        ORDER BY previous.id DESC
         LIMIT 1
         """,
-        (SCAN_TYPE_ARP, current_scan_run_id),
+        (current_scan_run_id,),
     ).fetchone()
     if row is None:
         return []
-    previous_scan_run_id = row[0]
+    previous_scan_run_id, _previous_hostname_resolution = row
     rows = cursor.execute(
         """
         SELECT mac, ip, vendor, hostname
@@ -496,7 +561,35 @@ def load_previous_scan_devices(conn, current_scan_run_id):
         for mac, ip, vendor, hostname in rows
     ]
 
-def build_scan_diff(previous_devices, current_devices, known_macs=None):
+
+def previous_scan_collected_hostnames(conn, current_scan_run_id):
+    """Return whether the compatible previous ARP scan collected hostnames."""
+    cursor = conn.cursor()
+    row = cursor.execute(
+        """
+        SELECT previous.hostname_resolution
+        FROM scan_runs AS current
+        JOIN scan_runs AS previous
+          ON previous.scan_type = current.scan_type
+         AND previous.interface IS current.interface
+         AND previous.cidr IS current.cidr
+        WHERE current.id = ?
+          AND previous.status = 'success'
+          AND previous.id < current.id
+        ORDER BY previous.id DESC
+        LIMIT 1
+        """,
+        (current_scan_run_id,),
+    ).fetchone()
+    return bool(row[0]) if row else False
+
+def build_scan_diff(
+    previous_devices,
+    current_devices,
+    known_macs=None,
+    *,
+    compare_hostnames=True,
+):
     """Compare two scan snapshots and return changes by device MAC."""
     known_macs = known_macs or set()
     previous_by_mac = {device["mac"]: device for device in previous_devices}
@@ -528,7 +621,7 @@ def build_scan_diff(previous_devices, current_devices, known_macs=None):
                     "new_ip": current_device["ip"],
                 }
             )
-        if previous_device.get("hostname") != current_device.get("hostname"):
+        if compare_hostnames and previous_device.get("hostname") != current_device.get("hostname"):
             hostname_changes.append(
                 {
                     "mac": mac,
@@ -1144,6 +1237,11 @@ def parse_args():
         help="Print only actionable alerts instead of the full ARP snapshot table.",
     )
     parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show setup, database, vendor lookup, and storage details.",
+    )
+    parser.add_argument(
         "--webhook-url",
         type=str,
         help="Optional webhook URL that receives ARP alerts when actionable changes are detected.",
@@ -1173,33 +1271,58 @@ def main():
         CSV_OUTPUT_FILE = args.csv_out
     if args.md_out:
         MARKDOWN_OUTPUT_FILE = args.md_out
-    print("ARP Network Scanner starting...")
-    mac_lookup = update_vendor_database()
+    if args.verbose:
+        print("ARP Network Scanner starting...")
+    quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
+    with quiet_output:
+        mac_lookup = update_vendor_database()
     try:
-        interface, ip_range = resolve_scan_target(args.iface, args.cidr)
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            interface, ip_range = resolve_scan_target(args.iface, args.cidr)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    db_conn = init_db()
-    scan_run_id = create_scan_run(db_conn, interface, ip_range)
+    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+        db_conn = init_db()
+    scan_run_id = create_scan_run(
+        db_conn,
+        interface,
+        ip_range,
+        resolve_hostnames=args.resolve_hostnames,
+    )
     try:
-        known_macs = load_known_devices(db_conn)
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            known_macs = load_known_devices(db_conn)
         previous_devices = load_previous_scan_devices(db_conn, scan_run_id)
-        scanned_devices = arp_scan(ip_range, interface)
+        previous_collected_hostnames = previous_scan_collected_hostnames(
+            db_conn, scan_run_id
+        )
+        print(f"Scanning {ip_range}")
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            scanned_devices = arp_scan(ip_range, interface)
         if scanned_devices:
-            table_data, json_output, new_devices = process_scan_results(
-                scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
-            )
+            with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+                table_data, json_output, new_devices = process_scan_results(
+                    scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
+                )
             save_scan_run_devices(db_conn, scan_run_id, json_output)
-            diff_summary = build_scan_diff(previous_devices, json_output, known_macs)
-            save_and_report_results(
-                db_conn,
+            diff_summary = build_scan_diff(
+                previous_devices,
                 json_output,
-                new_devices,
-                diff_summary,
-                csv_output_file=CSV_OUTPUT_FILE,
-                markdown_output_file=MARKDOWN_OUTPUT_FILE,
+                known_macs,
+                compare_hostnames=(
+                    args.resolve_hostnames and previous_collected_hostnames
+                ),
             )
+            with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+                save_and_report_results(
+                    db_conn,
+                    json_output,
+                    new_devices,
+                    diff_summary,
+                    csv_output_file=CSV_OUTPUT_FILE,
+                    markdown_output_file=MARKDOWN_OUTPUT_FILE,
+                )
             if args.alerts_only:
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):
@@ -1220,9 +1343,17 @@ def main():
                 device_count=len(table_data),
                 new_device_count=len(new_devices),
             )
-            print(f"\nScan run recorded with id: {scan_run_id}")
+            if args.verbose:
+                print(f"\nScan run recorded with id: {scan_run_id}")
         else:
-            diff_summary = build_scan_diff(previous_devices, [], known_macs)
+            diff_summary = build_scan_diff(
+                previous_devices,
+                [],
+                known_macs,
+                compare_hostnames=(
+                    args.resolve_hostnames and previous_collected_hostnames
+                ),
+            )
             if args.alerts_only:
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):
@@ -1237,13 +1368,15 @@ def main():
                 diff_summary,
             )
             finalize_scan_run(db_conn, scan_run_id, status="success")
-            print(f"\nScan run recorded with id: {scan_run_id}")
+            if args.verbose:
+                print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
         finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise
     finally:
         db_conn.close()
-    print("ARP Network Scanner completed.")
+    if args.verbose:
+        print("ARP Network Scanner completed.")
     sys.exit(exit_code)
 
 if __name__ == "__main__":

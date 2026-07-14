@@ -13,5 +13,4 @@ if [ ! -f "$VENV_PYTHON" ]; then
 fi
 
 # Run the ARP scan script using sudo.
-echo "--- Running ARP Scanner ---"
 sudo "$VENV_PYTHON" "$SCRIPT_DIR/arp_scanner.py" "$@"

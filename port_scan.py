@@ -1,7 +1,10 @@
 import argparse
+from contextlib import nullcontext, redirect_stdout
+from io import StringIO
 import os
 import socket
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import arp_scanner
@@ -211,6 +214,8 @@ def flatten_port_results(devices):
                     port=port_info["port"],
                     service=port_info.get("service", "Unknown"),
                     tls=port_info.get("tls"),
+                    http=port_info.get("http"),
+                    ssh=port_info.get("ssh"),
                 )
             )
     return rows
@@ -252,7 +257,7 @@ def discover_devices_to_scan(args, mac_lookup):
         enrich_devices_with_hostnames(discovered_devices)
     return discovered_devices, scan_context
 
-def run_port_scan(devices_to_scan, ports_to_scan):
+def run_port_scan(devices_to_scan, ports_to_scan, show_progress=True):
     """Run port scanning for all selected devices."""
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
@@ -264,6 +269,7 @@ def run_port_scan(devices_to_scan, ports_to_scan):
             as_completed(future_to_device),
             total=len(devices_to_scan),
             desc="Scanning Devices",
+            disable=not show_progress,
         ):
             results.append(future.result())
     return results
@@ -331,6 +337,16 @@ def build_parser():
         help="Print only actionable alerts instead of the full port scan report.",
     )
     parser.add_argument(
+        "--show-changes",
+        action="store_true",
+        help="Show changes from the previous compatible scan. Target scans hide this by default.",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Show setup, database, vendor lookup, and progress details.",
+    )
+    parser.add_argument(
         "--webhook-url",
         type=str,
         help="Optional webhook URL that receives port alerts when actionable findings are detected.",
@@ -366,7 +382,8 @@ def render_port_scan_outcome(args, results, diff_summary):
         return 2 if has_port_alerts(results, diff_summary) else 0
 
     print_port_scan_results(results, output_format=args.output)
-    print_port_diff_summary(diff_summary)
+    if not getattr(args, "target", None) or getattr(args, "show_changes", False):
+        print_port_diff_summary(diff_summary)
     return 0
 
 
@@ -377,7 +394,8 @@ def render_empty_scan_outcome(args, diff_summary):
         return 2 if has_port_alerts([], diff_summary) else 0
 
     print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
-    print_port_diff_summary(diff_summary)
+    if not getattr(args, "target", None) or getattr(args, "show_changes", False):
+        print_port_diff_summary(diff_summary)
     return 0
 
 
@@ -418,6 +436,12 @@ def main():
     exit_code = 0
     init(autoreset=True)
     args = parse_args()
+    if args.target and (args.iface or args.cidr):
+        print(
+            f"{Fore.RED}Error: --target cannot be combined with --iface or --cidr.{Style.RESET_ALL}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if os.geteuid() != 0:
         print(
             f"{Fore.RED}Error: This script requires root/administrator privileges.{Style.RESET_ALL}",
@@ -435,12 +459,20 @@ def main():
         arp_scanner.DB_FILE = output_paths["db"]
     CSV_OUTPUT_FILE = output_paths["csv"]
     MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
-    print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
-    mac_lookup = update_vendor_database()
-    db_conn = init_db()
+    if args.verbose:
+        print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
+    quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
+    if args.target:
+        mac_lookup = None
+    else:
+        with quiet_output:
+            mac_lookup = update_vendor_database()
+    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+        db_conn = init_db()
     try:
         try:
-            devices_to_scan, scan_context = discover_devices_to_scan(args, mac_lookup)
+            with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+                devices_to_scan, scan_context = discover_devices_to_scan(args, mac_lookup)
         except RuntimeError as e:
             print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
             sys.exit(1)
@@ -450,6 +482,9 @@ def main():
             scan_context["interface"],
             scan_context["cidr"],
             scan_type=SCAN_TYPE_PORT,
+            target=args.target,
+            ports=ports_to_scan,
+            resolve_hostnames=args.resolve_hostnames,
         )
         previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
@@ -459,18 +494,26 @@ def main():
             print(f"\nScan run recorded with id: {scan_run_id}")
             sys.exit(exit_code)
 
-        print(f"Found {len(devices_to_scan)} devices. Now scanning ports and services...")
-        results = run_port_scan(devices_to_scan, ports_to_scan)
+        target_label = args.target or scan_context["cidr"]
+        print(f"Scanning {target_label} · {len(ports_to_scan)} ports")
+        started_at = time.monotonic()
+        results = run_port_scan(
+            devices_to_scan,
+            ports_to_scan,
+            show_progress=args.verbose and len(devices_to_scan) > 1,
+        )
+        print(f"Completed in {time.monotonic() - started_at:.1f}s")
         save_scan_run_ports(db_conn, scan_run_id, results)
         diff_summary = build_port_scan_diff(previous_ports, flatten_port_results(results))
         exit_code = render_port_scan_outcome(args, results, diff_summary)
-        save_port_scan_results(
-            results,
-            diff_summary,
-            output_paths["json"],
-            csv_output_file=CSV_OUTPUT_FILE,
-            markdown_output_file=MARKDOWN_OUTPUT_FILE,
-        )
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            save_port_scan_results(
+                results,
+                diff_summary,
+                output_paths["json"],
+                csv_output_file=CSV_OUTPUT_FILE,
+                markdown_output_file=MARKDOWN_OUTPUT_FILE,
+            )
         maybe_send_port_webhook(
             args.webhook_url,
             args.webhook_timeout,
@@ -484,7 +527,8 @@ def main():
             status="success",
             device_count=len(devices_to_scan),
         )
-        print(f"\nScan run recorded with id: {scan_run_id}")
+        if args.verbose:
+            print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
         if "scan_run_id" in locals():
             finalize_scan_run(db_conn, scan_run_id, status="failed")

@@ -36,7 +36,9 @@ def build_device_snapshot(
     return device
 
 
-def build_port_snapshot(*, mac, ip, port, service="Unknown", tls=None, hostname=None):
+def build_port_snapshot(
+    *, mac, ip, port, service="Unknown", tls=None, http=None, ssh=None, hostname=None
+):
     """Create a normalized port observation dictionary."""
     snapshot = {
         "mac": mac,
@@ -46,6 +48,10 @@ def build_port_snapshot(*, mac, ip, port, service="Unknown", tls=None, hostname=
     }
     if tls is not None:
         snapshot["tls"] = tls
+    if http is not None:
+        snapshot["http"] = http
+    if ssh is not None:
+        snapshot["ssh"] = ssh
     if hostname is not None:
         snapshot["hostname"] = hostname
     return snapshot

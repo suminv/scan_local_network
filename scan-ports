@@ -14,5 +14,4 @@ fi
 
 # Run the port scan script using sudo and the venv's Python.
 # All arguments passed to this script ($@) are forwarded to the Python script.
-echo "--- Running Port Scanner ---"
 sudo "$VENV_PYTHON" "$SCRIPT_DIR/port_scan.py" "$@"
