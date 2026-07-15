@@ -442,11 +442,11 @@ def resolve_report_output_paths(args):
     }
 
 
-def render_port_scan_outcome(args, results, diff_summary):
+def render_port_scan_outcome(args, results, diff_summary, policy_findings=None):
     """Render scan output and return the appropriate process exit code."""
     if args.alerts_only:
         print_port_alert_summary(results, diff_summary)
-        return 2 if has_port_alerts(results, diff_summary) else 0
+        return 2 if (has_port_alerts(results, diff_summary) or policy_findings) else 0
 
     print_port_scan_results(results, output_format=args.output)
     if not getattr(args, "target", None) or getattr(args, "show_changes", False):
@@ -454,11 +454,11 @@ def render_port_scan_outcome(args, results, diff_summary):
     return 0
 
 
-def render_empty_scan_outcome(args, diff_summary):
+def render_empty_scan_outcome(args, diff_summary, policy_findings=None):
     """Render the empty-discovery case and return the appropriate process exit code."""
     if args.alerts_only:
         print_port_alert_summary([], diff_summary)
-        return 2 if has_port_alerts([], diff_summary) else 0
+        return 2 if (has_port_alerts([], diff_summary) or policy_findings) else 0
 
     print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
     if not getattr(args, "target", None) or getattr(args, "show_changes", False):
@@ -489,6 +489,18 @@ def print_device_profile(profile, policy_findings=None):
             print(f"    {finding['type'].replace('_', ' ')}")
 
 
+def apply_profile_policy_name(profile, policy_config):
+    """Apply a user-assigned known-device name without changing stored observations."""
+    if profile is None or not profile.get("mac"):
+        return profile
+    known = policy_config.get("known_devices", {}).get(profile["mac"].lower())
+    if not known or not known.get("name"):
+        return profile
+    named_profile = dict(profile)
+    named_profile["user_name"] = known["name"]
+    return named_profile
+
+
 def build_port_alert_summary(results, diff_summary):
     """Build a compact port alert count summary for webhook delivery."""
     observations = build_port_observations(results)
@@ -504,6 +516,8 @@ def build_port_alert_summary(results, diff_summary):
         "new_ports": len(diff_summary.get("new_ports", [])),
         "service_changes": len(diff_summary.get("service_changes", [])),
         "tls_changes": len(diff_summary.get("tls_changes", [])),
+        "ssh_changes": len(diff_summary.get("ssh_changes", [])),
+        "http_changes": len(diff_summary.get("http_changes", [])),
     }
 
 
@@ -637,11 +651,14 @@ def main():
         save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
         if args.profile:
             print_device_profile(
-                get_device_profile_by_ip(db_conn, args.target), policy_findings
+                apply_profile_policy_name(
+                    get_device_profile_by_ip(db_conn, args.target), policy_config
+                ),
+                policy_findings,
             )
             exit_code = 0
         else:
-            exit_code = render_port_scan_outcome(args, results, diff_summary)
+            exit_code = render_port_scan_outcome(args, results, diff_summary, policy_findings)
         if policy_findings and not args.profile:
             print("\nPolicy findings:")
             for finding in policy_findings:

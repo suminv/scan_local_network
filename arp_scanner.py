@@ -666,6 +666,12 @@ def save_device_events(conn, scan_run_id, diff_summary, scan_type):
         for change in diff_summary.get("tls_changes", []):
             identity_key, _ = build_profile_identity(change)
             event_rows.append((identity_key, "tls_changed", change.get("ip"), change.get("port"), change.get("old_tls"), change.get("new_tls")))
+        for change in diff_summary.get("ssh_changes", []):
+            identity_key, _ = build_profile_identity(change)
+            event_rows.append((identity_key, "ssh_key_changed", change.get("ip"), change.get("port"), change.get("old_ssh"), change.get("new_ssh")))
+        for change in diff_summary.get("http_changes", []):
+            identity_key, _ = build_profile_identity(change)
+            event_rows.append((identity_key, "http_changed", change.get("ip"), change.get("port"), change.get("old_http"), change.get("new_http")))
     conn.executemany(
         """
         INSERT INTO device_events (
@@ -972,6 +978,8 @@ def build_port_scan_diff(previous_ports, current_ports, observed_macs=None):
     ]
     service_changes = []
     tls_changes = []
+    ssh_changes = []
+    http_changes = []
     for key in sorted(previous_by_key.keys() & current_by_key.keys()):
         previous_port = previous_by_key[key]
         current_port = current_by_key[key]
@@ -995,12 +1003,34 @@ def build_port_scan_diff(previous_ports, current_ports, observed_macs=None):
                     "new_tls": current_port.get("tls"),
                 }
             )
+        if previous_port.get("ssh") != current_port.get("ssh"):
+            ssh_changes.append(
+                {
+                    "mac": current_port["mac"],
+                    "ip": current_port["ip"],
+                    "port": current_port["port"],
+                    "old_ssh": previous_port.get("ssh"),
+                    "new_ssh": current_port.get("ssh"),
+                }
+            )
+        if previous_port.get("http") != current_port.get("http"):
+            http_changes.append(
+                {
+                    "mac": current_port["mac"],
+                    "ip": current_port["ip"],
+                    "port": current_port["port"],
+                    "old_http": previous_port.get("http"),
+                    "new_http": current_port.get("http"),
+                }
+            )
 
     return {
         "new_ports": new_ports,
         "closed_ports": closed_ports,
         "service_changes": service_changes,
         "tls_changes": tls_changes,
+        "ssh_changes": ssh_changes,
+        "http_changes": http_changes,
     }
 
 def load_known_devices(conn):

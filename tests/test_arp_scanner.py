@@ -587,6 +587,28 @@ class ArpScannerTests(unittest.TestCase):
             ],
         )
 
+    def test_build_port_scan_diff_detects_ssh_and_http_metadata_changes(self):
+        diff = arp_scanner.build_port_scan_diff(
+            [{
+                "mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "port": 22,
+                "service": "SSH", "ssh": {"banner": "SSH-2.0-old", "fingerprint": "SHA256:old"},
+            }, {
+                "mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "port": 80,
+                "service": "HTTP", "http": {"status": 200, "server": "old"},
+            }],
+            [{
+                "mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "port": 22,
+                "service": "SSH", "ssh": {"banner": "SSH-2.0-new", "fingerprint": "SHA256:new"},
+            }, {
+                "mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.10", "port": 80,
+                "service": "HTTP", "http": {"status": 401, "server": "new"},
+            }],
+        )
+        self.assertEqual(len(diff["ssh_changes"]), 1)
+        self.assertEqual(diff["ssh_changes"][0]["old_ssh"]["fingerprint"], "SHA256:old")
+        self.assertEqual(len(diff["http_changes"]), 1)
+        self.assertEqual(diff["http_changes"][0]["new_http"]["status"], 401)
+
     def test_process_scan_results_updates_existing_and_marks_new_devices(self):
         fd, path = tempfile.mkstemp(suffix=".db")
         os.close(fd)

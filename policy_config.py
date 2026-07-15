@@ -33,6 +33,8 @@ def validate_policy_config(config):
     """Validate the small JSON schema and reject credential-like fields."""
     if not isinstance(config, dict):
         raise ValueError("Policy config must be a JSON object.")
+    if any(key in config for key in ("password", "private_key", "token")):
+        raise ValueError("Policy config must not contain credentials.")
     known_devices = config.get("known_devices", {})
     if not isinstance(known_devices, dict):
         raise ValueError("known_devices must be an object keyed by MAC address.")
@@ -46,6 +48,12 @@ def validate_policy_config(config):
         ports = device.get("expected_ports", [])
         if not isinstance(ports, list) or any(not isinstance(port, int) for port in ports):
             raise ValueError(f"expected_ports for {mac} must be a list of integers.")
+        fingerprint = device.get("expected_ssh_fingerprint")
+        if fingerprint is not None and not isinstance(fingerprint, str):
+            raise ValueError(f"expected_ssh_fingerprint for {mac} must be a string.")
+        expected_http = device.get("expected_http", {})
+        if not isinstance(expected_http, dict):
+            raise ValueError(f"expected_http for {mac} must be an object keyed by port.")
 
 
 def evaluate_device_policies(devices, config):
@@ -77,6 +85,36 @@ def evaluate_device_policies(devices, config):
                             "port": port_info["port"],
                         }
                     )
+        expected_fingerprint = known.get("expected_ssh_fingerprint")
+        for port_info in device.get("open_ports", []):
+            fingerprint = (port_info.get("ssh") or {}).get("fingerprint_sha256")
+            if expected_fingerprint and fingerprint and fingerprint != expected_fingerprint:
+                findings.append(
+                    {
+                        "type": "ssh_key_changed",
+                        "ip": device["ip"],
+                        "mac": mac,
+                        "name": known.get("name"),
+                        "port": port_info["port"],
+                    }
+                )
+            expected_http = known.get("expected_http", {}).get(str(port_info["port"]))
+            observed_http = port_info.get("http") or {}
+            if expected_http and observed_http:
+                mismatch = any(
+                    observed_http.get(key) != value
+                    for key, value in expected_http.items()
+                )
+                if mismatch:
+                    findings.append(
+                        {
+                            "type": "http_identity_changed",
+                            "ip": device["ip"],
+                            "mac": mac,
+                            "name": known.get("name"),
+                            "port": port_info["port"],
+                        }
+                    )
     return findings
 
 
@@ -94,6 +132,21 @@ def build_baseline_config(devices):
                 port_info["port"] for port_info in device.get("open_ports", [])
             ),
         }
+        for port_info in device.get("open_ports", []):
+            ssh_info = port_info.get("ssh") or {}
+            if ssh_info.get("fingerprint_sha256"):
+                known_devices[mac]["expected_ssh_fingerprint"] = ssh_info[
+                    "fingerprint_sha256"
+                ]
+            http_info = port_info.get("http") or {}
+            if http_info:
+                known_devices[mac].setdefault("expected_http", {})[
+                    str(port_info["port"])
+                ] = {
+                    key: http_info[key]
+                    for key in ("status", "title", "server")
+                    if key in http_info
+                }
     return {
         "known_devices": known_devices,
         "policies": DEFAULT_CONFIG["policies"].copy(),

@@ -270,6 +270,31 @@ request and reports the status, redirect, server header, content type, and page
 title when available. For SSH it records the pre-authentication banner and a
 host-key SHA-256 fingerprint. It never attempts passwords or logins.
 
+To inspect one device using the stored profile (MAC/vendor, hostname, IP
+history, observed services, and confidence evidence):
+
+```bash
+./scan-ports -t 192.168.1.101 --profile
+```
+
+The profile view is observation-only: it does not authenticate to SSH or HTTP.
+
+For a first policy baseline, create a JSON file from a full LAN scan:
+
+```bash
+./scan-ports --write-baseline data/network_policy.json
+```
+
+Review the generated file, then use it on later scans:
+
+```bash
+./scan-ports --config data/network_policy.json --alerts-only
+```
+
+The policy file may contain known device names, expected ports, expected SSH
+host-key fingerprints, and selected HTTP identity fields. Credentials and
+passwords are rejected by validation and are never stored or tested.
+
 **To specify custom ports or ranges, use the `-p` or `--ports` flag:**
 
 -   Scan specific ports:
@@ -317,7 +342,7 @@ host-key SHA-256 fingerprint. It never attempts passwords or logins.
 With `--alerts-only`, the process exits with:
 
 - `0` when no actionable alerts are detected
-- `2` when TLS alerts, new open ports, service changes, or TLS metadata changes are detected
+- `2` when TLS alerts, new open ports, service/SSH/HTTP changes, policy findings, or TLS metadata changes are detected
 
 **To send actionable port alerts to a webhook:**
 
@@ -363,6 +388,8 @@ Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00
 - new open ports since the previous successful port scan
 - closed ports since the previous successful port scan
 - service label changes on the same `(MAC, port)`
+- SSH banner or host-key fingerprint changes
+- HTTP status/server/title/content-type identity changes
 
 ### 3. Network Health Check (`scan-health`)
 

@@ -311,7 +311,9 @@ def print_port_diff_summary(diff_summary):
     closed_ports = diff_summary["closed_ports"]
     service_changes = diff_summary["service_changes"]
     tls_changes = diff_summary.get("tls_changes", [])
-    if not any([new_ports, closed_ports, service_changes, tls_changes]):
+    ssh_changes = diff_summary.get("ssh_changes", [])
+    http_changes = diff_summary.get("http_changes", [])
+    if not any([new_ports, closed_ports, service_changes, tls_changes, ssh_changes, http_changes]):
         print_change_report(
             title="=== Port Changes Since Last Scan ===",
             border="===================================",
@@ -323,7 +325,7 @@ def print_port_diff_summary(diff_summary):
         title="=== Port Changes Since Last Scan ===",
         border="===================================",
         summary_line=(
-            f"New ports: {len(new_ports)} | Closed ports: {len(closed_ports)} | Service changes: {len(service_changes)} | TLS changes: {len(tls_changes)}"
+            f"New ports: {len(new_ports)} | Closed ports: {len(closed_ports)} | Service changes: {len(service_changes)} | TLS changes: {len(tls_changes)} | SSH changes: {len(ssh_changes)} | HTTP changes: {len(http_changes)}"
         ),
         sections=[
             {
@@ -361,6 +363,24 @@ def print_port_diff_summary(diff_summary):
                     for row in rows
                 ],
             },
+            {
+                "title": "SSH changes",
+                "rows": ssh_changes,
+                "formatter": lambda rows: [
+                    f"  {format_port_diff_host(row)} {row['port']}/tcp SSH "
+                    f"{row.get('old_ssh', {})} -> {row.get('new_ssh', {})}"
+                    for row in rows
+                ],
+            },
+            {
+                "title": "HTTP identity changes",
+                "rows": http_changes,
+                "formatter": lambda rows: [
+                    f"  {format_port_diff_host(row)} {row['port']}/tcp HTTP "
+                    f"{row.get('old_http', {})} -> {row.get('new_http', {})}"
+                    for row in rows
+                ],
+            },
         ],
     )
 
@@ -376,8 +396,10 @@ def print_port_alert_summary(results, diff_summary):
     new_ports = [] if diff_summary is None else diff_summary.get("new_ports", [])
     service_changes = [] if diff_summary is None else diff_summary.get("service_changes", [])
     tls_changes = [] if diff_summary is None else diff_summary.get("tls_changes", [])
+    ssh_changes = [] if diff_summary is None else diff_summary.get("ssh_changes", [])
+    http_changes = [] if diff_summary is None else diff_summary.get("http_changes", [])
 
-    if not any([tls_alert_rows, new_ports, service_changes, tls_changes]):
+    if not any([tls_alert_rows, new_ports, service_changes, tls_changes, ssh_changes, http_changes]):
         print_change_report(
             title="=== Alerts ===",
             border="=============",
@@ -395,6 +417,8 @@ def print_port_alert_summary(results, diff_summary):
                     f"New ports: {len(new_ports)}",
                     f"Service changes: {len(service_changes)}",
                     f"TLS changes: {len(tls_changes)}",
+                    f"SSH changes: {len(ssh_changes)}",
+                    f"HTTP changes: {len(http_changes)}",
                 ]
             )
         ),
@@ -437,6 +461,24 @@ def print_port_alert_summary(results, diff_summary):
                     for row in rows
                 ],
             },
+            {
+                "title": "SSH changes",
+                "rows": ssh_changes,
+                "formatter": lambda rows: [
+                    f"  {format_port_diff_host(row)} {row['port']}/tcp SSH "
+                    f"{row.get('old_ssh', {})} -> {row.get('new_ssh', {})}"
+                    for row in rows
+                ],
+            },
+            {
+                "title": "HTTP identity changes",
+                "rows": http_changes,
+                "formatter": lambda rows: [
+                    f"  {format_port_diff_host(row)} {row['port']}/tcp HTTP "
+                    f"{row.get('old_http', {})} -> {row.get('new_http', {})}"
+                    for row in rows
+                ],
+            },
         ],
     )
 
@@ -452,7 +494,9 @@ def has_port_alerts(results, diff_summary):
     new_ports = [] if diff_summary is None else diff_summary.get("new_ports", [])
     service_changes = [] if diff_summary is None else diff_summary.get("service_changes", [])
     tls_changes = [] if diff_summary is None else diff_summary.get("tls_changes", [])
-    return any([tls_alert_rows, new_ports, service_changes, tls_changes])
+    ssh_changes = [] if diff_summary is None else diff_summary.get("ssh_changes", [])
+    http_changes = [] if diff_summary is None else diff_summary.get("http_changes", [])
+    return any([tls_alert_rows, new_ports, service_changes, tls_changes, ssh_changes, http_changes])
 
 
 def format_device_heading(device):
