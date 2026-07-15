@@ -274,6 +274,36 @@ class NetworkHealthTests(unittest.TestCase):
             "travel networks should be treated as untrusted when gateway admin/web surfaces are visible",
         )
 
+    def test_build_gateway_exposure_check_treats_home_admin_surface_as_expected(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 443,
+            ):
+                result = network_health.build_gateway_exposure_check(
+                    timeout=3,
+                    network_profile="home",
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["exposure_assessment"], "expected_home_admin_surface")
+        self.assertIn("expected for the selected home profile", result["summary"])
+
+    def test_build_gateway_exposure_check_marks_public_admin_surface_sensitive(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("10.0.0.1", "en0")):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 80,
+            ):
+                result = network_health.build_gateway_exposure_check(
+                    timeout=3,
+                    network_profile="public",
+                )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["exposure_assessment"], "untrusted_network_admin_surface")
+        self.assertIn("higher-risk on public networks", result["summary"])
+
     def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
         with mock.patch("network_health.get_default_gateway", return_value=("8.8.8.8", "en0")):
             with mock.patch(

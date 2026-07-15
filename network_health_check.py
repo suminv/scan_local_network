@@ -114,13 +114,25 @@ def format_gateway_exposure_details(details):
     ]
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
+    if details.get("exposure_assessment"):
+        lines.append(f"  assessment: {details['exposure_assessment']}")
     reachable = details.get("reachable_services", [])
     if not reachable:
         lines.append("  reachable local services: none detected")
         return lines
     lines.append("  reachable local services:")
+    assessment = details.get("exposure_assessment")
     for service in reachable:
-        risk_marker = " [alert]" if service.get("risk") else ""
+        if not service.get("risk"):
+            risk_marker = ""
+        elif assessment == "expected_home_admin_surface":
+            risk_marker = " [expected]"
+        elif assessment in {"unexpected_guest_admin_surface", "observed_unknown_profile"}:
+            risk_marker = " [review]"
+        elif assessment == "untrusted_network_admin_surface":
+            risk_marker = " [sensitive]"
+        else:
+            risk_marker = " [alert]"
         lines.append(f"    - {service['port']}/tcp {service['label']}{risk_marker}")
         http_probe = service.get("http_probe") or {}
         if http_probe.get("url"):

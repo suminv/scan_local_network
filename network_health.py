@@ -381,7 +381,7 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
                 f"to the client on {gateway_ip}"
             )
         else:
-            status = "notice"
+            status = "ok" if network_profile == "home" else "notice"
             if network_profile in {"travel", "public"}:
                 summary = (
                     f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
@@ -391,6 +391,11 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
                 summary = (
                     f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
                     f"to the client on {gateway_ip}; this is more sensitive on guest networks"
+                )
+            elif network_profile == "home":
+                summary = (
+                    f"Private/local gateway exposes {len(risky_services)} local web/admin service(s) "
+                    f"to the client on {gateway_ip}; this is expected for the selected home profile"
                 )
             else:
                 summary = (
@@ -432,6 +437,19 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
             "profile_expectation": build_profile_context_note(
                 network_profile,
                 "gateway_exposure",
+            ),
+            "exposure_assessment": (
+                "public_gateway_surface"
+                if risky_services and not is_private_gateway
+                else "expected_home_admin_surface"
+                if risky_services and network_profile == "home"
+                else "unexpected_guest_admin_surface"
+                if risky_services and network_profile == "guest"
+                else "untrusted_network_admin_surface"
+                if risky_services and network_profile in {"travel", "public"}
+                else "observed_unknown_profile"
+                if risky_services
+                else "no_admin_surface_observed"
             ),
             "reachable_services": reachable_services,
             "risky_services": risky_services,

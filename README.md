@@ -460,6 +460,7 @@ The Wi-Fi section now also raises risk signals for:
 On macOS, the report also identifies cases where an active Wi-Fi interface is present but the system default route uses another interface such as Ethernet. Direct current-interface evidence is treated more strongly than the lower-confidence `system_profiler` fallback, so ordinary Ethernet + Wi-Fi dual connectivity is not automatically promoted to a hard alert.
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
+Gateway web/admin surfaces are treated as expected for an explicit `home` profile, reviewable on `guest`, and sensitive on `travel` or `public`. The service marker follows the same context (`expected`, `review`, `sensitive`, or `alert`) instead of labeling every private router page as an alert.
 
 The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
 
