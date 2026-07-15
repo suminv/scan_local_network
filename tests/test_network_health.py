@@ -566,6 +566,21 @@ nameserver 1.1.1.1
         self.assertEqual(analysis["risks"], [])
         self.assertEqual(analysis["classifications"][0]["classification"], "on_link")
 
+    def test_analyze_dns_servers_notices_resolver_on_other_interface(self):
+        analysis = network_health.analyze_dns_servers(
+            ["10.0.0.53"],
+            resolvers=[{
+                "nameservers": ["10.0.0.53"],
+                "if_index": "7 (utun3)",
+                "reach": "0x00020002 (Reachable,Directly Reachable Address)",
+            }],
+            default_interface="en6",
+            gateway_ip="192.168.2.254",
+        )
+
+        self.assertEqual(analysis["classifications"][0]["classification"], "resolver_interface_mismatch")
+        self.assertEqual(analysis["risks"][0]["severity"], "notice")
+
     def test_build_dns_environment_check_marks_public_dns_as_alert(self):
         with mock.patch(
             "network_health.collect_dns_configuration",
@@ -642,6 +657,24 @@ nameserver 1.1.1.1
 
         self.assertEqual(result["status"], "alert")
         self.assertEqual(result["details"]["hint_level"], "public_upstream_dns_present")
+
+    def test_build_dns_trust_reasoning_notices_interface_mismatch(self):
+        result = network_health.build_dns_trust_reasoning_check(
+            {
+                "status": "notice",
+                "details": {
+                    "nameservers": ["10.0.0.53"],
+                    "analysis": {
+                        "classifications": [{"classification": "resolver_interface_mismatch"}],
+                        "risks": [{"type": "resolver_interface_mismatch", "severity": "notice"}],
+                    },
+                },
+            },
+            [],
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["hint_level"], "dns_route_mismatch")
 
     def test_build_dns_trust_reasoning_flags_resolution_failures(self):
         result = network_health.build_dns_trust_reasoning_check(

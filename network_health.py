@@ -921,6 +921,26 @@ def classify_dns_server(server, resolver=None, default_interface=None, gateway_i
             "reason": "DNS server is not a valid IP address",
         }
 
+    if resolver and default_interface:
+        interface_info = parse_interface_index(resolver.get("if_index"))
+        reach = resolver.get("reach", "")
+        resolver_interface = interface_info.get("interface") if interface_info else None
+        if (
+            resolver_interface
+            and resolver_interface != default_interface
+            and "Reachable" in reach
+        ):
+            return {
+                "server": server,
+                "classification": "resolver_interface_mismatch",
+                "risk": True,
+                "severity": "notice",
+                "reason": (
+                    f"DNS resolver is associated with {resolver_interface}, while the default route "
+                    f"uses {default_interface}; this may be intentional VPN or split-DNS routing"
+                ),
+            }
+
     if address.is_private or address.is_loopback or address.is_link_local:
         return {
             "server": server,
@@ -990,6 +1010,7 @@ def analyze_dns_servers(nameservers, resolvers=None, default_interface=None, gat
                     "type": classification["classification"],
                     "server": server,
                     "reason": classification["reason"],
+                    "severity": classification.get("severity", "alert"),
                 }
             )
     return {
@@ -1019,11 +1040,20 @@ def build_dns_environment_check():
             dns_config,
         )
 
-    if analysis["risks"]:
+    alert_risks = [risk for risk in analysis["risks"] if risk.get("severity", "alert") == "alert"]
+    if alert_risks:
         return build_check(
             "dns_environment",
             "alert",
-            f"DNS environment exposes {len(analysis['risks'])} risk signal(s)",
+            f"DNS environment exposes {len(alert_risks)} risk signal(s)",
+            dns_config,
+        )
+
+    if analysis["risks"]:
+        return build_check(
+            "dns_environment",
+            "notice",
+            "DNS resolver path differs from the current default-route interface",
             dns_config,
         )
 
@@ -1070,6 +1100,20 @@ def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks
                     if check.get("details", {}).get("domain")
                 ],
                 context_note="public name resolution did not behave normally",
+            ),
+        )
+
+    if "resolver_interface_mismatch" in classification_types:
+        return build_check(
+            "dns_trust_reasoning",
+            "notice",
+            "DNS is reachable through a different interface than the current default route",
+            build_dns_reasoning_details(
+                "dns_route_mismatch",
+                nameservers=nameservers,
+                resolver_profile=classification_types,
+                risk_count=risk_count,
+                context_note="review active VPN, split-DNS, Ethernet, and Wi-Fi routing before treating this as suspicious",
             ),
         )
 

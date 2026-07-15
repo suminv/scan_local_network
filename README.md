@@ -464,6 +464,8 @@ Gateway web/admin surfaces are treated as expected for an explicit `home` profil
 
 The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
 
+DNS diagnostics compare resolver interface metadata with the current default-route interface. A reachable resolver on another interface is reported as a notice rather than a hard alert because VPN and split-DNS configurations can legitimately produce this layout. Direct public upstream DNS and failed name resolution retain stronger alert semantics.
+
 **To print only actionable health alerts:**
 
 ```bash
