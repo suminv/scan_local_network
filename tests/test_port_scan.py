@@ -709,10 +709,11 @@ class PortScanTests(unittest.TestCase):
             resolve_hostnames=False,
         )
 
-        devices, scan_context = port_scan.discover_devices_to_scan(
-            args,
-            mac_lookup=None,
-        )
+        with mock.patch("port_scan.lookup_mac_for_ip", return_value=None):
+            devices, scan_context = port_scan.discover_devices_to_scan(
+                args,
+                mac_lookup=None,
+            )
 
         self.assertEqual(
             devices,
@@ -729,11 +730,12 @@ class PortScanTests(unittest.TestCase):
             resolve_hostnames=True,
         )
 
-        with mock.patch(
-            "port_scan.enrich_devices_with_hostnames",
-            side_effect=lambda devices: devices[0].update({"hostname": "nas.local"}) or devices,
-        ):
-            devices, _ = port_scan.discover_devices_to_scan(args, mac_lookup=None)
+        with mock.patch("port_scan.lookup_mac_for_ip", return_value=None):
+            with mock.patch(
+                "port_scan.enrich_devices_with_hostnames",
+                side_effect=lambda devices: devices[0].update({"hostname": "nas.local"}) or devices,
+            ):
+                devices, _ = port_scan.discover_devices_to_scan(args, mac_lookup=None)
 
         self.assertEqual(devices[0]["hostname"], "nas.local")
 

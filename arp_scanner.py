@@ -10,7 +10,7 @@ from datetime import datetime
 
 import netifaces
 from mac_vendor_lookup import MacLookup
-from scapy.layers.l2 import ARP, Ether
+from scapy.layers.l2 import ARP, Ether, getmacbyip
 from scapy.sendrecv import srp
 from tabulate import tabulate
 
@@ -32,6 +32,7 @@ CSV_OUTPUT_FILE = None
 MARKDOWN_OUTPUT_FILE = None
 SCAN_TYPE_ARP = "arp"
 SCAN_TYPE_PORT = "port"
+MISSING_DEVICE_CONFIRMATION_SCANS = 3
 VENDOR_DB_CACHE_DAYS = 7
 
 class LocalMacVendorLookup:
@@ -186,6 +187,14 @@ def get_vendor(mac_address, mac_lookup):
     except Exception as e:
         print(f"Warning: An unexpected error occurred during vendor lookup for {mac_address}: {e}", file=sys.stderr)
         return "Error"
+
+
+def lookup_mac_for_ip(ip):
+    """Resolve a local IPv4 neighbour MAC with one ARP lookup when possible."""
+    try:
+        return getmacbyip(ip)
+    except Exception:
+        return None
 
 def validate_ip_range(ip_range):
     """Validate and normalize an IPv4 CIDR string."""
@@ -363,6 +372,55 @@ def init_db():
         cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN http_json TEXT")
     if not column_exists(conn, "scan_run_ports", "ssh_json"):
         cursor.execute("ALTER TABLE scan_run_ports ADD COLUMN ssh_json TEXT")
+    cursor.execute(
+        '''
+    CREATE TABLE IF NOT EXISTS device_profiles (
+        identity_key TEXT PRIMARY KEY,
+        identity_type TEXT NOT NULL,
+        mac TEXT,
+        current_ip TEXT NOT NULL,
+        vendor TEXT,
+        hostname TEXT,
+        user_name TEXT,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        device_hint TEXT NOT NULL DEFAULT 'unknown',
+        hint_confidence TEXT NOT NULL DEFAULT 'low',
+        hint_evidence_json TEXT,
+        latest_services_json TEXT,
+        last_scan_run_id INTEGER,
+        FOREIGN KEY (last_scan_run_id) REFERENCES scan_runs(id)
+    )
+    '''
+    )
+    cursor.execute(
+        '''
+    CREATE TABLE IF NOT EXISTS device_profile_ips (
+        identity_key TEXT NOT NULL,
+        ip TEXT NOT NULL,
+        first_seen TEXT NOT NULL,
+        last_seen TEXT NOT NULL,
+        PRIMARY KEY (identity_key, ip),
+        FOREIGN KEY (identity_key) REFERENCES device_profiles(identity_key)
+    )
+    '''
+    )
+    cursor.execute(
+        '''
+    CREATE TABLE IF NOT EXISTS device_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        scan_run_id INTEGER NOT NULL,
+        identity_key TEXT,
+        event_type TEXT NOT NULL,
+        ip TEXT,
+        port INTEGER,
+        old_value_json TEXT,
+        new_value_json TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (scan_run_id) REFERENCES scan_runs(id)
+    )
+    '''
+    )
     conn.commit()
     return conn
 
@@ -414,6 +472,263 @@ def finalize_scan_run(conn, scan_run_id, status, device_count=0, new_device_coun
         (finished_at, status, device_count, new_device_count, scan_run_id),
     )
     conn.commit()
+
+
+def build_profile_identity(device):
+    """Return a stable LAN identity, falling back to IP for target-only scans."""
+    mac = (device.get("mac") or "").lower()
+    if mac and mac != "00:00:00:00:00:00":
+        return f"mac:{mac}", "mac"
+    return f"ip:{device['ip']}", "ip"
+
+
+def infer_device_hint(device):
+    """Return a conservative device classification and the observed evidence."""
+    ports = {item.get("port") for item in device.get("open_ports", [])}
+    services = " ".join(
+        item.get("service", "") for item in device.get("open_ports", [])
+    ).lower()
+    vendor_name = (device.get("vendor") or "").strip()
+    vendor = vendor_name.lower()
+    if "enphase" in vendor:
+        return "Enphase Energy device", "medium", ["MAC vendor: Enphase Energy"]
+    if "synology" in vendor:
+        return "Synology-like", "medium", ["MAC vendor: Synology"]
+    if "hewlett" in vendor or "hp" in vendor:
+        return "printer-like", "low", ["MAC vendor: HP/Hewlett-Packard"]
+    if ports.intersection({5000, 5001}) or "synology" in services:
+        return "Synology-like", "medium", ["DSM-style management port or banner"]
+    if ports.intersection({515, 631, 9100}):
+        return "printer-like", "medium", ["common printing service port"]
+    if ports.intersection({53, 67, 68}):
+        return "router-like", "low", ["network infrastructure service port"]
+    if 22 in ports or "openssh" in services:
+        return "Linux-like", "low", ["SSH service observed"]
+    if vendor_name and vendor not in {"unknown", "n/a", "error"}:
+        return f"{vendor_name} device", "medium", [f"MAC vendor: {vendor_name}"]
+    return "unknown", "low", []
+
+
+def upsert_device_profiles(conn, devices, scan_run_id=None):
+    """Merge ARP or port observations into persistent device profiles."""
+    now = datetime.now().isoformat()
+    cursor = conn.cursor()
+    profiles = []
+    for device in devices:
+        identity_key, identity_type = build_profile_identity(device)
+        services = device.get("open_ports")
+        hint, confidence, evidence = infer_device_hint(device)
+        cursor.execute(
+            """
+            INSERT INTO device_profiles (
+                identity_key, identity_type, mac, current_ip, vendor, hostname,
+                first_seen, last_seen, device_hint, hint_confidence,
+                hint_evidence_json, latest_services_json, last_scan_run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(identity_key) DO UPDATE SET
+                current_ip = excluded.current_ip,
+                mac = COALESCE(excluded.mac, device_profiles.mac),
+                vendor = COALESCE(excluded.vendor, device_profiles.vendor),
+                hostname = COALESCE(excluded.hostname, device_profiles.hostname),
+                last_seen = excluded.last_seen,
+                device_hint = CASE WHEN excluded.latest_services_json IS NOT NULL
+                    THEN excluded.device_hint ELSE device_profiles.device_hint END,
+                hint_confidence = CASE WHEN excluded.latest_services_json IS NOT NULL
+                    THEN excluded.hint_confidence ELSE device_profiles.hint_confidence END,
+                hint_evidence_json = CASE WHEN excluded.latest_services_json IS NOT NULL
+                    THEN excluded.hint_evidence_json ELSE device_profiles.hint_evidence_json END,
+                latest_services_json = COALESCE(
+                    excluded.latest_services_json, device_profiles.latest_services_json
+                ),
+                last_scan_run_id = COALESCE(excluded.last_scan_run_id, device_profiles.last_scan_run_id)
+            """,
+            (
+                identity_key,
+                identity_type,
+                device.get("mac") if identity_type == "mac" else None,
+                device["ip"],
+                device.get("vendor"),
+                device.get("hostname"),
+                now,
+                now,
+                hint,
+                confidence,
+                json.dumps(evidence),
+                json.dumps(services, sort_keys=True) if services is not None else None,
+                scan_run_id,
+            ),
+        )
+        cursor.execute(
+            """
+            INSERT INTO device_profile_ips (identity_key, ip, first_seen, last_seen)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(identity_key, ip) DO UPDATE SET last_seen = excluded.last_seen
+            """,
+            (identity_key, device["ip"], now, now),
+        )
+        profiles.append(
+            {
+                "identity_key": identity_key,
+                "identity_type": identity_type,
+                "ip": device["ip"],
+                "device_hint": hint,
+                "hint_confidence": confidence,
+                "hint_evidence": evidence,
+            }
+        )
+    conn.commit()
+    return profiles
+
+
+def get_device_profile_by_ip(conn, ip):
+    """Load the best known profile for an IP, including its observed IP history."""
+    row = conn.execute(
+        """
+        SELECT p.identity_key, p.identity_type, p.mac, p.current_ip, p.vendor,
+               p.hostname, p.user_name, p.first_seen, p.last_seen,
+               p.device_hint, p.hint_confidence, p.hint_evidence_json,
+               p.latest_services_json
+        FROM device_profiles AS p
+        LEFT JOIN device_profile_ips AS history ON history.identity_key = p.identity_key
+        WHERE p.current_ip = ? OR history.ip = ?
+        ORDER BY CASE p.identity_type WHEN 'mac' THEN 0 ELSE 1 END, p.last_seen DESC
+        LIMIT 1
+        """,
+        (ip, ip),
+    ).fetchone()
+    if row is None:
+        return None
+    (
+        identity_key,
+        identity_type,
+        mac,
+        current_ip,
+        vendor,
+        hostname,
+        user_name,
+        first_seen,
+        last_seen,
+        device_hint,
+        hint_confidence,
+        evidence_json,
+        services_json,
+    ) = row
+    ip_history = [
+        value[0]
+        for value in conn.execute(
+            "SELECT ip FROM device_profile_ips WHERE identity_key = ? ORDER BY last_seen DESC",
+            (identity_key,),
+        ).fetchall()
+    ]
+    return {
+        "identity_key": identity_key,
+        "identity_type": identity_type,
+        "mac": mac,
+        "ip": current_ip,
+        "vendor": vendor,
+        "hostname": hostname,
+        "user_name": user_name,
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "device_hint": device_hint,
+        "hint_confidence": hint_confidence,
+        "hint_evidence": json.loads(evidence_json) if evidence_json else [],
+        "ip_history": ip_history,
+        "services": json.loads(services_json) if services_json else [],
+    }
+
+
+def save_device_events(conn, scan_run_id, diff_summary, scan_type):
+    """Persist normalized, scope-compatible change events from a scan diff."""
+    event_rows = []
+    now = datetime.now().isoformat()
+    if scan_type == SCAN_TYPE_ARP:
+        event_map = {
+            "new_devices": "device_first_seen",
+            "returned_devices": "device_returned",
+            "missing_devices": "device_missing",
+        }
+        for key, event_type in event_map.items():
+            for device in diff_summary.get(key, []):
+                identity_key, _ = build_profile_identity(device)
+                event_rows.append((identity_key, event_type, device.get("ip"), None, None, device))
+        for change in diff_summary.get("ip_changes", []):
+            event_rows.append((f"mac:{change['mac'].lower()}", "ip_changed", change.get("new_ip"), None, {"ip": change.get("old_ip")}, {"ip": change.get("new_ip")}))
+    else:
+        event_map = {"new_ports": "port_opened", "closed_ports": "port_closed"}
+        for key, event_type in event_map.items():
+            for observation in diff_summary.get(key, []):
+                identity_key, _ = build_profile_identity(observation)
+                event_rows.append((identity_key, event_type, observation.get("ip"), observation.get("port"), None, observation))
+        for change in diff_summary.get("service_changes", []):
+            identity_key, _ = build_profile_identity(change)
+            event_rows.append((identity_key, "service_changed", change.get("ip"), change.get("port"), {"service": change.get("old_service")}, {"service": change.get("new_service")}))
+        for change in diff_summary.get("tls_changes", []):
+            identity_key, _ = build_profile_identity(change)
+            event_rows.append((identity_key, "tls_changed", change.get("ip"), change.get("port"), change.get("old_tls"), change.get("new_tls")))
+    conn.executemany(
+        """
+        INSERT INTO device_events (
+            scan_run_id, identity_key, event_type, ip, port, old_value_json,
+            new_value_json, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                scan_run_id,
+                identity_key,
+                event_type,
+                ip,
+                port,
+                json.dumps(old_value, sort_keys=True) if old_value is not None else None,
+                json.dumps(new_value, sort_keys=True) if new_value is not None else None,
+                now,
+            )
+            for identity_key, event_type, ip, port, old_value, new_value in event_rows
+        ],
+    )
+    conn.commit()
+    return len(event_rows)
+
+
+def confirm_missing_devices(conn, current_scan_run_id, diff_summary):
+    """Keep missing devices only after consecutive absent scans in the same scope."""
+    missing_devices = diff_summary.get("missing_devices", [])
+    if not missing_devices:
+        return diff_summary
+    cursor = conn.cursor()
+    current_scope = cursor.execute(
+        "SELECT interface, cidr FROM scan_runs WHERE id = ?",
+        (current_scan_run_id,),
+    ).fetchone()
+    if current_scope is None:
+        return diff_summary
+    interface, cidr = current_scope
+    prior_runs = cursor.execute(
+        """
+        SELECT id FROM scan_runs
+        WHERE scan_type = ? AND status = 'success' AND id < ?
+          AND interface IS ? AND cidr IS ?
+        ORDER BY id DESC
+        """,
+        (SCAN_TYPE_ARP, current_scan_run_id, interface, cidr),
+    ).fetchall()
+    confirmed = []
+    for device in missing_devices:
+        consecutive_absences = 1  # The current scan is the first absence.
+        for (run_id,) in prior_runs:
+            seen = cursor.execute(
+                "SELECT 1 FROM scan_run_devices WHERE scan_run_id = ? AND mac = ?",
+                (run_id, device["mac"]),
+            ).fetchone()
+            if seen:
+                break
+            consecutive_absences += 1
+        if consecutive_absences >= MISSING_DEVICE_CONFIRMATION_SCANS:
+            confirmed.append(device)
+    filtered = dict(diff_summary)
+    filtered["missing_devices"] = confirmed
+    return filtered
 
 def save_scan_run_devices(conn, scan_run_id, devices):
     """Persist the device snapshot observed during a scan run."""
@@ -640,10 +955,11 @@ def build_scan_diff(
         "hostname_changes": hostname_changes,
     }
 
-def build_port_scan_diff(previous_ports, current_ports):
+def build_port_scan_diff(previous_ports, current_ports, observed_macs=None):
     """Compare two port scan snapshots and return port-level changes."""
     previous_by_key = {(row["mac"], row["port"]): row for row in previous_ports}
     current_by_key = {(row["mac"], row["port"]): row for row in current_ports}
+    observed_macs = set(observed_macs) if observed_macs is not None else None
 
     new_ports = [
         current_by_key[key]
@@ -652,6 +968,7 @@ def build_port_scan_diff(previous_ports, current_ports):
     closed_ports = [
         previous_by_key[key]
         for key in sorted(previous_by_key.keys() - current_by_key.keys())
+        if observed_macs is None or key[0] in observed_macs
     ]
     service_changes = []
     tls_changes = []
@@ -893,11 +1210,14 @@ def save_and_report_results(
     json_output,
     new_devices,
     diff_summary,
+    profiles=None,
     csv_output_file=None,
     markdown_output_file=None,
 ):
     """Save the ARP snapshot, diff summary, and any newly discovered devices."""
     payload = build_report_payload("devices", json_output, "arp_diff_summary", diff_summary)
+    if profiles is not None:
+        payload["device_profiles"] = profiles
     save_json_report(JSON_OUTPUT_FILE, payload, label="Results")
     if csv_output_file:
         save_csv_report(
@@ -1306,6 +1626,7 @@ def main():
                     scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
                 )
             save_scan_run_devices(db_conn, scan_run_id, json_output)
+            profiles = upsert_device_profiles(db_conn, json_output, scan_run_id)
             diff_summary = build_scan_diff(
                 previous_devices,
                 json_output,
@@ -1314,12 +1635,15 @@ def main():
                     args.resolve_hostnames and previous_collected_hostnames
                 ),
             )
+            diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
+            save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
             with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
                 save_and_report_results(
                     db_conn,
                     json_output,
-                    new_devices,
-                    diff_summary,
+                new_devices,
+                diff_summary,
+                profiles=profiles,
                     csv_output_file=CSV_OUTPUT_FILE,
                     markdown_output_file=MARKDOWN_OUTPUT_FILE,
                 )
@@ -1354,6 +1678,8 @@ def main():
                     args.resolve_hostnames and previous_collected_hostnames
                 ),
             )
+            diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
+            save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
             if args.alerts_only:
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):

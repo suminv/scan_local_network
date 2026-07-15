@@ -826,6 +826,91 @@ class ArpScannerTests(unittest.TestCase):
             )
         )
 
+    def test_upsert_device_profiles_tracks_mac_identity_ip_history_and_hint(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                profiles = arp_scanner.upsert_device_profiles(
+                    conn,
+                    [
+                        {
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "ip": "192.168.2.10",
+                            "vendor": "Vendor A",
+                            "open_ports": [{"port": 5000, "service": "HTTP (200 OK)"}],
+                        }
+                    ],
+                )
+                arp_scanner.upsert_device_profiles(
+                    conn,
+                    [{"mac": "aa:aa:aa:aa:aa:aa", "ip": "192.168.2.11"}],
+                )
+                profile = conn.execute(
+                    "SELECT current_ip, device_hint, hint_confidence FROM device_profiles"
+                ).fetchone()
+                ip_history = conn.execute(
+                    "SELECT ip FROM device_profile_ips ORDER BY ip"
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(profiles[0]["identity_key"], "mac:aa:aa:aa:aa:aa:aa")
+            self.assertEqual(profile, ("192.168.2.11", "Synology-like", "medium"))
+            self.assertEqual(ip_history, [("192.168.2.10",), ("192.168.2.11",)])
+        finally:
+            os.remove(path)
+
+    def test_upsert_device_profiles_uses_ip_identity_for_target_scan(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                profiles = arp_scanner.upsert_device_profiles(
+                    conn,
+                    [{"mac": "00:00:00:00:00:00", "ip": "192.168.2.66"}],
+                )
+                conn.close()
+            self.assertEqual(profiles[0]["identity_key"], "ip:192.168.2.66")
+            self.assertEqual(profiles[0]["identity_type"], "ip")
+        finally:
+            os.remove(path)
+
+    def test_confirm_missing_devices_requires_three_consecutive_absences(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        missing = {
+            "mac": "aa:aa:aa:aa:aa:aa",
+            "ip": "192.168.2.10",
+            "vendor": "Vendor A",
+        }
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                first = arp_scanner.create_scan_run(conn, "en0", "192.168.2.0/24")
+                arp_scanner.save_scan_run_devices(conn, first, [missing])
+                arp_scanner.finalize_scan_run(conn, first, "success", 1, 0)
+
+                second = arp_scanner.create_scan_run(conn, "en0", "192.168.2.0/24")
+                arp_scanner.finalize_scan_run(conn, second, "success", 0, 0)
+                third = arp_scanner.create_scan_run(conn, "en0", "192.168.2.0/24")
+                filtered = arp_scanner.confirm_missing_devices(
+                    conn, third, {"missing_devices": [missing]}
+                )
+                self.assertEqual(filtered["missing_devices"], [])
+                arp_scanner.finalize_scan_run(conn, third, "success", 0, 0)
+
+                fourth = arp_scanner.create_scan_run(conn, "en0", "192.168.2.0/24")
+                filtered = arp_scanner.confirm_missing_devices(
+                    conn, fourth, {"missing_devices": [missing]}
+                )
+                conn.close()
+
+            self.assertEqual(filtered["missing_devices"], [missing])
+        finally:
+            os.remove(path)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,12 @@ import arp_scanner
 from alert_delivery import build_alert_payload, send_webhook_payload
 from colorama import Fore, Style, init
 from models import build_device_snapshot, build_port_snapshot, build_scan_context
+from policy_config import (
+    build_baseline_config,
+    evaluate_device_policies,
+    load_policy_config,
+    save_policy_config,
+)
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
@@ -26,8 +32,12 @@ from arp_scanner import (
     load_previous_scan_ports,
     resolve_scan_target,
     save_scan_run_ports,
+    save_device_events,
     SCAN_TYPE_PORT,
     update_vendor_database,
+    upsert_device_profiles,
+    get_device_profile_by_ip,
+    lookup_mac_for_ip,
 )
 from hostname_lookup import enrich_devices_with_hostnames
 from port_reporting import (
@@ -68,6 +78,7 @@ DEFAULT_PORTS = [22, 80, 443, 3000, 5000, 8000, 8080, 8443]
 MAX_WORKERS = 20
 MIN_PORT = 1
 MAX_PORT = 65535
+PORT_PROGRESS_THRESHOLD = 50
 JSON_OUTPUT_FILE = "port_scan_result.json"
 CSV_OUTPUT_FILE = None
 MARKDOWN_OUTPUT_FILE = None
@@ -116,7 +127,7 @@ def scan_single_port(ip, port):
     return None
 
 
-def scan_ports_for_device(device, ports):
+def scan_ports_for_device(device, ports, show_port_progress=False):
     """Scans ports, and for open ones, tries to identify the service."""
     ip = device["ip"]
     open_ports_info = []
@@ -129,7 +140,13 @@ def scan_ports_for_device(device, ports):
             executor.submit(scan_single_port, ip, port): port for port in ports
         }
         open_ports = []
-        for future in as_completed(future_to_port):
+        for future in tqdm(
+            as_completed(future_to_port),
+            total=len(future_to_port),
+            desc=f"Probing {ip}",
+            unit="port",
+            disable=not show_port_progress,
+        ):
             result = future.result()
             if result is not None:
                 open_ports.append(result)
@@ -201,6 +218,25 @@ def parse_ports(port_string):
         ) from exc
     return sorted(list(ports))
 
+
+def format_ports_for_display(ports):
+    """Render a port list compactly, collapsing consecutive values into ranges."""
+    if not ports:
+        return "none"
+    ranges = []
+    start = previous = ports[0]
+    for port in ports[1:]:
+        if port == previous + 1:
+            previous = port
+            continue
+        ranges.append((start, previous))
+        start = previous = port
+    ranges.append((start, previous))
+    return ", ".join(
+        str(start) if start == end else f"{start}-{end}"
+        for start, end in ranges
+    )
+
 def flatten_port_results(devices):
     """Flatten per-device port results into a comparable snapshot."""
     rows = []
@@ -224,10 +260,11 @@ def discover_devices_to_scan(args, mac_lookup):
     """Resolve scan context and discover or select devices to scan."""
     scan_context = build_scan_context()
     if args.target:
+        target_mac = lookup_mac_for_ip(args.target)
         target_device = build_device_snapshot(
             ip=args.target,
-            mac="00:00:00:00:00:00",
-            vendor="N/A",
+            mac=target_mac or "00:00:00:00:00:00",
+            vendor=(get_vendor(target_mac, mac_lookup) if target_mac and mac_lookup else "N/A"),
         )
         if args.resolve_hostnames:
             print("Resolving hostname...")
@@ -257,12 +294,22 @@ def discover_devices_to_scan(args, mac_lookup):
         enrich_devices_with_hostnames(discovered_devices)
     return discovered_devices, scan_context
 
-def run_port_scan(devices_to_scan, ports_to_scan, show_progress=True):
+def run_port_scan(
+    devices_to_scan,
+    ports_to_scan,
+    show_progress=True,
+    show_port_progress=False,
+):
     """Run port scanning for all selected devices."""
     results = []
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_device = {
-            executor.submit(scan_ports_for_device, device, ports_to_scan): device
+            executor.submit(
+                scan_ports_for_device,
+                device,
+                ports_to_scan,
+                show_port_progress=show_port_progress,
+            ): device
             for device in devices_to_scan
         }
         for future in tqdm(
@@ -347,6 +394,26 @@ def build_parser():
         help="Show setup, database, vendor lookup, and progress details.",
     )
     parser.add_argument(
+        "--config",
+        type=str,
+        help="Optional JSON file with known devices and alert policies.",
+    )
+    parser.add_argument(
+        "--check-config",
+        action="store_true",
+        help="Validate --config and exit without scanning.",
+    )
+    parser.add_argument(
+        "--write-baseline",
+        type=str,
+        help="Write a JSON known-device baseline from this complete LAN scan.",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Show a compact device profile after scanning one --target IP.",
+    )
+    parser.add_argument(
         "--webhook-url",
         type=str,
         help="Optional webhook URL that receives port alerts when actionable findings are detected.",
@@ -399,6 +466,29 @@ def render_empty_scan_outcome(args, diff_summary):
     return 0
 
 
+def print_device_profile(profile, policy_findings=None):
+    """Render one compact profile card for an operator-facing target scan."""
+    if profile is None:
+        print("No profile data available.")
+        return
+    title = profile.get("user_name") or profile["ip"]
+    print(f"\n{title} · {profile['device_hint']} ({profile['hint_confidence']} confidence)")
+    print(f"  IP history: {', '.join(profile['ip_history']) or profile['ip']}")
+    if profile.get("mac"):
+        print(f"  MAC: {profile['mac']} · {profile.get('vendor') or 'Unknown vendor'}")
+    if profile.get("hostname"):
+        print(f"  Hostname: {profile['hostname']}")
+    if profile["hint_evidence"]:
+        print(f"  Evidence: {'; '.join(profile['hint_evidence'])}")
+    print("  Services:")
+    for service in profile["services"]:
+        print(f"    {service['port']}/tcp  {service.get('service', 'Unknown')}")
+    if policy_findings:
+        print("  Policy:")
+        for finding in policy_findings:
+            print(f"    {finding['type'].replace('_', ' ')}")
+
+
 def build_port_alert_summary(results, diff_summary):
     """Build a compact port alert count summary for webhook delivery."""
     observations = build_port_observations(results)
@@ -417,15 +507,23 @@ def build_port_alert_summary(results, diff_summary):
     }
 
 
-def maybe_send_port_webhook(webhook_url, timeout, scan_context, results, diff_summary):
+def maybe_send_port_webhook(
+    webhook_url, timeout, scan_context, results, diff_summary, policy_findings=None
+):
     """Send port scan alert summary to a webhook when actionable findings exist."""
-    if not webhook_url or not has_port_alerts(results, diff_summary):
+    policy_findings = policy_findings or []
+    if not webhook_url or not (has_port_alerts(results, diff_summary) or policy_findings):
         return False
+    alert_summary = build_port_alert_summary(results, diff_summary)
+    alert_summary["policy_findings"] = len(policy_findings)
     payload = build_alert_payload(
         source="port_scan",
         scan_context=scan_context,
-        alert_summary=build_port_alert_summary(results, diff_summary),
-        alerts={"port_diff_summary": diff_summary},
+        alert_summary=alert_summary,
+        alerts={
+            "port_diff_summary": diff_summary,
+            "policy_findings": policy_findings,
+        },
     )
     return send_webhook_payload(webhook_url, payload, timeout=timeout, label="Port webhook alert")
 
@@ -436,9 +534,26 @@ def main():
     exit_code = 0
     init(autoreset=True)
     args = parse_args()
+    try:
+        policy_config = load_policy_config(getattr(args, "config", None))
+    except ValueError as exc:
+        print(f"{Fore.RED}Error: {exc}{Style.RESET_ALL}", file=sys.stderr)
+        sys.exit(1)
+    if getattr(args, "check_config", False):
+        print("Policy config is valid.")
+        sys.exit(0)
     if args.target and (args.iface or args.cidr):
         print(
             f"{Fore.RED}Error: --target cannot be combined with --iface or --cidr.{Style.RESET_ALL}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.profile and not args.target:
+        print(f"{Fore.RED}Error: --profile requires --target.{Style.RESET_ALL}", file=sys.stderr)
+        sys.exit(1)
+    if args.write_baseline and args.target:
+        print(
+            f"{Fore.RED}Error: --write-baseline requires a full LAN scan, not --target.{Style.RESET_ALL}",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -462,11 +577,8 @@ def main():
     if args.verbose:
         print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
     quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
-    if args.target:
-        mac_lookup = None
-    else:
-        with quiet_output:
-            mac_lookup = update_vendor_database()
+    with quiet_output:
+        mac_lookup = update_vendor_database()
     with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
         db_conn = init_db()
     try:
@@ -488,24 +600,56 @@ def main():
         )
         previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
-            diff_summary = build_port_scan_diff(previous_ports, [])
+            diff_summary = build_port_scan_diff(previous_ports, [], observed_macs=[])
             exit_code = render_empty_scan_outcome(args, diff_summary)
             finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
             print(f"\nScan run recorded with id: {scan_run_id}")
             sys.exit(exit_code)
 
         target_label = args.target or scan_context["cidr"]
-        print(f"Scanning {target_label} · {len(ports_to_scan)} ports")
+        print(
+            f"Scanning {target_label} · ports: "
+            f"{format_ports_for_display(ports_to_scan)}"
+        )
         started_at = time.monotonic()
         results = run_port_scan(
             devices_to_scan,
             ports_to_scan,
             show_progress=args.verbose and len(devices_to_scan) > 1,
+            show_port_progress=(
+                bool(args.target) and len(ports_to_scan) > PORT_PROGRESS_THRESHOLD
+            ),
         )
         print(f"Completed in {time.monotonic() - started_at:.1f}s")
         save_scan_run_ports(db_conn, scan_run_id, results)
-        diff_summary = build_port_scan_diff(previous_ports, flatten_port_results(results))
-        exit_code = render_port_scan_outcome(args, results, diff_summary)
+        profiles = upsert_device_profiles(db_conn, results, scan_run_id)
+        policy_findings = (
+            evaluate_device_policies(results, policy_config) if args.config else []
+        )
+        if args.write_baseline:
+            save_policy_config(args.write_baseline, build_baseline_config(results))
+            print(f"Baseline saved to {args.write_baseline}")
+        diff_summary = build_port_scan_diff(
+            previous_ports,
+            flatten_port_results(results),
+            observed_macs=[device["mac"] for device in results],
+        )
+        save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
+        if args.profile:
+            print_device_profile(
+                get_device_profile_by_ip(db_conn, args.target), policy_findings
+            )
+            exit_code = 0
+        else:
+            exit_code = render_port_scan_outcome(args, results, diff_summary)
+        if policy_findings and not args.profile:
+            print("\nPolicy findings:")
+            for finding in policy_findings:
+                if finding["type"] == "unknown_device":
+                    print(f"  unknown device: {finding['ip']} ({finding['mac']})")
+                else:
+                    name = finding.get("name") or finding["mac"]
+                    print(f"  unexpected port: {name} {finding['ip']}:{finding['port']}")
         with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
             save_port_scan_results(
                 results,
@@ -513,6 +657,8 @@ def main():
                 output_paths["json"],
                 csv_output_file=CSV_OUTPUT_FILE,
                 markdown_output_file=MARKDOWN_OUTPUT_FILE,
+                profiles=profiles,
+                policy_findings=policy_findings,
             )
         maybe_send_port_webhook(
             args.webhook_url,
@@ -520,6 +666,7 @@ def main():
             scan_context,
             results,
             diff_summary,
+            policy_findings,
         )
         finalize_scan_run(
             db_conn,

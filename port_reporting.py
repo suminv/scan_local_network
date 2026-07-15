@@ -272,9 +272,15 @@ def save_port_scan_results(
     json_output_file,
     csv_output_file=None,
     markdown_output_file=None,
+    profiles=None,
+    policy_findings=None,
 ):
     """Save the port scan snapshot and diff summary to JSON/CSV."""
     payload = build_report_payload("devices", results, "port_diff_summary", diff_summary)
+    if profiles is not None:
+        payload["device_profiles"] = profiles
+    if policy_findings is not None:
+        payload["policy_findings"] = policy_findings
     save_json_report(json_output_file, payload, label="Port scan results")
     if csv_output_file:
         save_csv_report(
