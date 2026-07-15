@@ -434,9 +434,17 @@ It currently checks:
 Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
 `guest` and `travel` are interpreted separately: guest networks are expected to reduce peer visibility and gateway-management exposure, while travel networks are treated with stricter local-exposure assumptions.
 
-On macOS, the report now includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details and nearby SSID/BSSID visibility are collected on a best-effort basis because Apple exposes them differently across macOS versions, and some details may require `sudo`.
+On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
-For nearby Wi-Fi inventory on modern macOS, the tool now first tries an optional `PyObjC/CoreWLAN` backend. If that bridge is not installed or macOS denies access, it falls back to older system mechanisms when available.
+For nearby Wi-Fi inventory on modern macOS, the tool first tries an optional `PyObjC/CoreWLAN` backend. If macOS returns hidden/incomplete objects without SSID, BSSID, or security data, the report states that nearby analysis is unavailable instead of presenting those objects as usable networks.
+
+**To inspect the current Wi-Fi connection and nearby-analysis status:**
+
+```bash
+./scan-health --debug-wifi
+```
+
+The compact debug view prioritizes the current connection and suppresses raw backend counters. When complete nearby records are available, the report can compare them with the current channel and identify potential overlap using the reported 2.4/5/6 GHz band and 20/40/80/160/320 MHz channel width.
 
 The Wi-Fi section now also raises risk signals for:
 
@@ -445,7 +453,7 @@ The Wi-Fi section now also raises risk signals for:
 - duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
 - very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
 
-On macOS, the report now also raises an alert when an active Wi-Fi interface is present but the system default route is currently using another interface such as Ethernet. This is meant to catch dual-connected situations where a health check might otherwise look healthy because traffic is leaving through the wired path instead of the Wi-Fi path you intended to assess.
+On macOS, the report also identifies cases where an active Wi-Fi interface is present but the system default route uses another interface such as Ethernet. Direct current-interface evidence is treated more strongly than the lower-confidence `system_profiler` fallback, so ordinary Ethernet + Wi-Fi dual connectivity is not automatically promoted to a hard alert.
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
 

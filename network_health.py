@@ -79,7 +79,12 @@ DEFAULT_GATEWAY_EXPOSURE_PROBES = [
 ]
 MACOS_AIRPORT_SCAN_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 AUXILIARY_WIFI_INTERFACES = {"awdl0", "llw0", "p2p0"}
-ACTIVE_WIFI_STATUSES = {"spairport_status_active", "connected", "active"}
+ACTIVE_WIFI_STATUSES = {
+    "spairport_status_active",
+    "spairport_status_connected",
+    "connected",
+    "active",
+}
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1165,6 +1170,7 @@ def parse_system_profiler_wifi_json(raw_json):
         return {"software": {}, "interfaces": []}
     section = sections[0]
     interfaces = []
+    current = {}
     for item in section.get("spairport_airport_interfaces", []):
         interface_name = item.get("_name")
         if interface_name in AUXILIARY_WIFI_INTERFACES:
@@ -1181,9 +1187,41 @@ def parse_system_profiler_wifi_json(raw_json):
                 "supported_channels": item.get("spairport_supported_channels", []),
             }
         )
+        current_info = item.get("spairport_current_network_information") or {}
+        if current_info:
+            def find_value(tokens):
+                stack = [current_info]
+                while stack:
+                    value = stack.pop()
+                    if isinstance(value, dict):
+                        for key, nested in value.items():
+                            key_lower = str(key).lower().replace("_", " ")
+                            if tokens == ("ssid",) and "bssid" in key_lower:
+                                continue
+                            if all(token in key_lower for token in tokens) and not isinstance(nested, (dict, list)):
+                                return nested
+                            if isinstance(nested, (dict, list)):
+                                stack.append(nested)
+                    elif isinstance(value, list):
+                        stack.extend(value)
+                return None
+
+            signal_noise = find_value(("signal", "noise")) or ""
+            signal_parts = str(signal_noise).split("/")
+            current[interface_name] = {
+                "ssid": find_value(("ssid",)) or current_info.get("_name"),
+                "bssid": find_value(("bssid",)),
+                "channel": find_value(("channel",)),
+                "rssi": signal_parts[0].strip() if signal_parts else None,
+                "noise": signal_parts[-1].strip() if len(signal_parts) > 1 else None,
+                "tx_rate": find_value(("tx", "rate")),
+                "security": find_value(("security",)),
+                "phy_mode": find_value(("phy",)),
+            }
     return {
         "software": section.get("spairport_software_information", {}),
         "interfaces": interfaces,
+        "current": current,
     }
 
 
@@ -1195,6 +1233,7 @@ def collect_macos_wifi_inventory():
         "platform": "macos",
         "software": profiler["software"],
         "interfaces": profiler["interfaces"],
+        "current": profiler.get("current", {}),
     }
 
 
@@ -1203,17 +1242,20 @@ def parse_wdutil_info(raw_text):
     interface_data = {}
     for raw_line in raw_text.splitlines():
         line = raw_line.rstrip()
-        interface_match = re.match(r"^\s{8}([A-Za-z0-9]+):\s*$", line)
+        interface_match = re.match(
+            r"^\s+(?P<interface>(?:en|awdl|llw|p2p|bridge|utun)\d+):\s*$",
+            line,
+        )
         if interface_match:
-            current_interface = interface_match.group(1)
+            current_interface = interface_match.group("interface")
             interface_data.setdefault(current_interface, {})
             continue
         if current_interface is None:
             continue
-        field_match = re.match(r"^\s{10}([^:]+):\s*(.+?)\s*$", line)
+        field_match = re.match(r"^\s{2,}(?P<key>[^:]+):\s*(?P<value>.+?)\s*$", line)
         if field_match:
-            key = field_match.group(1).strip().lower().replace(" ", "_")
-            interface_data[current_interface][key] = field_match.group(2).strip()
+            key = field_match.group("key").strip().lower().replace(" ", "_").replace("-", "_")
+            interface_data[current_interface][key] = field_match.group("value").strip()
     return interface_data
 
 
@@ -1232,11 +1274,14 @@ def collect_macos_current_wifi_details():
             "reason": str(exc),
             "interfaces": {},
         }
-    return {
-        "available": True,
-        "reason": None,
-        "interfaces": parsed,
-    }
+    parsed = {interface: details for interface, details in parsed.items() if details}
+    if not parsed:
+        return {
+            "available": False,
+            "reason": "wdutil returned no parseable Wi-Fi interface data",
+            "interfaces": {},
+        }
+    return {"available": True, "reason": None, "interfaces": parsed}
 
 
 def get_primary_wifi_interface_name(inventory, current_details):
@@ -1311,18 +1356,33 @@ def build_active_path_check(wifi_environment=None):
     active_wifi_interface = get_active_wifi_interface_name(inventory, current)
 
     if active_wifi_interface and active_wifi_interface != default_interface:
+        inventory_only = (
+            not current.get("available", False)
+            or current.get("source") == "system_profiler"
+        )
+        status = "notice" if inventory_only else "alert"
+        evidence = "system_profiler inventory only" if inventory_only else "current Wi-Fi details"
         return {
             "name": "active_path",
-            "status": "alert",
+            "status": status,
             "summary": (
-                f"Active Wi-Fi interface {active_wifi_interface} is present, but the default route "
+                f"Wi-Fi interface {active_wifi_interface} is reported as active, but the default route "
                 f"currently uses {default_interface}"
+                + ("; verify whether this is intentional dual connectivity" if inventory_only else "")
             ),
             "details": {
                 "gateway_ip": gateway_ip,
                 "default_interface": default_interface,
                 "wifi_interface": active_wifi_interface,
                 "wifi_active": True,
+                "route_mismatch": True,
+                "possible_dual_connectivity": True,
+                "confidence": "low" if inventory_only else "high",
+                "evidence": evidence,
+                "interpretation": (
+                    "Wi-Fi is active on a different interface; the system may intentionally prefer "
+                    "an Ethernet or other route"
+                ),
             },
         }
 
@@ -1336,6 +1396,9 @@ def build_active_path_check(wifi_environment=None):
                 "default_interface": default_interface,
                 "wifi_interface": active_wifi_interface,
                 "wifi_active": True,
+                "route_mismatch": False,
+                "possible_dual_connectivity": False,
+                "interpretation": "The active Wi-Fi interface also carries the default route",
             },
         }
 
@@ -1343,12 +1406,15 @@ def build_active_path_check(wifi_environment=None):
         "name": "active_path",
         "status": "ok",
         "summary": f"No active Wi-Fi interface detected; default route uses {default_interface}",
-        "details": {
-            "gateway_ip": gateway_ip,
-            "default_interface": default_interface,
-            "wifi_interface": None,
-            "wifi_active": False,
-        },
+            "details": {
+                "gateway_ip": gateway_ip,
+                "default_interface": default_interface,
+                "wifi_interface": None,
+                "wifi_active": False,
+                "route_mismatch": False,
+                "possible_dual_connectivity": False,
+                "interpretation": "No active Wi-Fi interface was detected",
+            },
     }
 
 
@@ -1482,6 +1548,17 @@ def summarize_wifi_stability(samples, gateway_ip):
     else:
         level = "stable"
 
+    if level == "unstable":
+        recommendation = (
+            "Check mesh roaming and local interference; packet loss or repeated BSSID changes were observed."
+        )
+    elif level == "degraded":
+        recommendation = (
+            "Review signal strength, gateway latency, and packet loss before troubleshooting applications."
+        )
+    else:
+        recommendation = "No material Wi-Fi instability was observed during the sample window."
+
     return {
         "gateway_ip": gateway_ip,
         "sample_count": len(samples),
@@ -1490,6 +1567,7 @@ def summarize_wifi_stability(samples, gateway_ip):
         "avg_latency_ms": avg_latency,
         "max_loss_percent": max_loss,
         "reasons": reasons,
+        "recommendation": recommendation,
         "level": level,
         "samples": samples,
     }
@@ -1517,6 +1595,7 @@ def run_wifi_stability_diagnostics(
                 "gateway_ip": gateway_ip,
                 "sample_count": 0,
                 "samples": [],
+                "recommendation": "Retry when current Wi-Fi details are available.",
             },
         }
 
@@ -1700,10 +1779,19 @@ def collect_wifi_environment():
 
 def collect_macos_wifi_state():
     """Collect the current macOS Wi-Fi environment in one structured payload."""
+    inventory = collect_macos_wifi_inventory()
+    current = collect_macos_current_wifi_details()
+    if not current.get("available") and inventory.get("current"):
+        current = {
+            "available": True,
+            "reason": "wdutil unavailable; using system_profiler current network data",
+            "source": "system_profiler",
+            "interfaces": inventory["current"],
+        }
     return {
         "platform": "macos",
-        "inventory": collect_macos_wifi_inventory(),
-        "current": collect_macos_current_wifi_details(),
+        "inventory": inventory,
+        "current": current,
         "nearby": collect_macos_nearby_wifi_networks(),
     }
 
@@ -1723,9 +1811,44 @@ def classify_wifi_security(security_text):
     return "unknown"
 
 
-def analyze_nearby_wifi_networks(networks):
+def parse_wifi_number(value):
+    """Extract the first numeric value from a macOS Wi-Fi metric."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"-?\d+(?:\.\d+)?", str(value or ""))
+    return float(match.group(0)) if match else None
+
+
+def parse_wifi_channel(value):
+    """Normalize a channel description into band, width, and center frequency."""
+    text = str(value or "")
+    channel_value = parse_wifi_number(text)
+    if channel_value is None:
+        return None
+    channel = int(channel_value)
+    band_match = re.search(r"(?P<band>2\.4|5|6)\s*GHz", text, re.IGNORECASE)
+    band = f"{band_match.group('band')}GHz" if band_match else ("2.4GHz" if channel <= 14 else "5GHz")
+    width_match = re.search(r"(?P<width>20|40|80|160|320)\s*MHz", text, re.IGNORECASE)
+    width_mhz = int(width_match.group("width")) if width_match else 20
+    if band == "2.4GHz":
+        center_mhz = 2484 if channel == 14 else 2407 + (5 * channel)
+    elif band == "6GHz":
+        center_mhz = 5950 + (5 * channel)
+    else:
+        center_mhz = 5000 + (5 * channel)
+    return {
+        "channel": channel,
+        "band": band,
+        "width_mhz": width_mhz,
+        "width_estimated": width_match is None,
+        "center_mhz": center_mhz,
+    }
+
+
+def analyze_nearby_wifi_networks(networks, current_network=None):
     risks = []
     duplicate_ssids = []
+    channel_overlaps = []
     by_ssid = {}
 
     for network in networks:
@@ -1752,10 +1875,7 @@ def analyze_nearby_wifi_networks(networks):
                 }
             )
 
-        try:
-            rssi = int(network.get("rssi", "0"))
-        except ValueError:
-            rssi = 0
+        rssi = parse_wifi_number(network.get("rssi")) or 0
         if rssi and rssi <= -85:
             risks.append(
                 {
@@ -1788,9 +1908,44 @@ def analyze_nearby_wifi_networks(networks):
                 }
             )
 
+    channel_networks = [(network, False) for network in networks]
+    if current_network:
+        channel_networks.append((current_network, True))
+    usable = []
+    for network, is_current in channel_networks:
+        channel = parse_wifi_channel(network.get("channel"))
+        if channel:
+            usable.append((network, is_current, channel))
+    for index, (left, left_current, left_channel) in enumerate(usable):
+        for right, right_current, right_channel in usable[index + 1 :]:
+            if left_channel["band"] != right_channel["band"]:
+                continue
+            if left.get("bssid") and left.get("bssid") == right.get("bssid"):
+                continue
+            separation = abs(left_channel["center_mhz"] - right_channel["center_mhz"])
+            overlap_span = (left_channel["width_mhz"] + right_channel["width_mhz"]) / 2
+            if separation < overlap_span:
+                channel_overlaps.append(
+                    {
+                        "band": left_channel["band"],
+                        "channel_a": left_channel["channel"],
+                        "channel_b": right_channel["channel"],
+                        "width_a_mhz": left_channel["width_mhz"],
+                        "width_b_mhz": right_channel["width_mhz"],
+                        "width_estimated": left_channel["width_estimated"] or right_channel["width_estimated"],
+                        "ssid_a": left.get("ssid") or "<hidden>",
+                        "ssid_b": right.get("ssid") or "<hidden>",
+                        "rssi_a": left.get("rssi"),
+                        "rssi_b": right.get("rssi"),
+                        "includes_current": left_current or right_current,
+                        "type": "same channel" if separation == 0 else "overlapping channel widths",
+                    }
+                )
+
     return {
         "visible_network_count": len(networks),
         "duplicate_ssids": duplicate_ssids,
+        "channel_overlaps": channel_overlaps,
         "limited_scan": (
             len(networks) > 0
             and all((network.get("ssid") or "<hidden>") == "<hidden>" for network in networks)
@@ -1804,12 +1959,17 @@ def analyze_nearby_wifi_networks(networks):
 def build_wifi_environment_analysis(wifi_environment):
     """Attach a nearby-network analysis block to the collected Wi-Fi state."""
     nearby_networks = wifi_environment["nearby"]["networks"]
+    current_interfaces = wifi_environment.get("current", {}).get("interfaces", {})
+    current_network = None
+    if current_interfaces:
+        _, current_network = next(iter(current_interfaces.items()))
     analysis = (
-        analyze_nearby_wifi_networks(nearby_networks)
+        analyze_nearby_wifi_networks(nearby_networks, current_network=current_network)
         if nearby_networks
         else {
             "visible_network_count": 0,
             "duplicate_ssids": [],
+            "channel_overlaps": [],
             "limited_scan": False,
             "risks": [],
         }
@@ -2171,13 +2331,21 @@ def run_network_health_checks(
     network_profile=DEFAULT_NETWORK_PROFILE,
     wifi_stability_seconds=0,
     wifi_stability_progress_callback=None,
+    progress_callback=None,
 ):
     network_profile = normalize_network_profile(network_profile)
+    progress_steps = 5
+    if progress_callback:
+        progress_callback("local network", 1, progress_steps)
     local_segment = collect_local_segment_checks(
         timeout=timeout,
         network_profile=network_profile,
     )
+    if progress_callback:
+        progress_callback("gateway reachability", 2, progress_steps)
     gateway_reachability_check = build_gateway_reachability_check()
+    if progress_callback:
+        progress_callback("internet and DNS", 3, progress_steps)
     internet_path = collect_internet_path_checks(
         dns_domains=dns_domains,
         timeout=timeout,
@@ -2192,6 +2360,8 @@ def run_network_health_checks(
         internet_path["dns_environment"],
         internet_path["dns_trust_reasoning"],
     ]
+    if progress_callback:
+        progress_callback("Wi-Fi environment", 4, progress_steps)
     wifi_environment_check = build_wifi_environment_check()
     checks.append(wifi_environment_check)
     active_path_check = build_active_path_check(wifi_environment_check.get("details"))
@@ -2219,6 +2389,8 @@ def run_network_health_checks(
         )
         if stability_check is not None:
             checks.append(stability_check)
+    if progress_callback:
+        progress_callback("finalizing report", 5, progress_steps)
     return checks
 
 

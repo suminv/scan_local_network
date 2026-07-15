@@ -5,7 +5,7 @@ import ssl
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from unittest import mock
 
@@ -675,6 +675,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(summary["level"], "unstable")
         self.assertEqual(summary["bssid_changes"], 2)
         self.assertTrue(summary["reasons"])
+        self.assertIn("mesh roaming", summary["recommendation"])
 
     def test_run_wifi_stability_diagnostics_reports_progress(self):
         progress_calls = []
@@ -736,6 +737,36 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(result["status"], "alert")
         self.assertIn("default route currently uses en0", result["summary"])
         self.assertEqual(result["details"]["wifi_interface"], "en1")
+        self.assertTrue(result["details"]["possible_dual_connectivity"])
+        self.assertTrue(result["details"]["route_mismatch"])
+
+    def test_build_active_path_check_uses_system_profiler_connected_status(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
+            with mock.patch("network_health.is_macos", return_value=True):
+                result = network_health.build_active_path_check(
+                    {
+                        "inventory": {"interfaces": [{"name": "en0", "status": "spairport_status_connected"}]},
+                        "current": {"available": False, "interfaces": {}},
+                    }
+                )
+        self.assertEqual(result["details"]["wifi_interface"], "en0")
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["confidence"], "low")
+        self.assertTrue(result["details"]["possible_dual_connectivity"])
+
+    def test_build_active_path_check_treats_system_profiler_fallback_as_low_confidence(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
+            with mock.patch("network_health.is_macos", return_value=True):
+                result = network_health.build_active_path_check({
+                    "inventory": {"interfaces": [{"name": "en0", "status": "spairport_status_connected"}]},
+                    "current": {
+                        "available": True,
+                        "source": "system_profiler",
+                        "interfaces": {"en0": {"ssid": "<redacted>", "channel": "44 (5GHz, 80MHz)"}},
+                    },
+                })
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["confidence"], "low")
 
     def test_build_active_path_check_marks_active_wifi_route_ok_when_aligned(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en1")):
@@ -807,6 +838,14 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
                                     "spairport_status_information": "spairport_status_active",
                                     "spairport_wireless_country_code": "NL",
                                     "spairport_supported_channels": ["1 (2GHz)", "36 (5GHz)"],
+                                    "spairport_current_network_information": {
+                                        "_name": "UKR",
+                                        "spairport_wireless_bssid": "46:3f:8c:c6:39:49",
+                                        "spairport_wireless_channel": "44 (5GHz, 80MHz)",
+                                        "spairport_wireless_signal_noise": "-61 dBm / -98 dBm",
+                                        "spairport_wireless_tx_rate": "390 Mbps",
+                                        "spairport_wireless_phy_mode": "802.11ac",
+                                    },
                                 },
                                 {
                                     "_name": "awdl0",
@@ -822,6 +861,8 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(len(parsed["interfaces"]), 1)
         self.assertEqual(parsed["interfaces"][0]["name"], "en1")
         self.assertEqual(parsed["interfaces"][0]["country_code"], "NL")
+        self.assertEqual(parsed["current"]["en1"]["ssid"], "UKR")
+        self.assertEqual(parsed["current"]["en1"]["rssi"], "-61 dBm")
 
     def test_parse_wdutil_info_extracts_interface_fields(self):
         parsed = network_health.parse_wdutil_info(
@@ -1008,6 +1049,31 @@ Wi-Fi:
         self.assertEqual(analysis["visible_network_count"], 1)
         self.assertTrue(analysis["limited_scan"])
         self.assertFalse(any(risk["type"] == "open_network" for risk in analysis["risks"]))
+
+    def test_analyze_nearby_wifi_networks_detects_potential_channel_overlap(self):
+        analysis = network_health.analyze_nearby_wifi_networks([
+            {"ssid": "A", "bssid": "aa:aa:aa:aa:aa:aa", "channel": "1", "rssi": "-50", "security": "WPA2"},
+            {"ssid": "B", "bssid": "bb:bb:bb:bb:bb:bb", "channel": "6", "rssi": "-60", "security": "WPA2"},
+            {"ssid": "C", "bssid": "cc:cc:cc:cc:cc:cc", "channel": "44", "rssi": "-70", "security": "WPA2"},
+            {"ssid": "D", "bssid": "dd:dd:dd:dd:dd:dd", "channel": "44", "rssi": "-65", "security": "WPA2"},
+        ])
+        self.assertEqual(len(analysis["channel_overlaps"]), 1)
+
+    def test_channel_overlap_includes_current_80mhz_connection(self):
+        analysis = network_health.analyze_nearby_wifi_networks(
+            [{"ssid": "Neighbor", "bssid": "aa:aa:aa:aa:aa:aa", "channel": "36", "rssi": "-70 dBm", "security": "WPA2"}],
+            current_network={"ssid": "UKR", "bssid": "46:3f:8c:c6:39:49", "channel": "44 (5GHz, 80MHz)", "rssi": "-63 dBm"},
+        )
+        self.assertEqual(len(analysis["channel_overlaps"]), 1)
+        overlap = analysis["channel_overlaps"][0]
+        self.assertTrue(overlap["includes_current"])
+        self.assertEqual(overlap["width_b_mhz"], 80)
+
+    def test_parse_wifi_channel_distinguishes_6ghz_and_width(self):
+        channel = network_health.parse_wifi_channel("37 (6GHz, 160MHz)")
+        self.assertEqual(channel["band"], "6GHz")
+        self.assertEqual(channel["width_mhz"], 160)
+        self.assertFalse(channel["width_estimated"])
 
     def test_build_wifi_environment_analysis_adds_empty_default_analysis(self):
         wifi_environment = {
@@ -1533,6 +1599,16 @@ Wi-Fi:
 
         print_alert_report.assert_called_once_with(summary, scan_context=None)
         self.assertEqual(exit_code, 2)
+
+    def test_health_progress_indicator_writes_transient_status_to_stderr(self):
+        buffer = StringIO()
+        with redirect_stderr(buffer):
+            network_health_check.print_health_progress("gateway reachability", 2, 5)
+            network_health_check.finish_health_progress()
+        output = buffer.getvalue()
+        self.assertIn("Checking network health [2/5]", output)
+        self.assertIn("gateway reachability", output)
+        self.assertIn("Network health checks completed.", output)
 
     def test_run_health_check_collection_builds_payload_from_context_and_checks(self):
         args = mock.Mock(
@@ -2097,6 +2173,7 @@ Wi-Fi:
         self.assertIn("Checks: 2 | Notices: 1 | Alerts: 0", output)
         self.assertIn("Trust assessment: trusted", output)
         self.assertIn("Risk summary: no hard alerts; 1 notice(s) in Wi-Fi environment", output)
+        self.assertIn("Action: review the notices", output)
         self.assertIn("Wi-Fi environment", output)
         self.assertIn("[~]", output)
         self.assertIn("Gateway", output)
@@ -2258,7 +2335,18 @@ Wi-Fi:
                             }
                         ],
                     },
-                    "current": {"available": True, "reason": None},
+                    "current": {
+                        "available": True,
+                        "reason": None,
+                        "interfaces": {
+                            "en0": {
+                                "ssid": "UKR",
+                                "bssid": "46:3f:8c:c6:39:49",
+                                "channel": "44",
+                                "rssi": "-61",
+                            }
+                        },
+                    },
                 },
             }
         ]
@@ -2269,10 +2357,17 @@ Wi-Fi:
         self.assertEqual(debug["network_count"], 1)
         self.assertEqual(debug["hidden_count"], 1)
         self.assertTrue(debug["likely_os_restriction"])
+        self.assertEqual(debug["current_connection"]["ssid"], "UKR")
+        self.assertEqual(debug["current_connection"]["channel"], "44")
+
+    def test_assess_wifi_signal_classifies_good_rssi_and_noise(self):
+        signal = network_health_check.assess_wifi_signal("-61 dBm", "-98 dBm")
+        self.assertEqual(signal["snr_db"], 37)
+        self.assertEqual(signal["summary"], "good signal and low noise")
 
     def test_print_wifi_stability_progress_updates_single_line_and_finishes_with_newline(self):
         buffer = StringIO()
-        with mock.patch("sys.stdout", buffer):
+        with mock.patch("sys.stderr", buffer):
             network_health_check.print_wifi_stability_progress(1, 2, "192.168.2.254")
             network_health_check.print_wifi_stability_progress(2, 2, "192.168.2.254")
 
@@ -2396,6 +2491,7 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("=== Wi-Fi Debug ===", output)
-        self.assertIn("backend: corewlan", output)
-        self.assertIn("hidden_ssid_objects: 1", output)
-        self.assertIn("likely a macOS privacy or API restriction", output)
+        self.assertIn("Unavailable for analysis", output)
+        self.assertNotIn("Technical details:", output)
+        self.assertNotIn("Hidden SSID records", output)
+        self.assertNotIn("Missing BSSID records", output)

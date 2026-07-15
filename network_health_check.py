@@ -12,6 +12,7 @@ from network_health import (
     DEFAULT_NETWORK_PROFILE,
     NETWORK_PROFILES,
     build_health_summary,
+    parse_wifi_number,
     run_network_health_checks,
 )
 from reporting import render_markdown_table, save_json_report, save_markdown_report
@@ -206,6 +207,12 @@ def format_active_path_details(details):
         lines.append(f"  active wifi interface: {details.get('wifi_interface')}")
     else:
         lines.append("  active wifi interface: none detected")
+    if details.get("interpretation"):
+        lines.append(f"  interpretation: {details['interpretation']}")
+    if details.get("confidence"):
+        lines.append(f"  confidence: {details['confidence']}")
+    if details.get("evidence"):
+        lines.append(f"  evidence: {details['evidence']}")
     return lines
 
 
@@ -337,11 +344,49 @@ def format_wifi_environment_details(details):
         for risk in risks:
             target = risk.get("ssid") or risk.get("server") or "network"
             lines.append(f"    - {humanize_risk_type(risk['type'])}: {target} ({risk['reason']})")
+    overlaps = analysis.get("channel_overlaps", [])
+    if overlaps:
+        lines.append("  potential channel overlap:")
+        for overlap in overlaps[:5]:
+            current_marker = " · includes current connection" if overlap.get("includes_current") else ""
+            estimate_marker = " · estimated width" if overlap.get("width_estimated") else ""
+            lines.append(
+                f"    - {overlap['band']} ch {overlap['channel_a']}/{overlap.get('width_a_mhz', 20)}MHz "
+                f"({overlap['ssid_a']}) with ch {overlap['channel_b']}/{overlap.get('width_b_mhz', 20)}MHz "
+                f"({overlap['ssid_b']}) — {overlap['type']}{current_marker}{estimate_marker}"
+            )
 
     current = details.get("current", {})
+    current_interfaces = current.get("interfaces", {})
+    if current_interfaces:
+        interface_name, connection = next(iter(current_interfaces.items()))
+        lines.append("  current connection:")
+        lines.append(f"    - interface: {interface_name}")
+        for label, key in (("SSID", "ssid"), ("BSSID", "bssid"), ("channel", "channel"), ("RSSI", "rssi"), ("noise", "noise"), ("security", "security"), ("tx rate", "tx_rate"), ("PHY mode", "phy_mode")):
+            if connection.get(key) is not None:
+                lines.append(f"    - {label}: {connection[key]}")
+        signal = assess_wifi_signal(connection.get("rssi"), connection.get("noise"))
+        if signal:
+            lines.append(f"    - signal assessment: {signal['summary']} (SNR {signal['snr_db']:.0f} dB)")
     if current.get("available") is False and current.get("reason"):
         lines.append(f"  current: unavailable ({current['reason']})")
     return lines
+
+
+def assess_wifi_signal(rssi, noise):
+    """Classify current Wi-Fi radio quality from RSSI, noise, and derived SNR."""
+    rssi_value = parse_wifi_number(rssi)
+    noise_value = parse_wifi_number(noise)
+    if rssi_value is None or noise_value is None:
+        return None
+    snr = rssi_value - noise_value
+    if rssi_value >= -67 and snr >= 25:
+        summary = "good signal and low noise"
+    elif rssi_value >= -75 and snr >= 15:
+        summary = "fair signal; usable but not strong"
+    else:
+        summary = "weak or noisy signal"
+    return {"rssi_dbm": rssi_value, "noise_dbm": noise_value, "snr_db": snr, "summary": summary}
 
 
 def format_domain_resolution_details(details):
@@ -376,6 +421,8 @@ def format_wifi_stability_details(details):
         lines.append("  reasons:")
         for reason in details["reasons"]:
             lines.append(f"    - {reason}")
+    if details.get("recommendation"):
+        lines.append(f"  recommendation: {details['recommendation']}")
     if details.get("reason"):
         lines.append(f"  reason: {details['reason']}")
     return lines
@@ -646,6 +693,20 @@ def format_network_profile_label(scan_context):
     return profile
 
 
+def format_focus_recommendation(summary, assessment, scan_context=None):
+    """Return one concise action line for the operator-facing focus report."""
+    profile = format_network_profile_label(scan_context)
+    if assessment.get("level") == "untrusted":
+        return "Action: avoid sensitive activity until the active alerts are understood."
+    if assessment.get("level") == "suspicious":
+        if profile in {"guest", "travel"}:
+            return f"Action: treat this {profile} network as untrusted and review the listed exposure."
+        return "Action: review the listed finding before trusting this network."
+    if summary.get("notice_checks", 0):
+        return "Action: review the notices; they may be expected for this network profile."
+    return "Action: no active risk signals detected."
+
+
 def get_focus_detail_limit(check):
     if check["name"] == "overall_trust_explanation":
         return 5
@@ -661,10 +722,22 @@ def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
         f"\rRunning Wi-Fi stability diagnostics: sample {current_step}/{total_steps} "
         f"against gateway {gateway_ip}..."
     )
-    sys.stdout.write(message)
+    sys.stderr.write(message)
     if current_step >= total_steps:
-        sys.stdout.write("\n")
-    sys.stdout.flush()
+        sys.stderr.write("\n")
+    sys.stderr.flush()
+
+
+def print_health_progress(stage, current_step, total_steps):
+    """Render a lightweight progress indicator without polluting the report."""
+    sys.stderr.write(f"\rChecking network health [{current_step}/{total_steps}] · {stage}...")
+    sys.stderr.flush()
+
+
+def finish_health_progress():
+    """Terminate the transient progress line before the final report."""
+    sys.stderr.write("\rNetwork health checks completed.                          \n")
+    sys.stderr.flush()
 
 
 def print_health_report(checks, summary, scan_context=None):
@@ -697,6 +770,7 @@ def print_focus_health_report(checks, summary, scan_context=None):
     print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
+    print(format_focus_recommendation(summary, assessment, scan_context=scan_context))
 
     key_checks, hidden_notice_count = select_focus_checks(checks)
     for check in key_checks:
@@ -716,7 +790,39 @@ def build_wifi_debug_summary(checks):
 
     details = wifi_check.get("details", {})
     nearby = details.get("nearby", {})
+    analysis = details.get("analysis", {})
     networks = nearby.get("networks", [])
+    usable_networks = [
+        network for network in networks
+        if (
+            (network.get("ssid") and network.get("ssid") != "<hidden>")
+            or network.get("bssid")
+            or network.get("security")
+        )
+    ]
+    current = details.get("current", {})
+    current_interfaces = current.get("interfaces", {})
+    current_connection = None
+    if current_interfaces:
+        interface_name, interface_details = next(iter(current_interfaces.items()))
+        current_connection = {
+            "interface": interface_name,
+            "ssid": interface_details.get("ssid"),
+            "bssid": interface_details.get("bssid"),
+            "channel": interface_details.get("channel"),
+            "rssi": interface_details.get("rssi") or interface_details.get("agrctlrssi"),
+            "noise": interface_details.get("noise") or interface_details.get("agrctlnoise"),
+            "tx_rate": (
+                interface_details.get("tx_rate")
+                or interface_details.get("last_tx_rate")
+                or interface_details.get("lasttxrate")
+            ),
+            "security": interface_details.get("security"),
+            "phy_mode": interface_details.get("phy_mode") or interface_details.get("phymode"),
+        }
+        current_connection["signal"] = assess_wifi_signal(
+            current_connection.get("rssi"), current_connection.get("noise")
+        )
     hidden_count = sum(1 for network in networks if (network.get("ssid") or "<hidden>") == "<hidden>")
     missing_bssid_count = sum(1 for network in networks if not network.get("bssid"))
     missing_security_count = sum(1 for network in networks if not network.get("security"))
@@ -733,13 +839,17 @@ def build_wifi_debug_summary(checks):
         "available": nearby.get("available"),
         "reason": nearby.get("reason"),
         "network_count": len(networks),
+        "usable_network_count": len(usable_networks),
         "hidden_count": hidden_count,
         "missing_bssid_count": missing_bssid_count,
         "missing_security_count": missing_security_count,
-        "current_available": details.get("current", {}).get("available"),
-        "current_reason": details.get("current", {}).get("reason"),
+        "current_available": current.get("available"),
+        "current_reason": current.get("reason"),
+        "current_source": current.get("source", "wdutil"),
+        "current_connection": current_connection,
         "likely_os_restriction": likely_os_restriction,
-        "sample_networks": networks[:5],
+        "sample_networks": usable_networks[:5],
+        "channel_overlaps": analysis.get("channel_overlaps", []),
     }
 
 
@@ -749,37 +859,65 @@ def print_wifi_debug_report(checks):
         return
 
     print("\n=== Wi-Fi Debug ===")
-    print(f"backend: {debug['backend'] or 'none'}")
-    print(f"nearby_available: {debug['available']}")
-    if debug.get("reason"):
-        print(f"reason: {debug['reason']}")
-    print(f"network_objects: {debug['network_count']}")
-    print(f"hidden_ssid_objects: {debug['hidden_count']}")
-    print(f"missing_bssid_objects: {debug['missing_bssid_count']}")
-    print(f"missing_security_objects: {debug['missing_security_count']}")
-    print(f"current_wifi_details_available: {debug['current_available']}")
-    if debug.get("current_reason"):
-        print(f"current_wifi_details_reason: {debug['current_reason']}")
+    if debug.get("current_connection"):
+        print("\nCurrent connection:")
+        print(f"  Interface: {debug['current_connection'].get('interface') or '-'}")
+        print(f"  SSID: {debug['current_connection'].get('ssid') or '<hidden>'}")
+        print(f"  BSSID: {debug['current_connection'].get('bssid') or '-'}")
+        print(f"  Channel: {debug['current_connection'].get('channel') or '-'}")
+        print(f"  RSSI: {debug['current_connection'].get('rssi') or '-'}")
+        print(f"  Noise: {debug['current_connection'].get('noise') or '-'}")
+        print(f"  Security: {format_wifi_security_label(debug['current_connection'].get('security'))}")
+        print(f"  Tx rate: {debug['current_connection'].get('tx_rate') or '-'}")
+        print(f"  PHY mode: {debug['current_connection'].get('phy_mode') or '-'}")
+        if debug['current_connection'].get("signal"):
+            signal = debug['current_connection']["signal"]
+            print(f"  Quality: {signal['summary']} · SNR {signal['snr_db']:.0f} dB")
+    else:
+        print("\nCurrent connection: unavailable")
 
+    print("\nNearby networks:")
     if debug["sample_networks"]:
-        print("sample_networks:")
         for network in debug["sample_networks"]:
             print(
-                "  - "
-                f"ssid={network.get('ssid') or '<hidden>'}, "
-                f"bssid={network.get('bssid') or '-'}, "
-                f"channel={network.get('channel') or '-'}, "
-                f"rssi={network.get('rssi') or '-'}, "
-                f"security={network.get('security') or '-'}"
+                f"  - {network.get('ssid') or '<hidden>'} · "
+                f"BSSID {network.get('bssid') or '-'} · ch {network.get('channel') or '-'} · "
+                f"RSSI {network.get('rssi') or '-'} · {format_wifi_security_label(network.get('security'))}"
+            )
+    else:
+        if debug["available"] and debug["network_count"]:
+            print(
+                f"  Unavailable for analysis: macOS returned {debug['network_count']} "
+                "incomplete record(s) without usable identity or security data."
+            )
+        elif debug.get("reason"):
+            print(f"  Unavailable: {debug['reason']}")
+        else:
+            print("  No nearby networks were returned.")
+    if debug["channel_overlaps"]:
+        print("  Potential channel overlap:")
+        for overlap in debug["channel_overlaps"][:5]:
+            current_marker = " · current connection" if overlap.get("includes_current") else ""
+            print(
+                f"    - {overlap['band']} ch {overlap['channel_a']}/{overlap.get('width_a_mhz', 20)}MHz "
+                f"({overlap['ssid_a']}) ↔ ch {overlap['channel_b']}/{overlap.get('width_b_mhz', 20)}MHz "
+                f"({overlap['ssid_b']}){current_marker}"
             )
 
-    if debug["likely_os_restriction"]:
-        print("diagnosis: CoreWLAN scan is returning only hidden/incomplete objects. This is likely a macOS privacy or API restriction, not just a formatter problem.")
-    elif not debug["available"]:
-        print("diagnosis: No nearby Wi-Fi backend returned data. Install the optional macOS backend or check OS support.")
-    else:
-        print("diagnosis: Nearby Wi-Fi scan returned usable objects. If the list still looks incomplete, investigate scan coverage or API filtering.")
     print("===================")
+
+
+def format_wifi_security_label(value):
+    if not value:
+        return "unknown"
+    normalized = str(value).lower()
+    if "wpa2_personal" in normalized:
+        return "WPA2 Personal"
+    if "wpa3" in normalized:
+        return "WPA3"
+    if "wpa2" in normalized:
+        return "WPA2"
+    return str(value).replace("spairport_security_mode_", "").replace("_", " ").title()
 
 
 def print_alert_report(summary, scan_context=None):
@@ -982,6 +1120,7 @@ def run_health_check_collection(args):
         wifi_stability_progress_callback=(
             print_wifi_stability_progress if wifi_stability_seconds > 0 else None
         ),
+        progress_callback=print_health_progress,
     )
     summary = build_health_summary(checks)
     trust_assessment = build_trust_assessment(summary, scan_context=scan_context)
@@ -1035,8 +1174,11 @@ def main():
     output_paths = resolve_report_output_paths(args)
     MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
     quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
-    with quiet_output:
-        scan_context, checks, summary, payload = run_health_check_collection(args)
+    try:
+        with quiet_output:
+            scan_context, checks, summary, payload = run_health_check_collection(args)
+    finally:
+        finish_health_progress()
     with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
         save_json_report(output_paths["json"], payload, label="Network health report")
         if MARKDOWN_OUTPUT_FILE:
