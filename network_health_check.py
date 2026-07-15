@@ -167,6 +167,8 @@ def format_local_peer_visibility_details(details):
     ]
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
+    if details.get("visibility_assessment"):
+        lines.append(f"  assessment: {details['visibility_assessment']}")
     peers = details.get("visible_peers", [])
     if not peers:
         lines.append("  visible peers: none")
@@ -188,6 +190,10 @@ def format_client_isolation_hint_details(details):
         f"  visible peers: {details.get('visible_peer_count', 0)}",
         f"  risky gateway services: {details.get('risky_gateway_service_count', 0)}",
     ]
+    if details.get("isolation_expected") is not None:
+        lines.append(f"  isolation expected: {'yes' if details['isolation_expected'] else 'no'}")
+    if details.get("isolation_assessment"):
+        lines.append(f"  assessment: {details['isolation_assessment']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
     peers = details.get("visible_peers", [])
@@ -636,7 +642,7 @@ def build_trust_assessment(summary, scan_context=None):
     network_profile = format_network_profile_label(scan_context)
     notice_names = {check["name"] for check in summary.get("notices", [])}
     if alert_count == 0:
-        if network_profile in {"guest", "travel"}:
+        if network_profile in {"guest", "travel", "public"}:
             local_segment_notice_count = len(
                 notice_names.intersection(
                     {
@@ -699,7 +705,7 @@ def format_focus_recommendation(summary, assessment, scan_context=None):
     if assessment.get("level") == "untrusted":
         return "Action: avoid sensitive activity until the active alerts are understood."
     if assessment.get("level") == "suspicious":
-        if profile in {"guest", "travel"}:
+        if profile in {"guest", "travel", "public"}:
             return f"Action: treat this {profile} network as untrusted and review the listed exposure."
         return "Action: review the listed finding before trusting this network."
     if summary.get("notice_checks", 0):
@@ -1015,7 +1021,7 @@ def build_parser():
         type=str,
         default=DEFAULT_NETWORK_PROFILE,
         choices=NETWORK_PROFILES,
-        help="Interpret the network as auto, home, guest, or travel. Defaults to auto.",
+        help="Interpret the network as auto, home, guest, travel, or public. Defaults to auto.",
     )
     parser.add_argument(
         "--json-out",

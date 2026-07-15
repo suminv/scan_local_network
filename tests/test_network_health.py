@@ -334,6 +334,18 @@ class NetworkHealthTests(unittest.TestCase):
             "guest networks usually limit client-to-client visibility",
         )
 
+    def test_build_local_peer_visibility_check_treats_home_peers_as_expected(self):
+        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
+            with mock.patch(
+                "network_health.run_command",
+                return_value="? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n",
+            ):
+                result = network_health.build_local_peer_visibility_check(network_profile="home")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["visibility_assessment"], "expected_home_visibility")
+        self.assertIn("normal for this home network profile", result["summary"])
+
     def test_build_local_peer_visibility_check_marks_empty_cache_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch("network_health.run_command", return_value=""):
@@ -402,6 +414,27 @@ class NetworkHealthTests(unittest.TestCase):
             result["details"]["profile_expectation"],
             "travel networks should not be assumed to isolate clients unless evidence supports it",
         )
+
+    def test_build_client_isolation_hint_does_not_flag_expected_home_visibility(self):
+        result = network_health.build_client_isolation_hint_check(
+            {"details": {"gateway_ip": "192.168.2.1", "interface": "en0", "is_private_gateway": True, "risky_services": []}},
+            {"details": {"gateway_ip": "192.168.2.1", "interface": "en0", "is_private_gateway": True, "visible_peers": [{"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"}]}},
+            network_profile="home",
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(result["details"]["isolation_expected"])
+        self.assertEqual(result["details"]["isolation_assessment"], "not_expected_home")
+
+    def test_build_client_isolation_hint_uses_public_profile(self):
+        result = network_health.build_client_isolation_hint_check(
+            {"details": {"gateway_ip": "10.0.0.1", "interface": "en0", "is_private_gateway": True, "risky_services": []}},
+            {"details": {"gateway_ip": "10.0.0.1", "interface": "en0", "is_private_gateway": True, "visible_peers": [{"ip": "10.0.0.22", "mac": "aa:bb:cc:dd:ee:ff"}]}},
+            network_profile="public",
+        )
+        self.assertEqual(result["status"], "notice")
+        self.assertTrue(result["details"]["isolation_expected"])
+        self.assertEqual(result["details"]["isolation_assessment"], "absent_or_relaxed_public")
+        self.assertIn("public network", result["summary"])
 
     def test_build_client_isolation_hint_marks_gateway_only_visibility_ok(self):
         result = network_health.build_client_isolation_hint_check(

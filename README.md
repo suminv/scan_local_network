@@ -431,8 +431,12 @@ It currently checks:
 ./scan-health --network-profile travel
 ```
 
+```bash
+./scan-health --network-profile public
+```
+
 Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
-`guest` and `travel` are interpreted separately: guest networks are expected to reduce peer visibility and gateway-management exposure, while travel networks are treated with stricter local-exposure assumptions.
+`home`, `guest`, `travel`, and `public` are interpreted separately. Peer visibility is normal and reported as `OK` for an explicit home profile. Guest networks are expected to reduce peer visibility, while travel and public networks treat visible unrelated peers and gateway-management exposure as untrusted local-segment signals.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
