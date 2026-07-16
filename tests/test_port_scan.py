@@ -617,7 +617,7 @@ class PortScanTests(unittest.TestCase):
             port_reporting.print_port_alert_summary(results, diff_summary)
 
         output = buffer.getvalue()
-        self.assertIn("=== Alerts ===", output)
+        self.assertIn("--- Alerts ---", output)
         self.assertIn("TLS alerts: 1", output)
         self.assertIn("TLS certificate alerts:", output)
         self.assertIn("TLS! expired", output)

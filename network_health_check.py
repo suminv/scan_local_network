@@ -16,7 +16,13 @@ from network_health import (
     parse_wifi_number,
     run_network_health_checks,
 )
-from reporting import render_markdown_table, save_json_report, save_markdown_report
+from reporting import (
+    format_section_heading,
+    format_status_marker,
+    render_markdown_table,
+    save_json_report,
+    save_markdown_report,
+)
 
 
 JSON_OUTPUT_FILE = "network_health_check_result.json"
@@ -505,11 +511,11 @@ def format_check_heading(check):
 
 def format_status_badge(status):
     if status == "OK":
-        return f"{Fore.GREEN}[OK]{Style.RESET_ALL}"
+        return f"{Fore.GREEN}{format_status_marker('ok')}{Style.RESET_ALL}"
     if status == "NOTICE":
-        return f"{Fore.YELLOW}[~]{Style.RESET_ALL}"
+        return f"{Fore.YELLOW}{format_status_marker('notice')}{Style.RESET_ALL}"
     if status == "ALERT":
-        return f"{Fore.RED}[!]{Style.RESET_ALL}"
+        return f"{Fore.RED}{format_status_marker('alert')}{Style.RESET_ALL}"
     return f"{Fore.YELLOW}[?]{Style.RESET_ALL}"
 
 
@@ -790,7 +796,7 @@ def fail_health_progress():
 
 def print_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary, scan_context=scan_context)
-    print("=== Network Health Check ===")
+    print(format_section_heading("Network Health Check"))
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
         print(f"Network profile: {network_profile}")
@@ -805,12 +811,11 @@ def print_health_report(checks, summary, scan_context=None):
             print(f"    {check['summary']}")
             for line in format_check_details(check):
                 print(indent_detail_line(line))
-    print("============================")
 
 
 def print_focus_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary, scan_context=scan_context)
-    print("=== Network Health Focus ===")
+    print(format_section_heading("Network Health Focus"))
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
         print(f"Network profile: {network_profile}")
@@ -828,7 +833,6 @@ def print_focus_health_report(checks, summary, scan_context=None):
             print(indent_detail_line(line))
     if hidden_notice_count:
         print(f"\n... {hidden_notice_count} more notice(s); use --output full for complete detail")
-    print("============================")
 
 
 def build_wifi_debug_summary(checks):
@@ -906,7 +910,7 @@ def print_wifi_debug_report(checks):
     if debug is None:
         return
 
-    print("\n=== Wi-Fi Debug ===")
+    print(f"\n{format_section_heading('Wi-Fi Debug')}")
     if debug.get("current_connection"):
         print("\nCurrent connection:")
         print(f"  Interface: {debug['current_connection'].get('interface') or '-'}")
@@ -952,7 +956,6 @@ def print_wifi_debug_report(checks):
                 f"({overlap['ssid_b']}){current_marker}"
             )
 
-    print("===================")
 
 
 def format_wifi_security_label(value):
@@ -969,7 +972,7 @@ def format_wifi_security_label(value):
 
 
 def print_alert_report(summary, scan_context=None):
-    print("=== Network Health Alerts ===")
+    print(format_section_heading("Network Health Alerts"))
     network_profile = format_network_profile_label(scan_context)
     if network_profile:
         print(f"Network profile: {network_profile}")
@@ -997,7 +1000,6 @@ def print_alert_report(summary, scan_context=None):
                 print(f"... {len(notices) - NOTICE_REPORT_LIMIT} more notice(s)")
         else:
             print("No actionable health alerts detected.")
-        print("=============================")
         return
     assessment = build_trust_assessment(report_summary, scan_context=scan_context)
     print(f"Trust assessment: {assessment['level']}")
@@ -1007,7 +1009,6 @@ def print_alert_report(summary, scan_context=None):
     for check in alerts:
         print(f"\n{format_status_badge('ALERT')} {format_check_label(check['name'])}")
         print(check["summary"])
-    print("=============================")
 
 
 def build_health_markdown_report(scan_context, checks, summary):

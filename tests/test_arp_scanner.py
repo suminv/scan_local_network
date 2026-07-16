@@ -788,7 +788,7 @@ class ArpScannerTests(unittest.TestCase):
             )
 
         output = buffer.getvalue()
-        self.assertIn("=== Alerts ===", output)
+        self.assertIn("--- Alerts ---", output)
         self.assertIn("New: 1", output)
         self.assertIn("New devices:", output)
         self.assertIn("nas.local", output)

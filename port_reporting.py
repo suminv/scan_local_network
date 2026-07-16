@@ -4,6 +4,7 @@ from colorama import Fore, Style
 
 from reporting import (
     build_report_payload,
+    format_section_heading,
     print_change_report,
     render_markdown_table,
     save_csv_report,
@@ -299,10 +300,10 @@ def save_port_scan_results(
 
 def print_port_diff_summary(diff_summary):
     """Print changes between the current and previous port scan."""
+    print()
     if diff_summary is None:
         print_change_report(
             title="=== Port Changes Since Last Scan ===",
-            border="===================================",
             unavailable_message="No previous port scan snapshot available.",
         )
         return
@@ -316,14 +317,12 @@ def print_port_diff_summary(diff_summary):
     if not any([new_ports, closed_ports, service_changes, tls_changes, ssh_changes, http_changes]):
         print_change_report(
             title="=== Port Changes Since Last Scan ===",
-            border="===================================",
             empty_message="No port-level changes detected since last scan.",
         )
         return
 
     print_change_report(
         title="=== Port Changes Since Last Scan ===",
-        border="===================================",
         summary_line=(
             f"New ports: {len(new_ports)} | Closed ports: {len(closed_ports)} | Service changes: {len(service_changes)} | TLS changes: {len(tls_changes)} | SSH changes: {len(ssh_changes)} | HTTP changes: {len(http_changes)}"
         ),
@@ -402,14 +401,12 @@ def print_port_alert_summary(results, diff_summary):
     if not any([tls_alert_rows, new_ports, service_changes, tls_changes, ssh_changes, http_changes]):
         print_change_report(
             title="=== Alerts ===",
-            border="=============",
             empty_message="No actionable alerts detected.",
         )
         return
 
     print_change_report(
         title="=== Alerts ===",
-        border="=============",
         summary_line=(
             " | ".join(
                 [
@@ -569,7 +566,7 @@ def build_port_observations(results):
 
 def print_port_scan_summary(results):
     """Print the shared top-line summary for all console formats."""
-    print(f"\n{Fore.CYAN}--- Scan Results ---{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}{format_section_heading('Scan Results')}{Style.RESET_ALL}")
     open_device_count = sum(1 for device in results if device.get("open_ports"))
     open_port_count = count_open_ports(results)
     print(

@@ -157,6 +157,7 @@ Focus:
 Completed:
 
 - All three CLI tools now use one shared progress renderer with consistent bars, percentages, counters, terminal-safe in-place updates, and clean redirected output.
+- Final CLI reports now share compact section headings and consistent `[OK]`, `[~]`, and `[!]` status markers without decorative closing borders.
 - `--iface` added to both scanners.
 - `--cidr` added to both scanners.
 - Shared scan target resolution reused across both scanners.

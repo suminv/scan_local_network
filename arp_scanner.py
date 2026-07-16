@@ -21,7 +21,9 @@ from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
     build_report_payload,
+    format_status_marker,
     print_change_report,
+    print_section_heading,
     render_markdown_table,
     save_csv_report,
     save_json_report,
@@ -1270,10 +1272,10 @@ def save_and_report_results(
 
 def print_diff_summary(diff_summary):
     """Print changes between the current and previous ARP scan."""
+    print()
     if diff_summary is None:
         print_change_report(
             title="=== Changes Since Last Scan ===",
-            border="==============================",
             unavailable_message="No previous scan snapshot available.",
         )
         return
@@ -1286,14 +1288,12 @@ def print_diff_summary(diff_summary):
     if not any([new_devices, returned_devices, missing_devices, ip_changes, hostname_changes]):
         print_change_report(
             title="=== Changes Since Last Scan ===",
-            border="==============================",
             empty_message="No device-level changes detected since last scan.",
         )
         return
 
     print_change_report(
         title="=== Changes Since Last Scan ===",
-        border="==============================",
         summary_line=(
             " | ".join(
                 [
@@ -1376,7 +1376,6 @@ def print_alert_summary(diff_summary):
     if diff_summary is None:
         print_change_report(
             title="=== Alerts ===",
-            border="=============",
             unavailable_message="No previous scan snapshot available.",
         )
         return
@@ -1389,14 +1388,12 @@ def print_alert_summary(diff_summary):
     if not any([new_devices, returned_devices, missing_devices, ip_changes, hostname_changes]):
         print_change_report(
             title="=== Alerts ===",
-            border="=============",
             empty_message="No actionable alerts detected.",
         )
         return
 
     print_change_report(
         title="=== Alerts ===",
-        border="=============",
         summary_line=(
             " | ".join(
                 [
@@ -1526,23 +1523,20 @@ def maybe_send_arp_webhook(webhook_url, timeout, interface, cidr, diff_summary):
 def print_summary(table_data, new_devices, diff_summary=None):
     """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
     if not table_data:
-        print("\n=== Scan Results ===")
+        print_section_heading("Scan Results", leading_blank=True)
         print("No devices found.")
-        print("====================")
         print_diff_summary(diff_summary)
         return
-    print("=== Scan Results ===")
+    print_section_heading("Scan Results")
     print(tabulate(table_data, headers=["IP", "Hostname", "MAC", "Vendor"]))
     print(f"\nTotal devices found: {len(table_data)}")
-    print("====================\n")
-    print("=== New Devices ===")
+    print_section_heading("New Devices", leading_blank=True)
     if new_devices:
-        print(f"\U0001f514 {len(new_devices)} new device(s) detected since last scan:")
+        print(f"{format_status_marker('alert')} {len(new_devices)} new device(s) detected since last scan:")
         new_devices_table = [[d["ip"], d.get("hostname", "-"), d["mac"], d["vendor"]] for d in new_devices]
         print(tabulate(new_devices_table, headers=["IP", "Hostname", "MAC", "Vendor"]))
     else:
         print("No new devices detected since last scan.")
-    print("===================")
     print_diff_summary(diff_summary)
 
 def parse_args():

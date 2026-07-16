@@ -18,6 +18,7 @@ from policy_config import (
     load_policy_config,
     save_policy_config,
 )
+from reporting import print_section_heading
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
@@ -665,7 +666,7 @@ def main():
         else:
             exit_code = render_port_scan_outcome(args, results, diff_summary, policy_findings)
         if policy_findings and not args.profile:
-            print("\nPolicy findings:")
+            print_section_heading("Policy Findings", leading_blank=True)
             for finding in policy_findings:
                 if finding["type"] == "unknown_device":
                     print(f"  unknown device: {finding['ip']} ({finding['mac']})")

@@ -9,6 +9,13 @@ import reporting
 
 
 class ReportingTests(unittest.TestCase):
+    def test_shared_console_style_formats_headings_and_statuses(self):
+        self.assertEqual(reporting.format_section_heading("=== Scan Results ==="), "--- Scan Results ---")
+        self.assertEqual(reporting.format_section_heading("Wi-Fi Debug"), "--- Wi-Fi Debug ---")
+        self.assertEqual(reporting.format_status_marker("ok"), "[OK]")
+        self.assertEqual(reporting.format_status_marker("notice"), "[~]")
+        self.assertEqual(reporting.format_status_marker("alert"), "[!]")
+
     def test_build_report_payload_uses_consistent_keys(self):
         payload = reporting.build_report_payload(
             "devices",
@@ -76,7 +83,6 @@ class ReportingTests(unittest.TestCase):
         with redirect_stdout(buffer):
             reporting.print_change_report(
                 title="=== Example ===",
-                border="===========",
                 summary_line="New: 1",
                 sections=[
                     {
@@ -88,10 +94,11 @@ class ReportingTests(unittest.TestCase):
             )
 
         output = buffer.getvalue()
-        self.assertIn("=== Example ===", output)
+        self.assertIn("--- Example ---", output)
         self.assertIn("New: 1", output)
         self.assertIn("New items:", output)
         self.assertIn("item=1", output)
+        self.assertNotIn("===========", output)
 
 
 if __name__ == "__main__":

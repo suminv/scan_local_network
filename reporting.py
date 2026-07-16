@@ -3,6 +3,31 @@ import json
 import os
 
 
+STATUS_MARKERS = {
+    "ok": "[OK]",
+    "notice": "[~]",
+    "alert": "[!]",
+}
+
+
+def format_section_heading(title):
+    """Return the shared compact heading used by terminal reports."""
+    normalized = str(title).strip().strip("=- ").strip()
+    return f"--- {normalized} ---"
+
+
+def print_section_heading(title, *, leading_blank=False):
+    """Print one consistently formatted terminal report heading."""
+    if leading_blank:
+        print()
+    print(format_section_heading(title))
+
+
+def format_status_marker(status):
+    """Return the shared compact marker for a result status."""
+    return STATUS_MARKERS.get(str(status).lower(), f"[{str(status).upper()}]")
+
+
 def build_report_payload(snapshot_key, snapshot, diff_key, diff_summary):
     """Build a consistent JSON payload for scan reports."""
     return {
@@ -55,7 +80,6 @@ def save_markdown_report(file_path, content, label="Results"):
 def print_change_report(
     *,
     title,
-    border,
     unavailable_message=None,
     empty_message=None,
     summary_line=None,
@@ -63,14 +87,12 @@ def print_change_report(
 ):
     """Print a structured console report for diff-like changes."""
     sections = sections or []
-    print(title)
+    print(format_section_heading(title))
     if unavailable_message is not None:
         print(unavailable_message)
-        print(border)
         return
     if empty_message is not None:
         print(empty_message)
-        print(border)
         return
     if summary_line:
         print(summary_line)
@@ -81,4 +103,3 @@ def print_change_report(
         print(f"\n{section['title']}:")
         for line in section["formatter"](rows):
             print(line)
-    print(border)

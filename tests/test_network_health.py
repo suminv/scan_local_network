@@ -2285,7 +2285,7 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("=== Network Health Focus ===", output)
+        self.assertIn("--- Network Health Focus ---", output)
         self.assertIn("Network profile: guest", output)
         self.assertIn("Checks: 2 | Notices: 1 | Alerts: 0", output)
         self.assertIn("Trust assessment: trusted", output)
@@ -2609,7 +2609,7 @@ Wi-Fi:
             network_health_check.print_wifi_debug_report(checks)
 
         output = buffer.getvalue()
-        self.assertIn("=== Wi-Fi Debug ===", output)
+        self.assertIn("--- Wi-Fi Debug ---", output)
         self.assertIn("Unavailable for analysis", output)
         self.assertNotIn("Technical details:", output)
         self.assertNotIn("Hidden SSID records", output)
