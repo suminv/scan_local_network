@@ -483,6 +483,35 @@ class PortScanTests(unittest.TestCase):
         self.assertIn("TLS", output)
         self.assertIn("TLS! expiring", output)
 
+    def test_port_table_switches_to_compact_layout_for_narrow_terminal(self):
+        observations = [
+            {
+                "ip": "192.168.2.10",
+                "hostname": "a-very-long-hostname.home",
+                "vendor": "A Very Long Vendor Corporation Name",
+                "mac": "00:1d:c0:79:ee:86",
+                "port": 443,
+                "service_label": "HTTPS",
+                "details": "A long service description that must be truncated",
+                "tls": None,
+            }
+        ]
+
+        narrow_lines = port_reporting.build_port_table_lines(
+            observations, terminal_width=80
+        )
+        wide_lines = port_reporting.build_port_table_lines(
+            observations, terminal_width=160
+        )
+
+        self.assertNotIn("Hostname", narrow_lines[0])
+        self.assertNotIn("Vendor", narrow_lines[0])
+        self.assertIn("MAC", narrow_lines[0])
+        self.assertTrue(all(len(line) <= 80 for line in narrow_lines))
+        self.assertIn("Hostname", wide_lines[0])
+        self.assertIn("Vendor", wide_lines[0])
+        self.assertTrue(all(len(line) <= 160 for line in wide_lines))
+
     def test_print_port_scan_results_supports_focus_output(self):
         buffer = StringIO()
         with redirect_stdout(buffer):

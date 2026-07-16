@@ -130,6 +130,8 @@ JSON    : port_scan_result.json
 Markdown: reports/ports.md
 ```
 
+ARP inventory and `scan-ports --output table` adapt to the current terminal width. Long hostname, vendor, and service-detail values are shortened with `…`. Wide port tables retain all identity columns; narrower layouts prioritize IP, MAC, port, service, and the available detail space instead of wrapping every row across multiple lines.
+
 ### 1. ARP Scanner (`scan-arp`)
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.

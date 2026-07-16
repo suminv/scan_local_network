@@ -800,6 +800,22 @@ class ArpScannerTests(unittest.TestCase):
         self.assertNotIn("Total devices found", output)
         self.assertNotIn("--- New Devices ---", output)
 
+    def test_format_arp_table_data_truncates_long_identity_fields(self):
+        rows = arp_scanner.format_arp_table_data(
+            [[
+                "192.168.2.10",
+                "very-long-device-hostname.home",
+                "aa:bb:cc:dd:ee:ff",
+                "A vendor name that is much longer than the terminal allows",
+            ]],
+            terminal_width=72,
+        )
+
+        self.assertEqual(rows[0][0], "192.168.2.10")
+        self.assertLessEqual(len(rows[0][1]), 14)
+        self.assertTrue(rows[0][1].endswith("…"))
+        self.assertTrue(rows[0][3].endswith("…"))
+
     def test_print_alert_summary_renders_actionable_findings(self):
         buffer = StringIO()
         with redirect_stdout(buffer):

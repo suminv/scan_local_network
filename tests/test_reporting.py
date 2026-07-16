@@ -15,6 +15,8 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(reporting.format_status_marker("ok"), "[OK]")
         self.assertEqual(reporting.format_status_marker("notice"), "[~]")
         self.assertEqual(reporting.format_status_marker("alert"), "[!]")
+        self.assertEqual(reporting.truncate_text("short", 8), "short")
+        self.assertEqual(reporting.truncate_text("very long value", 8), "very lo…")
 
     def test_scan_summary_omits_empty_fields_and_aligns_status(self):
         lines = reporting.format_scan_summary_lines(

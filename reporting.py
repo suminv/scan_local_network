@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import shutil
 
 
 STATUS_MARKERS = {
@@ -8,6 +9,23 @@ STATUS_MARKERS = {
     "notice": "[~]",
     "alert": "[!]",
 }
+
+
+def get_terminal_width(default=120):
+    """Return a conservative terminal width for responsive console layouts."""
+    return shutil.get_terminal_size(fallback=(default, 24)).columns
+
+
+def truncate_text(value, max_width):
+    """Truncate one display cell with a single-character ellipsis."""
+    text = str(value)
+    if max_width <= 0:
+        return ""
+    if len(text) <= max_width:
+        return text
+    if max_width == 1:
+        return "…"
+    return text[: max_width - 1] + "…"
 
 
 def format_section_heading(title):

@@ -5,12 +5,14 @@ from colorama import Fore, Style
 from reporting import (
     build_report_payload,
     format_section_heading,
+    get_terminal_width,
     print_change_report,
     print_scan_summary,
     render_markdown_table,
     save_csv_report,
     save_json_report,
     save_markdown_report,
+    truncate_text,
 )
 
 DEFAULT_OUTPUT_FORMAT = "grouped"
@@ -644,20 +646,42 @@ def print_grouped_port_scan_results(results):
             print(f"{port_part}{Fore.YELLOW}{service_part}{Style.RESET_ALL}")
 
 
-def print_table_port_scan_results(results):
-    """Print normalized port scan results in a flat table."""
-    observations = build_port_observations(results)
-    if not observations:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-        )
-        return
-
-    header = f"{'IP':<15} {'Hostname':<24} {'Vendor':<28} {'MAC':<17} {'Port':<8} {'Service':<8} Details"
-    print(f"\n{Fore.GREEN}{header}{Style.RESET_ALL}")
+def build_port_table_lines(observations, terminal_width=None):
+    """Build full or compact port-table lines for the available width."""
+    terminal_width = terminal_width or get_terminal_width()
+    full_layout = terminal_width >= 120
+    if full_layout:
+        hostname_width = 24 if terminal_width >= 150 else 18
+        vendor_width = 28 if terminal_width >= 150 else 20
+        specs = [
+            ("IP", 15, lambda row: row["ip"]),
+            ("Hostname", hostname_width, lambda row: row.get("hostname") or "-"),
+            ("Vendor", vendor_width, lambda row: row["vendor"]),
+            ("MAC", 17, lambda row: row["mac"]),
+            ("Port", 8, lambda row: f"{row['port']}/tcp"),
+            ("Service", 8, lambda row: row["service_label"]),
+        ]
+    elif terminal_width >= 75:
+        specs = [
+            ("IP", 15, lambda row: row["ip"]),
+            ("MAC", 17, lambda row: row["mac"]),
+            ("Port", 8, lambda row: f"{row['port']}/tcp"),
+            ("Service", 8, lambda row: row["service_label"]),
+        ]
+    else:
+        specs = [
+            ("IP", 15, lambda row: row["ip"]),
+            ("Port", 8, lambda row: f"{row['port']}/tcp"),
+            ("Service", 8, lambda row: row["service_label"]),
+        ]
+    fixed_width = sum(width for _, width, _ in specs) + len(specs)
+    details_width = max(4, terminal_width - fixed_width)
+    header = " ".join(
+        [f"{label:<{width}}" for label, width, _ in specs]
+        + ["Details"]
+    )
+    lines = [header]
     for row in observations:
-        hostname = (row.get("hostname") or "-")[:24]
-        vendor = row["vendor"][:28]
         alert_marker = get_tls_alert_marker(row.get("tls"))
         details_parts = []
         if alert_marker:
@@ -665,11 +689,28 @@ def print_table_port_scan_results(results):
         if row["details"]:
             details_parts.append(row["details"])
         details = " | ".join(details_parts) if details_parts else "-"
-        port_display = f"{row['port']}/tcp"
-        line = (
-            f"{row['ip']:<15} {hostname:<24} {vendor:<28} {row['mac']:<17} "
-            f"{port_display:<8} {row['service_label']:<8} {details}"
+        cells = [
+            f"{truncate_text(getter(row), width):<{width}}"
+            for _, width, getter in specs
+        ]
+        lines.append(
+            " ".join(cells + [truncate_text(details, details_width)])
         )
+    return lines
+
+
+def print_table_port_scan_results(results):
+    """Print normalized port scan results in a responsive flat table."""
+    observations = build_port_observations(results)
+    if not observations:
+        print(
+            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
+        )
+        return
+
+    header, *lines = build_port_table_lines(observations)
+    print(f"\n{Fore.GREEN}{header}{Style.RESET_ALL}")
+    for line in lines:
         print(f"{Fore.YELLOW}{line}{Style.RESET_ALL}")
 
 

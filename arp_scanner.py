@@ -21,6 +21,7 @@ from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
     build_report_payload,
+    get_terminal_width,
     print_change_report,
     print_output_files,
     print_scan_summary,
@@ -29,6 +30,7 @@ from reporting import (
     save_csv_report,
     save_json_report,
     save_markdown_report,
+    truncate_text,
 )
 
 DB_FILE = "arp_scan_v1.db"
@@ -1556,6 +1558,20 @@ def print_arp_scan_summary(
     )
 
 
+def format_arp_table_data(table_data, terminal_width=None):
+    """Fit ARP hostname and vendor cells to the current terminal width."""
+    terminal_width = terminal_width or get_terminal_width()
+    hostname_width = 24 if terminal_width >= 110 else 14
+    vendor_width = max(12, min(40, terminal_width - 15 - hostname_width - 17 - 6))
+    return [
+        [
+            truncate_text(row[0], 15),
+            truncate_text(row[1], hostname_width),
+            truncate_text(row[2], 17),
+            truncate_text(row[3], vendor_width),
+        ]
+        for row in table_data
+    ]
 def print_summary(
     table_data,
     new_devices,
@@ -1577,7 +1593,12 @@ def print_summary(
         print("No devices found.")
         return
     print_section_heading("Devices", leading_blank=True)
-    print(tabulate(table_data, headers=["IP", "Hostname", "MAC", "Vendor"]))
+    print(
+        tabulate(
+            format_arp_table_data(table_data),
+            headers=["IP", "Hostname", "MAC", "Vendor"],
+        )
+    )
 
 def parse_args():
     """Parse CLI arguments for the ARP scanner."""
