@@ -801,6 +801,61 @@ class PortScanTests(unittest.TestCase):
         print_alert_summary.assert_called_once_with(results, diff_summary)
         self.assertEqual(exit_code, 2)
 
+    def test_render_port_scan_orders_changes_and_policy_before_open_ports(self):
+        args = SimpleNamespace(
+            alerts_only=False,
+            output="grouped",
+            target=None,
+            show_changes=False,
+        )
+        results = [
+            {
+                "ip": "192.168.2.10",
+                "mac": "aa:bb:cc:dd:ee:ff",
+                "vendor": "Vendor A",
+                "open_ports": [{"port": 22, "service": "SSH"}],
+            }
+        ]
+        diff_summary = {
+            "new_ports": [
+                {
+                    "ip": "192.168.2.10",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "port": 22,
+                    "service": "SSH",
+                }
+            ],
+            "closed_ports": [],
+            "service_changes": [],
+            "tls_changes": [],
+            "ssh_changes": [],
+            "http_changes": [],
+        }
+        policy_findings = [
+            {
+                "type": "unknown_device",
+                "ip": "192.168.2.10",
+                "mac": "aa:bb:cc:dd:ee:ff",
+            }
+        ]
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            exit_code = port_scan.render_port_scan_outcome(
+                args,
+                results,
+                diff_summary,
+                policy_findings,
+                target="192.168.2.0/24",
+                duration_seconds=1.5,
+            )
+
+        output = buffer.getvalue()
+        self.assertEqual(exit_code, 0)
+        self.assertLess(output.find("--- Scan Summary ---"), output.find("--- Port Changes Since Last Scan ---"))
+        self.assertLess(output.find("--- Port Changes Since Last Scan ---"), output.find("--- Policy Findings ---"))
+        self.assertLess(output.find("--- Policy Findings ---"), output.find("--- Open Ports ---"))
+
     def test_render_empty_scan_outcome_uses_full_output_when_not_alerts_only(self):
         args = SimpleNamespace(alerts_only=False)
         diff_summary = {"new_ports": [], "closed_ports": [], "service_changes": [], "tls_changes": []}

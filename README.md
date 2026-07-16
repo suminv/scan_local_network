@@ -119,6 +119,17 @@ Status  : [~] review detected changes
 
 `scan-health` uses the same block for interface, network profile, check counts, and the final trust status. A target-only port scan does not show historical changes unless `--show-changes` was requested.
 
+After the summary, reports place actionable context before detailed inventory: changes first, then policy findings, then device or open-port details. ARP output no longer repeats new devices in both a dedicated section and the change report, and counts already present in the summary are not printed again.
+
+Standard runs keep report-save messages hidden. With `--verbose`, generated paths are collected once at the end:
+
+```text
+--- Output Files ---
+Database: arp_scan_v1.db
+JSON    : port_scan_result.json
+Markdown: reports/ports.md
+```
+
 ### 1. ARP Scanner (`scan-arp`)
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.

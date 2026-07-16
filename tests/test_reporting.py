@@ -31,6 +31,19 @@ class ReportingTests(unittest.TestCase):
             ],
         )
 
+    def test_output_files_omits_missing_paths_and_aligns_labels(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            reporting.print_output_files(
+                [("JSON", "result.json"), ("CSV", None), ("Markdown", "result.md")]
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("--- Output Files ---", output)
+        self.assertIn("JSON    : result.json", output)
+        self.assertIn("Markdown: result.md", output)
+        self.assertNotIn("CSV", output)
+
     def test_build_report_payload_uses_consistent_keys(self):
         payload = reporting.build_report_payload(
             "devices",

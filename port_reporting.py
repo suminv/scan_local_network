@@ -766,15 +766,17 @@ def print_port_scan_results(
     duration_seconds=None,
     diff_summary=None,
     policy_findings=None,
+    include_summary=True,
 ):
     """Print human-readable port scan results."""
-    print_port_scan_summary(
-        results,
-        target=target,
-        duration_seconds=duration_seconds,
-        diff_summary=diff_summary,
-        policy_findings=policy_findings,
-    )
+    if include_summary:
+        print_port_scan_summary(
+            results,
+            target=target,
+            duration_seconds=duration_seconds,
+            diff_summary=diff_summary,
+            policy_findings=policy_findings,
+        )
     print(f"\n{Fore.CYAN}{format_section_heading('Open Ports')}{Style.RESET_ALL}")
     if output_format == "table":
         print_table_port_scan_results(results)

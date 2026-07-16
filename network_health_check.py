@@ -20,6 +20,7 @@ from network_health import (
 from reporting import (
     format_section_heading,
     format_status_marker,
+    print_output_files,
     print_scan_summary,
     render_markdown_table,
     save_json_report,
@@ -1269,7 +1270,7 @@ def main():
         raise
     else:
         finish_health_progress()
-    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+    with redirect_stdout(StringIO()):
         save_json_report(output_paths["json"], payload, label="Network health report")
         if MARKDOWN_OUTPUT_FILE:
             save_markdown_report(
@@ -1286,6 +1287,13 @@ def main():
     exit_code = render_health_report(args, checks, summary, scan_context=scan_context)
     if args.debug_wifi:
         print_wifi_debug_report(checks)
+    if args.verbose:
+        print_output_files(
+            [
+                ("JSON", output_paths["json"]),
+                ("Markdown", MARKDOWN_OUTPUT_FILE),
+            ]
+        )
     sys.exit(exit_code)
 
 

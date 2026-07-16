@@ -792,6 +792,9 @@ class ArpScannerTests(unittest.TestCase):
         self.assertIn("Duration: 2.4s", output)
         self.assertIn("Devices : 0 found", output)
         self.assertIn("Status  : [OK] no device changes detected", output)
+        self.assertLess(output.find("--- Changes Since Last Scan ---"), output.find("--- Devices ---"))
+        self.assertNotIn("Total devices found", output)
+        self.assertNotIn("--- New Devices ---", output)
 
     def test_print_alert_summary_renders_actionable_findings(self):
         buffer = StringIO()

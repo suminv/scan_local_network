@@ -21,8 +21,8 @@ from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
     build_report_payload,
-    format_status_marker,
     print_change_report,
+    print_output_files,
     print_scan_summary,
     print_section_heading,
     render_markdown_table,
@@ -1521,15 +1521,14 @@ def maybe_send_arp_webhook(webhook_url, timeout, interface, cidr, diff_summary):
     )
     return send_webhook_payload(webhook_url, payload, timeout=timeout, label="ARP webhook alert")
 
-def print_summary(
+def print_arp_scan_summary(
     table_data,
-    new_devices,
     diff_summary=None,
     *,
     target=None,
     duration_seconds=None,
 ):
-    """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
+    """Print the shared ARP scan metadata and change status."""
     change_counts = build_arp_alert_summary(diff_summary)
     total_changes = sum(
         change_counts[key]
@@ -1562,22 +1561,30 @@ def print_summary(
         ),
         leading_blank=True,
     )
+
+
+def print_summary(
+    table_data,
+    new_devices,
+    diff_summary=None,
+    *,
+    target=None,
+    duration_seconds=None,
+):
+    """Print ARP changes before the detailed device inventory."""
+    print_arp_scan_summary(
+        table_data,
+        diff_summary,
+        target=target,
+        duration_seconds=duration_seconds,
+    )
+    print_diff_summary(diff_summary)
     if not table_data:
         print_section_heading("Devices", leading_blank=True)
         print("No devices found.")
-        print_diff_summary(diff_summary)
         return
     print_section_heading("Devices", leading_blank=True)
     print(tabulate(table_data, headers=["IP", "Hostname", "MAC", "Vendor"]))
-    print(f"\nTotal devices found: {len(table_data)}")
-    print_section_heading("New Devices", leading_blank=True)
-    if new_devices:
-        print(f"{format_status_marker('alert')} {len(new_devices)} new device(s) detected since last scan:")
-        new_devices_table = [[d["ip"], d.get("hostname", "-"), d["mac"], d["vendor"]] for d in new_devices]
-        print(tabulate(new_devices_table, headers=["IP", "Hostname", "MAC", "Vendor"]))
-    else:
-        print("No new devices detected since last scan.")
-    print_diff_summary(diff_summary)
 
 def parse_args():
     """Parse CLI arguments for the ARP scanner."""
@@ -1676,6 +1683,7 @@ def main():
         ip_range,
         resolve_hostnames=args.resolve_hostnames,
     )
+    reports_saved = False
     try:
         with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
             known_macs = load_known_devices(db_conn)
@@ -1708,8 +1716,9 @@ def main():
             )
             diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
-            progress.finish(f"completed in {time.monotonic() - started_at:.1f}s")
-            with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            duration_seconds = time.monotonic() - started_at
+            progress.finish(f"completed in {duration_seconds:.1f}s")
+            with redirect_stdout(StringIO()):
                 save_and_report_results(
                     db_conn,
                     json_output,
@@ -1719,7 +1728,14 @@ def main():
                     csv_output_file=CSV_OUTPUT_FILE,
                     markdown_output_file=MARKDOWN_OUTPUT_FILE,
                 )
+            reports_saved = True
             if args.alerts_only:
+                print_arp_scan_summary(
+                    table_data,
+                    diff_summary,
+                    target=ip_range,
+                    duration_seconds=duration_seconds,
+                )
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):
                     exit_code = 2
@@ -1729,7 +1745,7 @@ def main():
                     new_devices,
                     diff_summary,
                     target=ip_range,
-                    duration_seconds=time.monotonic() - started_at,
+                    duration_seconds=duration_seconds,
                 )
             maybe_send_arp_webhook(
                 args.webhook_url,
@@ -1745,8 +1761,6 @@ def main():
                 device_count=len(table_data),
                 new_device_count=len(new_devices),
             )
-            if args.verbose:
-                print(f"\nScan run recorded with id: {scan_run_id}")
         else:
             diff_summary = build_scan_diff(
                 previous_devices,
@@ -1758,8 +1772,15 @@ def main():
             )
             diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
-            progress.finish(f"completed in {time.monotonic() - started_at:.1f}s")
+            duration_seconds = time.monotonic() - started_at
+            progress.finish(f"completed in {duration_seconds:.1f}s")
             if args.alerts_only:
+                print_arp_scan_summary(
+                    [],
+                    diff_summary,
+                    target=ip_range,
+                    duration_seconds=duration_seconds,
+                )
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):
                     exit_code = 2
@@ -1769,7 +1790,7 @@ def main():
                     [],
                     diff_summary,
                     target=ip_range,
-                    duration_seconds=time.monotonic() - started_at,
+                    duration_seconds=duration_seconds,
                 )
             maybe_send_arp_webhook(
                 args.webhook_url,
@@ -1779,8 +1800,6 @@ def main():
                 diff_summary,
             )
             finalize_scan_run(db_conn, scan_run_id, status="success")
-            if args.verbose:
-                print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
         if "progress" in locals() and not progress.finished:
             progress.fail()
@@ -1789,7 +1808,15 @@ def main():
     finally:
         db_conn.close()
     if args.verbose:
-        print("ARP Network Scanner completed.")
+        print_output_files(
+            [
+                ("Database", DB_FILE),
+                ("JSON", JSON_OUTPUT_FILE if reports_saved else None),
+                ("CSV", CSV_OUTPUT_FILE if reports_saved else None),
+                ("Markdown", MARKDOWN_OUTPUT_FILE if reports_saved else None),
+            ]
+        )
+        print(f"Scan run: {scan_run_id}")
     sys.exit(exit_code)
 
 if __name__ == "__main__":

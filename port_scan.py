@@ -19,7 +19,7 @@ from policy_config import (
     load_policy_config,
     save_policy_config,
 )
-from reporting import print_section_heading
+from reporting import print_output_files, print_section_heading
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
@@ -468,20 +468,41 @@ def render_port_scan_outcome(
 ):
     """Render scan output and return the appropriate process exit code."""
     if args.alerts_only:
+        show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+        print_port_scan_summary(
+            results,
+            target=target,
+            duration_seconds=duration_seconds,
+            diff_summary=diff_summary if show_changes else None,
+            policy_findings=policy_findings,
+        )
         print_port_alert_summary(results, diff_summary)
+        if policy_findings:
+            print_policy_findings(policy_findings)
         return 2 if (has_port_alerts(results, diff_summary) or policy_findings) else 0
 
     show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    visible_diff = diff_summary if show_changes else None
+    print_port_scan_summary(
+        results,
+        target=target,
+        duration_seconds=duration_seconds,
+        diff_summary=visible_diff,
+        policy_findings=policy_findings,
+    )
+    if show_changes:
+        print_port_diff_summary(diff_summary)
+    if policy_findings:
+        print_policy_findings(policy_findings)
     print_port_scan_results(
         results,
         output_format=args.output,
         target=target,
         duration_seconds=duration_seconds,
-        diff_summary=diff_summary if show_changes else None,
+        diff_summary=visible_diff,
         policy_findings=policy_findings,
+        include_summary=False,
     )
-    if show_changes:
-        print_port_diff_summary(diff_summary)
     return 0
 
 
@@ -502,6 +523,8 @@ def render_empty_scan_outcome(
     print(f"\n{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
     if not getattr(args, "target", None) or getattr(args, "show_changes", False):
         print_port_diff_summary(diff_summary)
+    if policy_findings:
+        print_policy_findings(policy_findings)
     return 0
 
 
@@ -526,6 +549,19 @@ def print_device_profile(profile, policy_findings=None):
         print("  Policy:")
         for finding in policy_findings:
             print(f"    {finding['type'].replace('_', ' ')}")
+
+
+def print_policy_findings(policy_findings):
+    """Print policy findings before detailed port observations."""
+    if not policy_findings:
+        return
+    print_section_heading("Policy Findings", leading_blank=True)
+    for finding in policy_findings:
+        if finding["type"] == "unknown_device":
+            print(f"  unknown device: {finding['ip']} ({finding['mac']})")
+        else:
+            name = finding.get("name") or finding["mac"]
+            print(f"  unexpected port: {name} {finding['ip']}:{finding['port']}")
 
 
 def apply_profile_policy_name(profile, policy_config):
@@ -660,7 +696,9 @@ def main():
                 target=args.target or scan_context["cidr"],
             )
             finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
-            print(f"\nScan run recorded with id: {scan_run_id}")
+            if args.verbose:
+                print_output_files([("Database", arp_scanner.DB_FILE)])
+                print(f"Scan run: {scan_run_id}")
             sys.exit(exit_code)
 
         target_label = args.target or scan_context["cidr"]
@@ -722,15 +760,7 @@ def main():
                 target=target_label,
                 duration_seconds=elapsed,
             )
-        if policy_findings and not args.profile:
-            print_section_heading("Policy Findings", leading_blank=True)
-            for finding in policy_findings:
-                if finding["type"] == "unknown_device":
-                    print(f"  unknown device: {finding['ip']} ({finding['mac']})")
-                else:
-                    name = finding.get("name") or finding["mac"]
-                    print(f"  unexpected port: {name} {finding['ip']}:{finding['port']}")
-        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+        with redirect_stdout(StringIO()):
             save_port_scan_results(
                 results,
                 diff_summary,
@@ -754,8 +784,6 @@ def main():
             status="success",
             device_count=len(devices_to_scan),
         )
-        if args.verbose:
-            print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
         if "progress" in locals() and not progress.finished:
             progress.fail()
@@ -764,6 +792,17 @@ def main():
         raise
     finally:
         db_conn.close()
+    if args.verbose:
+        print_output_files(
+            [
+                ("Database", arp_scanner.DB_FILE),
+                ("JSON", output_paths["json"]),
+                ("CSV", CSV_OUTPUT_FILE),
+                ("Markdown", MARKDOWN_OUTPUT_FILE),
+                ("Baseline", args.write_baseline),
+            ]
+        )
+        print(f"Scan run: {scan_run_id}")
     sys.exit(exit_code)
 
 

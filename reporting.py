@@ -47,6 +47,17 @@ def print_scan_summary(fields, status=None, *, leading_blank=False):
         print(line)
 
 
+def print_output_files(paths, *, leading_blank=True):
+    """Print generated report paths as one compact verbose-only section."""
+    rows = [(label, path) for label, path in paths if path]
+    if not rows:
+        return
+    print_section_heading("Output Files", leading_blank=leading_blank)
+    label_width = max(len(label) for label, _ in rows)
+    for label, path in rows:
+        print(f"{label.ljust(label_width)}: {path}")
+
+
 def build_report_payload(snapshot_key, snapshot, diff_key, diff_summary):
     """Build a consistent JSON payload for scan reports."""
     return {
