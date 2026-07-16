@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 import tempfile
 import json
+import logging
 import os
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -15,6 +16,30 @@ import service_detection
 
 
 class PortScanTests(unittest.TestCase):
+    def test_scapy_progress_noise_filter_hides_only_missing_mac_warning(self):
+        noise_filter = port_scan.ScapyProgressNoiseFilter()
+        missing_mac_record = logging.LogRecord(
+            "scapy.runtime",
+            logging.WARNING,
+            __file__,
+            1,
+            "WARNING: more MAC address to reach destination not found. Using broadcast.",
+            (),
+            None,
+        )
+        other_record = logging.LogRecord(
+            "scapy.runtime",
+            logging.WARNING,
+            __file__,
+            1,
+            "A different Scapy warning",
+            (),
+            None,
+        )
+
+        self.assertFalse(noise_filter.filter(missing_mac_record))
+        self.assertTrue(noise_filter.filter(other_record))
+
     def test_build_parser_supports_markdown_and_output_flags(self):
         parser = port_scan.build_parser()
 

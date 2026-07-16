@@ -1,6 +1,7 @@
 import argparse
-from contextlib import nullcontext, redirect_stdout
+from contextlib import contextmanager, nullcontext, redirect_stdout
 from io import StringIO
+import logging
 import os
 import socket
 import sys
@@ -83,6 +84,26 @@ JSON_OUTPUT_FILE = "port_scan_result.json"
 CSV_OUTPUT_FILE = None
 MARKDOWN_OUTPUT_FILE = None
 OUTPUT_FORMATS = ["grouped", "table", "focus"]
+SCAPY_MISSING_MAC_WARNING = "MAC address to reach destination not found. Using broadcast."
+
+
+class ScapyProgressNoiseFilter(logging.Filter):
+    """Hide only Scapy's missing-MAC broadcast warning during a port scan."""
+
+    def filter(self, record):
+        return SCAPY_MISSING_MAC_WARNING not in record.getMessage()
+
+
+@contextmanager
+def suppress_scapy_progress_noise():
+    """Keep known non-actionable Scapy warnings from corrupting progress output."""
+    logger = logging.getLogger("scapy.runtime")
+    noise_filter = ScapyProgressNoiseFilter()
+    logger.addFilter(noise_filter)
+    try:
+        yield
+    finally:
+        logger.removeFilter(noise_filter)
 
 
 def arp_scan(ip_range, interface):
@@ -628,14 +649,15 @@ def main():
         )
         progress.update(0, target_label, force=True)
         try:
-            results = run_port_scan(
-                devices_to_scan,
-                ports_to_scan,
-                progress_callback=lambda current, total, detail: progress.update(
-                    current, detail
-                ) if current < total else None,
-                progress_by_port=progress_by_port,
-            )
+            with suppress_scapy_progress_noise():
+                results = run_port_scan(
+                    devices_to_scan,
+                    ports_to_scan,
+                    progress_callback=lambda current, total, detail: progress.update(
+                        current, detail
+                    ) if current < total else None,
+                    progress_by_port=progress_by_port,
+                )
         except Exception:
             progress.fail()
             raise
