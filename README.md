@@ -406,17 +406,21 @@ Webhook delivery is attempted only when actionable port findings exist. Use `--w
 **Example Output with Service Detection:**
 
 ```
---- Port Scanner ---
-Using interface: en0
-Scanning IP range: 192.168.1.100/24
+Scanning 192.168.1.0/24 · ports: 22, 80, 443, 3000, 5000, 8000, 8080, 8443
+Port scan [██████████████████] 100% · 15/15 devices · completed in 6.2s
 
-Discovering devices on the network...
-Found 15 devices. Now scanning ports and services...
+--- Scan Summary ---
+Target  : 192.168.1.0/24
+Duration: 6.2s
+Devices : 15 scanned · 7 with open ports
+Findings: 11 open ports
+Changes : none
+Status  : [OK] no actionable findings
 
-Scanning Devices: 100%|██████████| 15/15 [00:15<00:00,  1.00it/s]
+--- Port Changes Since Last Scan ---
+No port-level changes detected since last scan.
 
---- Scan Results ---
-15 devices scanned | 7 with open ports | 11 open ports total
+--- Open Ports ---
 
 192.168.1.1  Ubiquiti Networks Inc.  a1:b2:c3:d4:e5:f6
   80/tcp    HTTP    nginx

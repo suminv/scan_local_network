@@ -160,6 +160,7 @@ Completed:
 - Final CLI reports now share compact section headings and consistent `[OK]`, `[~]`, and `[!]` status markers without decorative closing borders.
 - ARP, port, and network-health reports now start with one aligned scan summary containing only relevant target, duration, count, change, and status fields.
 - Actionable changes and policy findings now precede detailed inventory, duplicate device counts/sections are removed, and verbose report paths are grouped in one final `Output Files` block.
+- Verbose setup, vendor, database, discovery, and result-processing diagnostics now use the same compact section style as normal reports; the obsolete `tqdm` output example has been removed from README.
 - `--iface` added to both scanners.
 - `--cidr` added to both scanners.
 - Shared scan target resolution reused across both scanners.

@@ -34,14 +34,18 @@ class ArpScannerTests(unittest.TestCase):
         )
 
     def test_resolve_scan_target_uses_interface_override(self):
-        with mock.patch("arp_scanner.netifaces.interfaces", return_value=["en0", "lo0"]):
-            interface, ip_range = arp_scanner.resolve_scan_target(
-                interface_override="en0",
-                ip_range_override="192.168.2.45/24",
-            )
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            with mock.patch("arp_scanner.netifaces.interfaces", return_value=["en0", "lo0"]):
+                interface, ip_range = arp_scanner.resolve_scan_target(
+                    interface_override="en0",
+                    ip_range_override="192.168.2.45/24",
+                )
 
         self.assertEqual(interface, "en0")
         self.assertEqual(ip_range, "192.168.2.0/24")
+        self.assertIn("--- Network Setup ---", buffer.getvalue())
+        self.assertNotIn("===", buffer.getvalue())
 
     def test_resolve_scan_target_rejects_unknown_interface(self):
         with mock.patch("arp_scanner.netifaces.interfaces", return_value=["en0", "lo0"]):

@@ -664,7 +664,7 @@ def main():
     CSV_OUTPUT_FILE = output_paths["csv"]
     MARKDOWN_OUTPUT_FILE = output_paths["markdown"]
     if args.verbose:
-        print(f"{Fore.CYAN}--- Port Scanner ---{Style.RESET_ALL}")
+        print_section_heading("Port Scanner")
     quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
     with quiet_output:
         mac_lookup = update_vendor_database()

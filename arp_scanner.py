@@ -114,7 +114,7 @@ class LocalMacVendorLookup:
 
 def update_vendor_database():
     """Updates the MAC address vendor database if necessary and returns a MacLookup instance."""
-    print("\n=== Vendor Database ===")
+    print_section_heading("Vendor Database", leading_blank=True)
     try:
         current_dir = os.path.dirname(os.path.abspath(__file__))
         update_marker_file = os.path.join(current_dir, "mac_vendor_update")
@@ -173,11 +173,9 @@ def update_vendor_database():
                 print("Offline vendor database loaded successfully.")
             except Exception as fallback_error:
                 print(f"Warning: Failed to load offline vendor database: {fallback_error}", file=sys.stderr)
-        print("======================\n")
         return mac_lookup
     except Exception as e:
         print(f"Warning: Failed to update vendor database: {e}", file=sys.stderr)
-        print("======================\n")
         try:
             return LocalMacVendorLookup()
         except Exception:
@@ -233,7 +231,7 @@ def get_default_interface_and_ip_range():
 
 def resolve_scan_target(interface_override=None, ip_range_override=None):
     """Resolve which interface and IPv4 CIDR range should be scanned."""
-    print("=== Network Setup ===")
+    print_section_heading("Network Setup")
     try:
         available_interfaces = set(netifaces.interfaces())
         if interface_override and interface_override not in available_interfaces:
@@ -258,15 +256,13 @@ def resolve_scan_target(interface_override=None, ip_range_override=None):
 
         print(f"Interface: {interface}")
         print(f"IP Range: {ip_range}")
-        print("====================\n")
         return interface, ip_range
     except Exception:
-        print("====================\n")
         raise
 
 def arp_scan(ip_range, interface):
     """Performs an ARP scan on the given IP range.\n\n    Args:\n        ip_range (str): The IP range to scan (e.g., '192.168.1.1/24').\n        interface (str): The network interface to use for the scan.\n\n    Returns:\n        list: A list of dictionaries, where each dictionary represents a device.\n    """
-    print("=== Scanning Network ===")
+    print_section_heading("Network Discovery")
     print("Starting ARP scan...")
     try:
         arp_request = ARP(pdst=ip_range)
@@ -275,11 +271,9 @@ def arp_scan(ip_range, interface):
         answered, _ = srp(packet, iface=interface, timeout=2, verbose=False)
         devices = [{"ip": received.psrc, "mac": received.hwsrc} for _, received in answered]
         print(f"ARP scan completed. Found {len(devices)} devices.")
-        print("======================\n")
         return devices
     except Exception as e:
         print(f"Error during ARP scan: {e}", file=sys.stderr)
-        print("======================\n")
         return []
 
 def column_exists(conn, table_name, column_name):
@@ -295,7 +289,7 @@ def ensure_parent_dir(file_path):
 
 def init_db():
     """Initialize the SQLite database and run lightweight schema migrations."""
-    print("=== Database Operations ===")
+    print_section_heading("Database")
     print("Initializing database...")
     ensure_parent_dir(DB_FILE)
     conn = sqlite3.connect(DB_FILE)
@@ -1040,12 +1034,12 @@ def build_port_scan_diff(previous_ports, current_ports, observed_macs=None):
 
 def load_known_devices(conn):
     """Loads known MAC addresses from the database.\n\n    Args:\n        conn (sqlite3.Connection): The database connection object.\n\n    Returns:\n        set: A set of known MAC addresses.\n    """
+    print_section_heading("Known Devices")
     print("Loading known devices...")
     cursor = conn.cursor()
     cursor.execute("SELECT mac FROM devices")
     known_macs = set(row[0] for row in cursor.fetchall())
     print(f"Found {len(known_macs)} devices in database.")
-    print("=========================\n")
     return known_macs
 
 def save_new_devices(conn, new_devices):
@@ -1080,7 +1074,7 @@ def update_existing_device(conn, mac, ip, vendor, seen_at):
 
 def process_scan_results(devices, mac_lookup, known_macs, conn, resolve_hostnames=False):
     """Processes scan results, identifies new devices, and updates existing ones.\n\n    Args:\n        devices (list): A list of discovered device dictionaries.\n        mac_lookup (MacLookup): An instance of the MacLookup class.\n        known_macs (set): A set of known MAC addresses from the database.\n        conn (sqlite3.Connection): The database connection object.\n\n    Returns:\n        tuple: A tuple containing table_data, json_output, and a list of new_devices.\n    """
-    print("=== Processing Results ===")
+    print_section_heading("Result Processing")
     print("Looking up vendor information...")
     if resolve_hostnames:
         print("Resolving hostnames...")
@@ -1104,7 +1098,6 @@ def process_scan_results(devices, mac_lookup, known_macs, conn, resolve_hostname
         else:
             update_existing_device(conn, mac, ip, vendor, scan_time)
     print("Processing complete.")
-    print("========================\n")
     return table_data, json_output, new_devices
 
 def build_arp_csv_rows(devices):
@@ -1665,7 +1658,7 @@ def main():
     if args.md_out:
         MARKDOWN_OUTPUT_FILE = args.md_out
     if args.verbose:
-        print("ARP Network Scanner starting...")
+        print_section_heading("ARP Scanner")
     quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
     with quiet_output:
         mac_lookup = update_vendor_database()
