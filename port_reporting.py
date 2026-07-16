@@ -1,7 +1,5 @@
 import json
 
-from colorama import Fore, Style
-
 from reporting import (
     build_report_payload,
     format_section_heading,
@@ -634,16 +632,13 @@ def print_grouped_port_scan_results(results):
     """Print grouped port scan results by device."""
     device_lines = build_port_result_lines(results)
     if not device_lines:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-        )
+        print("No open ports found on any of the discovered devices.")
         return
 
     for heading, port_lines in device_lines:
-        print(f"\n{Fore.GREEN}{heading}{Style.RESET_ALL}")
+        print(f"\n{heading}")
         for line in port_lines:
-            port_part, service_part = line[:12], line[12:]
-            print(f"{port_part}{Fore.YELLOW}{service_part}{Style.RESET_ALL}")
+            print(line)
 
 
 def build_port_table_lines(observations, terminal_width=None):
@@ -703,15 +698,13 @@ def print_table_port_scan_results(results):
     """Print normalized port scan results in a responsive flat table."""
     observations = build_port_observations(results)
     if not observations:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-        )
+        print("No open ports found on any of the discovered devices.")
         return
 
     header, *lines = build_port_table_lines(observations)
-    print(f"\n{Fore.GREEN}{header}{Style.RESET_ALL}")
+    print(f"\n{header}")
     for line in lines:
-        print(f"{Fore.YELLOW}{line}{Style.RESET_ALL}")
+        print(line)
 
 
 def _format_focus_host_lines(rows):
@@ -737,9 +730,7 @@ def print_focus_port_scan_results(results):
     """Print scan results grouped by operator-relevant categories."""
     observations = build_port_observations(results)
     if not observations:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-        )
+        print("No open ports found on any of the discovered devices.")
         return
 
     tls_alerts = []
@@ -790,13 +781,11 @@ def print_focus_port_scan_results(results):
         if not rows:
             continue
         printed_any = True
-        print(f"\n{Fore.GREEN}{title}:{Style.RESET_ALL}")
+        print(f"\n{title}:")
         for line in _format_focus_host_lines(rows):
-            print(f"{Fore.YELLOW}{line}{Style.RESET_ALL}")
+            print(line)
     if not printed_any:
-        print(
-            f"{Fore.YELLOW}No open ports found on any of the discovered devices.{Style.RESET_ALL}"
-        )
+        print("No open ports found on any of the discovered devices.")
 
 
 def print_port_scan_results(
@@ -818,7 +807,7 @@ def print_port_scan_results(
             diff_summary=diff_summary,
             policy_findings=policy_findings,
         )
-    print(f"\n{Fore.CYAN}{format_section_heading('Open Ports')}{Style.RESET_ALL}")
+    print(f"\n{format_section_heading('Open Ports')}")
     if output_format == "table":
         print_table_port_scan_results(results)
         return

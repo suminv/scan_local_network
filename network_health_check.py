@@ -6,7 +6,7 @@ import time
 
 from alert_delivery import build_alert_payload, send_webhook_payload
 from arp_scanner import resolve_scan_target
-from colorama import Fore, Style, init
+from colorama import Fore
 from cli_progress import ProgressIndicator
 from models import build_scan_context
 from network_health import (
@@ -18,6 +18,7 @@ from network_health import (
     run_network_health_checks,
 )
 from reporting import (
+    colorize,
     format_section_heading,
     format_status_marker,
     print_output_files,
@@ -514,12 +515,12 @@ def format_check_heading(check):
 
 def format_status_badge(status):
     if status == "OK":
-        return f"{Fore.GREEN}{format_status_marker('ok')}{Style.RESET_ALL}"
+        return colorize(format_status_marker("ok"), Fore.GREEN)
     if status == "NOTICE":
-        return f"{Fore.YELLOW}{format_status_marker('notice')}{Style.RESET_ALL}"
+        return colorize(format_status_marker("notice"), Fore.YELLOW)
     if status == "ALERT":
-        return f"{Fore.RED}{format_status_marker('alert')}{Style.RESET_ALL}"
-    return f"{Fore.YELLOW}[?]{Style.RESET_ALL}"
+        return colorize(format_status_marker("alert"), Fore.RED)
+    return colorize("[?]", Fore.YELLOW)
 
 
 def matches_group(check_name, patterns):
@@ -1253,7 +1254,6 @@ def maybe_send_health_webhook(webhook_url, timeout, scan_context, summary):
 
 
 def main():
-    init(autoreset=True)
     args = parse_args()
     if args.alerts_only and args.debug_wifi:
         print("Error: --debug-wifi cannot be combined with --alerts-only.", file=sys.stderr)

@@ -1941,6 +1941,7 @@ Wi-Fi:
         self.assertIn("resolver classes:", output)
         self.assertIn("[on-link DNS]", output)
         self.assertNotIn("{'nameservers': ['raw', 'dump']}", output)
+        self.assertNotIn("\x1b[", output)
 
     def test_print_health_report_renders_gateway_exposure_check(self):
         buffer = StringIO()

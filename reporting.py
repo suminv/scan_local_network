@@ -2,6 +2,7 @@ import csv
 import json
 import os
 import shutil
+import sys
 
 
 STATUS_MARKERS = {
@@ -26,6 +27,22 @@ def truncate_text(value, max_width):
     if max_width == 1:
         return "…"
     return text[: max_width - 1] + "…"
+
+
+def should_use_color(stream=None, environ=None):
+    """Enable ANSI color only for an interactive terminal without NO_COLOR."""
+    stream = stream or sys.stdout
+    environ = os.environ if environ is None else environ
+    return "NO_COLOR" not in environ and bool(
+        getattr(stream, "isatty", lambda: False)()
+    )
+
+
+def colorize(text, color, stream=None):
+    """Apply one semantic ANSI color when the destination supports it."""
+    if not should_use_color(stream=stream):
+        return text
+    return f"{color}{text}\033[0m"
 
 
 def format_section_heading(title):

@@ -19,7 +19,7 @@ from policy_config import (
     load_policy_config,
     save_policy_config,
 )
-from reporting import print_output_files, print_section_heading
+from reporting import print_output_files, print_section_heading, should_use_color
 from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
@@ -286,7 +286,7 @@ def discover_devices_to_scan(args, mac_lookup):
         if args.resolve_hostnames:
             print("Resolving hostname...")
             enrich_devices_with_hostnames([target_device])
-        print(f"Scanning target IP: {Fore.YELLOW}{args.target}{Style.RESET_ALL}")
+        print(f"Scanning target IP: {args.target}")
         scan_context["cidr"] = args.target
         return (
             [target_device],
@@ -296,8 +296,8 @@ def discover_devices_to_scan(args, mac_lookup):
     interface, ip_range = resolve_scan_target(args.iface, args.cidr)
     scan_context["interface"] = interface
     scan_context["cidr"] = ip_range
-    print(f"Using interface: {Fore.YELLOW}{interface}{Style.RESET_ALL}")
-    print(f"Scanning IP range: {Fore.YELLOW}{ip_range}{Style.RESET_ALL}")
+    print(f"Using interface: {interface}")
+    print(f"Scanning IP range: {ip_range}")
     print("\nDiscovering devices on the network...")
     discovered_devices = arp_scan(ip_range, interface)
     if not discovered_devices:
@@ -520,7 +520,7 @@ def render_empty_scan_outcome(
         diff_summary=diff_summary,
         policy_findings=policy_findings,
     )
-    print(f"\n{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
+    print("\nNo devices found on the network.")
     if not getattr(args, "target", None) or getattr(args, "show_changes", False):
         print_port_diff_summary(diff_summary)
     if policy_findings:
@@ -621,7 +621,7 @@ def main():
     """Main function to run the port scanner."""
     global CSV_OUTPUT_FILE, MARKDOWN_OUTPUT_FILE
     exit_code = 0
-    init(autoreset=True)
+    init(autoreset=True, strip=not should_use_color(sys.stdout))
     args = parse_args()
     try:
         policy_config = load_policy_config(getattr(args, "config", None))

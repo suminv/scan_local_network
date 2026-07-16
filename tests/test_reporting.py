@@ -9,6 +9,10 @@ import reporting
 
 
 class ReportingTests(unittest.TestCase):
+    class TtyStream:
+        def isatty(self):
+            return True
+
     def test_shared_console_style_formats_headings_and_statuses(self):
         self.assertEqual(reporting.format_section_heading("=== Scan Results ==="), "--- Scan Results ---")
         self.assertEqual(reporting.format_section_heading("Wi-Fi Debug"), "--- Wi-Fi Debug ---")
@@ -17,6 +21,16 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(reporting.format_status_marker("alert"), "[!]")
         self.assertEqual(reporting.truncate_text("short", 8), "short")
         self.assertEqual(reporting.truncate_text("very long value", 8), "very lo…")
+
+    def test_color_is_enabled_only_for_tty_without_no_color(self):
+        tty = self.TtyStream()
+
+        self.assertTrue(reporting.should_use_color(stream=tty, environ={}))
+        self.assertFalse(
+            reporting.should_use_color(stream=tty, environ={"NO_COLOR": "1"})
+        )
+        self.assertFalse(reporting.should_use_color(stream=StringIO(), environ={}))
+        self.assertEqual(reporting.colorize("[OK]", "\033[32m", stream=StringIO()), "[OK]")
 
     def test_scan_summary_omits_empty_fields_and_aligns_status(self):
         lines = reporting.format_scan_summary_lines(
