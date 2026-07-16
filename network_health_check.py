@@ -78,6 +78,7 @@ DNS_CLASSIFICATION_LABELS = {
     "local_private": "private/local DNS",
     "on_link": "on-link DNS",
     "directly_reachable": "on-link DNS",
+    "resolver_interface_mismatch": "DNS on different interface",
     "public_upstream": "public upstream DNS",
     "invalid": "invalid DNS",
     "unknown": "unknown",

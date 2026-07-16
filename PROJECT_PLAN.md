@@ -104,9 +104,8 @@ Current role:
 
 Remaining work:
 
-- add environment-aware interpretation so `home`, `guest`, and `travel` expectations can differ without changing the underlying probes
 - continue refining the operator-facing wording now that the overall trust/path explanation exists
-- keep refining dual-connectivity, mesh instability, and route/path diagnostics
+- keep refining mesh instability and route/path diagnostics from real-world reports
 - expand macOS-first Wi-Fi environment detail where the platform allows it
 - improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
@@ -122,7 +121,7 @@ Backlog:
 
 Primary focus: `network-health-check`
 
-1. Environment-aware trust interpretation for `home`, `guest`, and `travel`.
+1. Continue environment-aware trust interpretation for `home`, `guest`, `travel`, and `public` from real-world reports.
 2. Better operator output and shorter focus-mode wording.
 3. Continue safe local-segment reasoning without broad active probing.
 4. Improve route/path interpretation for dual-connected and unstable Wi-Fi cases.
@@ -199,6 +198,10 @@ Completed:
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
 - `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
 - `network-health-check` now carries separate profile expectations for `home`, `guest`, and `travel` into local exposure, client isolation, and overall trust details.
+- `network-health-check` now supports a separate `public` profile and applies profile-aware interpretation to peer visibility, client isolation, and gateway exposure.
+- `network-health-check` now reports current macOS Wi-Fi signal, noise, SNR quality, channel width, security, and PHY details when the platform exposes them, with a compact diagnostic view for incomplete CoreWLAN results.
+- DNS diagnostics now compare resolver interface metadata with the default-route interface and distinguish likely VPN or split-DNS routing from hard resolution failures.
+- README now includes an operator checklist for guest, travel, and public Wi-Fi connections.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - `network-health-check` focus and alert-only output now use tighter operator-oriented summaries that suppress routine OK detail and keep notice-only reports compact.
 - `network-health-check` focus and alert-only output now prioritize notice-only findings, avoid duplicate notice summary lines, and truncate long notice lists with an explicit remaining count.

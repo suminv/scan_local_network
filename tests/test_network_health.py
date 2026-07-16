@@ -2081,6 +2081,26 @@ Wi-Fi:
         self.assertIn("hint level: gateway_dns_expected", output)
         self.assertIn("resolver profile: gateway_dns", output)
 
+    def test_format_dns_environment_uses_readable_route_mismatch_label(self):
+        lines = network_health_check.format_dns_environment_details(
+            {
+                "nameservers": ["10.0.0.53"],
+                "analysis": {
+                    "classifications": [
+                        {
+                            "server": "10.0.0.53",
+                            "classification": "resolver_interface_mismatch",
+                        }
+                    ],
+                    "risks": [],
+                },
+                "source": "scutil",
+            }
+        )
+
+        self.assertIn("    - 10.0.0.53 [DNS on different interface]", lines)
+        self.assertNotIn("resolver_interface_mismatch", "\n".join(lines))
+
     def test_print_health_report_renders_captive_trust_reasoning_check(self):
         buffer = StringIO()
         checks = [
