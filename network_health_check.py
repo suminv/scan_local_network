@@ -6,6 +6,7 @@ import sys
 from alert_delivery import build_alert_payload, send_webhook_payload
 from arp_scanner import resolve_scan_target
 from colorama import Fore, Style, init
+from cli_progress import ProgressIndicator
 from models import build_scan_context
 from network_health import (
     DEFAULT_DNS_DOMAINS,
@@ -87,6 +88,8 @@ WIFI_STATUS_LABELS = {
     "spairport_status_connected": "connected",
     "spairport_status_inactive": "inactive",
 }
+_health_progress_indicator = None
+_wifi_stability_progress_indicator = None
 
 
 def format_gateway_identity_details(details):
@@ -737,26 +740,52 @@ def get_focus_detail_limit(check):
 
 
 def print_wifi_stability_progress(current_step, total_steps, gateway_ip):
-    message = (
-        f"\rRunning Wi-Fi stability diagnostics: sample {current_step}/{total_steps} "
-        f"against gateway {gateway_ip}..."
-    )
-    sys.stderr.write(message)
+    global _wifi_stability_progress_indicator
+    if (
+        _wifi_stability_progress_indicator is None
+        or _wifi_stability_progress_indicator.total != total_steps
+    ):
+        _wifi_stability_progress_indicator = ProgressIndicator(
+            "Wi-Fi stability", total_steps, unit="samples"
+        )
     if current_step >= total_steps:
-        sys.stderr.write("\n")
-    sys.stderr.flush()
+        _wifi_stability_progress_indicator.finish(f"gateway {gateway_ip}")
+        _wifi_stability_progress_indicator = None
+    else:
+        _wifi_stability_progress_indicator.update(
+            current_step,
+            f"gateway {gateway_ip}",
+        )
 
 
 def print_health_progress(stage, current_step, total_steps):
-    """Render a lightweight progress indicator without polluting the report."""
-    sys.stderr.write(f"\rChecking network health [{current_step}/{total_steps}] · {stage}...")
-    sys.stderr.flush()
+    """Render the shared progress indicator without polluting the report."""
+    global _health_progress_indicator
+    if (
+        _health_progress_indicator is None
+        or _health_progress_indicator.total != total_steps
+    ):
+        _health_progress_indicator = ProgressIndicator(
+            "Network health", total_steps, unit="steps"
+        )
+    if current_step < total_steps:
+        _health_progress_indicator.update(current_step, stage, force=True)
 
 
 def finish_health_progress():
-    """Terminate the transient progress line before the final report."""
-    sys.stderr.write("\rNetwork health checks completed.                          \n")
-    sys.stderr.flush()
+    """Complete the shared progress line before the final report."""
+    global _health_progress_indicator
+    if _health_progress_indicator is not None:
+        _health_progress_indicator.finish("completed")
+        _health_progress_indicator = None
+
+
+def fail_health_progress():
+    """Terminate the shared progress line when collection fails."""
+    global _health_progress_indicator
+    if _health_progress_indicator is not None:
+        _health_progress_indicator.fail()
+        _health_progress_indicator = None
 
 
 def print_health_report(checks, summary, scan_context=None):
@@ -1196,7 +1225,10 @@ def main():
     try:
         with quiet_output:
             scan_context, checks, summary, payload = run_health_check_collection(args)
-    finally:
+    except Exception:
+        fail_health_progress()
+        raise
+    else:
         finish_health_progress()
     with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
         save_json_report(output_paths["json"], payload, label="Network health report")

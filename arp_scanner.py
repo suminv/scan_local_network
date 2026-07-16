@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from datetime import datetime
 
 import netifaces
@@ -15,6 +16,7 @@ from scapy.sendrecv import srp
 from tabulate import tabulate
 
 from alert_delivery import build_alert_payload, send_webhook_payload
+from cli_progress import ProgressIndicator
 from hostname_lookup import enrich_devices_with_hostnames
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
@@ -1648,13 +1650,18 @@ def main():
             db_conn, scan_run_id
         )
         print(f"Scanning {ip_range}")
+        progress = ProgressIndicator("ARP scan", 3, unit="steps")
+        progress.update(0, "discovering devices", force=True)
+        started_at = time.monotonic()
         with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
             scanned_devices = arp_scan(ip_range, interface)
+        progress.update(1, f"found {len(scanned_devices)} devices", force=True)
         if scanned_devices:
             with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
                 table_data, json_output, new_devices = process_scan_results(
                     scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
                 )
+            progress.update(2, "preparing results", force=True)
             save_scan_run_devices(db_conn, scan_run_id, json_output)
             profiles = upsert_device_profiles(db_conn, json_output, scan_run_id)
             diff_summary = build_scan_diff(
@@ -1667,6 +1674,7 @@ def main():
             )
             diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
+            progress.finish(f"completed in {time.monotonic() - started_at:.1f}s")
             with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
                 save_and_report_results(
                     db_conn,
@@ -1710,6 +1718,7 @@ def main():
             )
             diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
+            progress.finish(f"completed in {time.monotonic() - started_at:.1f}s")
             if args.alerts_only:
                 print_alert_summary(diff_summary)
                 if has_alerts(diff_summary):
@@ -1727,6 +1736,8 @@ def main():
             if args.verbose:
                 print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
+        if "progress" in locals() and not progress.finished:
+            progress.fail()
         finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise
     finally:

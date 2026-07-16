@@ -287,6 +287,7 @@ class PortScanTests(unittest.TestCase):
             "mac": "aa:aa:aa:aa:aa:aa",
             "vendor": "Vendor A",
         }
+        progress_calls = []
 
         with mock.patch("port_scan.scan_single_port", return_value=443):
             with mock.patch(
@@ -300,7 +301,13 @@ class PortScanTests(unittest.TestCase):
                     },
                 },
             ):
-                result = port_scan.scan_ports_for_device(device, [443])
+                result = port_scan.scan_ports_for_device(
+                    device,
+                    [443],
+                    progress_callback=lambda current, total, ip: progress_calls.append(
+                        (current, total, ip)
+                    ),
+                )
 
         self.assertEqual(
             result["open_ports"],
@@ -316,6 +323,7 @@ class PortScanTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(progress_calls, [(1, 1, "192.168.2.10")])
 
     def test_get_service_details_falls_back_to_plaintext_when_tls_handshake_fails(self):
         with mock.patch(

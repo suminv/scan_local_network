@@ -79,6 +79,16 @@ sudo ./venv/bin/python port_scan.py
 ./venv/bin/python network_health_check.py
 ```
 
+### Consistent Progress Indicators
+
+`scan-arp`, `scan-ports`, and `scan-health` use the same compact progress format:
+
+```text
+Port scan [████████░░░░░░░░░░] 44% · 4400/9999 ports · 192.168.2.45
+```
+
+The indicator is written to `stderr`, so redirected reports and machine-readable `stdout` remain clean. In an interactive terminal it updates in place. In redirected logs, high-frequency counter updates are suppressed while meaningful stage changes and the final completion line are retained. Port scans count ports for a single target and completed devices for a subnet scan; ARP and network-health checks show their current processing stage.
+
 ### 1. ARP Scanner (`scan-arp`)
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.

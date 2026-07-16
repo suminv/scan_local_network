@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import arp_scanner
 from alert_delivery import build_alert_payload, send_webhook_payload
+from cli_progress import ProgressIndicator
 from colorama import Fore, Style, init
 from models import build_device_snapshot, build_port_snapshot, build_scan_context
 from policy_config import (
@@ -21,7 +22,6 @@ from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
 from scapy.sendrecv import sr1, srp
-from tqdm import tqdm
 
 from arp_scanner import (
     create_scan_run,
@@ -78,7 +78,6 @@ DEFAULT_PORTS = [22, 80, 443, 3000, 5000, 8000, 8080, 8443]
 MAX_WORKERS = 20
 MIN_PORT = 1
 MAX_PORT = 65535
-PORT_PROGRESS_THRESHOLD = 50
 JSON_OUTPUT_FILE = "port_scan_result.json"
 CSV_OUTPUT_FILE = None
 MARKDOWN_OUTPUT_FILE = None
@@ -127,7 +126,7 @@ def scan_single_port(ip, port):
     return None
 
 
-def scan_ports_for_device(device, ports, show_port_progress=False):
+def scan_ports_for_device(device, ports, progress_callback=None):
     """Scans ports, and for open ones, tries to identify the service."""
     ip = device["ip"]
     open_ports_info = []
@@ -140,16 +139,12 @@ def scan_ports_for_device(device, ports, show_port_progress=False):
             executor.submit(scan_single_port, ip, port): port for port in ports
         }
         open_ports = []
-        for future in tqdm(
-            as_completed(future_to_port),
-            total=len(future_to_port),
-            desc=f"Probing {ip}",
-            unit="port",
-            disable=not show_port_progress,
-        ):
+        for completed, future in enumerate(as_completed(future_to_port), start=1):
             result = future.result()
             if result is not None:
                 open_ports.append(result)
+            if progress_callback is not None:
+                progress_callback(completed, len(future_to_port), ip)
 
     # Step 2: For open ports, try to get service banners
     if open_ports:
@@ -297,8 +292,8 @@ def discover_devices_to_scan(args, mac_lookup):
 def run_port_scan(
     devices_to_scan,
     ports_to_scan,
-    show_progress=True,
-    show_port_progress=False,
+    progress_callback=None,
+    progress_by_port=False,
 ):
     """Run port scanning for all selected devices."""
     results = []
@@ -308,17 +303,15 @@ def run_port_scan(
                 scan_ports_for_device,
                 device,
                 ports_to_scan,
-                show_port_progress=show_port_progress,
+                progress_callback=(progress_callback if progress_by_port else None),
             ): device
             for device in devices_to_scan
         }
-        for future in tqdm(
-            as_completed(future_to_device),
-            total=len(devices_to_scan),
-            desc="Scanning Devices",
-            disable=not show_progress,
-        ):
+        for completed, future in enumerate(as_completed(future_to_device), start=1):
             results.append(future.result())
+            if progress_callback is not None and not progress_by_port:
+                device = future_to_device[future]
+                progress_callback(completed, len(devices_to_scan), device["ip"])
     return results
 
 
@@ -626,15 +619,27 @@ def main():
             f"{format_ports_for_display(ports_to_scan)}"
         )
         started_at = time.monotonic()
-        results = run_port_scan(
-            devices_to_scan,
-            ports_to_scan,
-            show_progress=args.verbose and len(devices_to_scan) > 1,
-            show_port_progress=(
-                bool(args.target) and len(ports_to_scan) > PORT_PROGRESS_THRESHOLD
-            ),
+        progress_by_port = bool(args.target)
+        progress = ProgressIndicator(
+            "Port scan",
+            len(ports_to_scan) if progress_by_port else len(devices_to_scan),
+            unit="ports" if progress_by_port else "devices",
         )
-        print(f"Completed in {time.monotonic() - started_at:.1f}s")
+        progress.update(0, target_label, force=True)
+        try:
+            results = run_port_scan(
+                devices_to_scan,
+                ports_to_scan,
+                progress_callback=lambda current, total, detail: progress.update(
+                    current, detail
+                ) if current < total else None,
+                progress_by_port=progress_by_port,
+            )
+        except Exception:
+            progress.fail()
+            raise
+        elapsed = time.monotonic() - started_at
+        progress.finish(f"completed in {elapsed:.1f}s")
         save_scan_run_ports(db_conn, scan_run_id, results)
         profiles = upsert_device_profiles(db_conn, results, scan_run_id)
         policy_findings = (
@@ -694,6 +699,8 @@ def main():
         if args.verbose:
             print(f"\nScan run recorded with id: {scan_run_id}")
     except Exception:
+        if "progress" in locals() and not progress.finished:
+            progress.fail()
         if "scan_run_id" in locals():
             finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise

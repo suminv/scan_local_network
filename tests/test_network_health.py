@@ -1702,9 +1702,10 @@ Wi-Fi:
             network_health_check.print_health_progress("gateway reachability", 2, 5)
             network_health_check.finish_health_progress()
         output = buffer.getvalue()
-        self.assertIn("Checking network health [2/5]", output)
+        self.assertIn("Network health [", output)
+        self.assertIn("40% · 2/5 steps", output)
         self.assertIn("gateway reachability", output)
-        self.assertIn("Network health checks completed.", output)
+        self.assertIn("100% · 5/5 steps · completed", output)
 
     def test_run_health_check_collection_builds_payload_from_context_and_checks(self):
         args = mock.Mock(
@@ -2488,8 +2489,10 @@ Wi-Fi:
             network_health_check.print_wifi_stability_progress(2, 2, "192.168.2.254")
 
         output = buffer.getvalue()
-        self.assertIn("\rRunning Wi-Fi stability diagnostics: sample 1/2", output)
-        self.assertIn("sample 2/2", output)
+        self.assertNotIn("1/2", output)
+        self.assertIn("Wi-Fi stability [", output)
+        self.assertIn("100% · 2/2 samples", output)
+        self.assertIn("gateway 192.168.2.254", output)
         self.assertTrue(output.endswith("\n"))
 
     def test_print_health_report_shows_restricted_nearby_scan_without_fake_network_listing(self):
