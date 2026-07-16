@@ -28,6 +28,25 @@ def format_status_marker(status):
     return STATUS_MARKERS.get(str(status).lower(), f"[{str(status).upper()}]")
 
 
+def format_scan_summary_lines(fields, status=None):
+    """Format available scan metadata into a compact aligned summary."""
+    rows = [(str(label), str(value)) for label, value in fields if value not in (None, "")]
+    if status:
+        level, message = status
+        rows.append(("Status", f"{format_status_marker(level)} {message}"))
+    if not rows:
+        return []
+    label_width = max(len(label) for label, _ in rows)
+    return [f"{label.ljust(label_width)}: {value}" for label, value in rows]
+
+
+def print_scan_summary(fields, status=None, *, leading_blank=False):
+    """Print the shared top-level summary used by all scanners."""
+    print_section_heading("Scan Summary", leading_blank=leading_blank)
+    for line in format_scan_summary_lines(fields, status=status):
+        print(line)
+
+
 def build_report_payload(snapshot_key, snapshot, diff_key, diff_summary):
     """Build a consistent JSON payload for scan reports."""
     return {

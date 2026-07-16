@@ -403,7 +403,11 @@ class PortScanTests(unittest.TestCase):
             )
 
         output = buffer.getvalue()
-        self.assertIn("2 devices scanned | 2 with open ports | 3 open ports total", output)
+        self.assertIn("--- Scan Summary ---", output)
+        self.assertIn("Devices : 2 scanned · 2 with open ports", output)
+        self.assertIn("Findings: 3 open ports", output)
+        self.assertIn("Status  : [OK] no actionable findings", output)
+        self.assertIn("--- Open Ports ---", output)
         self.assertIn("192.168.2.10  envoy.local  Enphase Energy  00:1d:c0:79:ee:86", output)
         self.assertIn("22/tcp", output)
         self.assertIn("SSH", output)

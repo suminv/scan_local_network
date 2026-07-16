@@ -457,25 +457,49 @@ def resolve_report_output_paths(args):
     }
 
 
-def render_port_scan_outcome(args, results, diff_summary, policy_findings=None):
+def render_port_scan_outcome(
+    args,
+    results,
+    diff_summary,
+    policy_findings=None,
+    *,
+    target=None,
+    duration_seconds=None,
+):
     """Render scan output and return the appropriate process exit code."""
     if args.alerts_only:
         print_port_alert_summary(results, diff_summary)
         return 2 if (has_port_alerts(results, diff_summary) or policy_findings) else 0
 
-    print_port_scan_results(results, output_format=args.output)
-    if not getattr(args, "target", None) or getattr(args, "show_changes", False):
+    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    print_port_scan_results(
+        results,
+        output_format=args.output,
+        target=target,
+        duration_seconds=duration_seconds,
+        diff_summary=diff_summary if show_changes else None,
+        policy_findings=policy_findings,
+    )
+    if show_changes:
         print_port_diff_summary(diff_summary)
     return 0
 
 
-def render_empty_scan_outcome(args, diff_summary, policy_findings=None):
+def render_empty_scan_outcome(
+    args, diff_summary, policy_findings=None, *, target=None
+):
     """Render the empty-discovery case and return the appropriate process exit code."""
     if args.alerts_only:
         print_port_alert_summary([], diff_summary)
         return 2 if (has_port_alerts([], diff_summary) or policy_findings) else 0
 
-    print(f"{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
+    print_port_scan_summary(
+        [],
+        target=target,
+        diff_summary=diff_summary,
+        policy_findings=policy_findings,
+    )
+    print(f"\n{Fore.YELLOW}No devices found on the network.{Style.RESET_ALL}")
     if not getattr(args, "target", None) or getattr(args, "show_changes", False):
         print_port_diff_summary(diff_summary)
     return 0
@@ -630,7 +654,11 @@ def main():
         previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
             diff_summary = build_port_scan_diff(previous_ports, [], observed_macs=[])
-            exit_code = render_empty_scan_outcome(args, diff_summary)
+            exit_code = render_empty_scan_outcome(
+                args,
+                diff_summary,
+                target=args.target or scan_context["cidr"],
+            )
             finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
             print(f"\nScan run recorded with id: {scan_run_id}")
             sys.exit(exit_code)
@@ -686,7 +714,14 @@ def main():
             )
             exit_code = 0
         else:
-            exit_code = render_port_scan_outcome(args, results, diff_summary, policy_findings)
+            exit_code = render_port_scan_outcome(
+                args,
+                results,
+                diff_summary,
+                policy_findings,
+                target=target_label,
+                duration_seconds=elapsed,
+            )
         if policy_findings and not args.profile:
             print_section_heading("Policy Findings", leading_blank=True)
             for finding in policy_findings:

@@ -16,6 +16,21 @@ class ReportingTests(unittest.TestCase):
         self.assertEqual(reporting.format_status_marker("notice"), "[~]")
         self.assertEqual(reporting.format_status_marker("alert"), "[!]")
 
+    def test_scan_summary_omits_empty_fields_and_aligns_status(self):
+        lines = reporting.format_scan_summary_lines(
+            [("Target", "192.168.2.0/24"), ("Duration", None), ("Devices", 27)],
+            status=("notice", "review changes"),
+        )
+
+        self.assertEqual(
+            lines,
+            [
+                "Target : 192.168.2.0/24",
+                "Devices: 27",
+                "Status : [~] review changes",
+            ],
+        )
+
     def test_build_report_payload_uses_consistent_keys(self):
         payload = reporting.build_report_payload(
             "devices",

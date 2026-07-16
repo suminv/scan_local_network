@@ -6,6 +6,7 @@ from reporting import (
     build_report_payload,
     format_section_heading,
     print_change_report,
+    print_scan_summary,
     render_markdown_table,
     save_csv_report,
     save_json_report,
@@ -564,13 +565,66 @@ def build_port_observations(results):
     return observations
 
 
-def print_port_scan_summary(results):
+def print_port_scan_summary(
+    results,
+    *,
+    target=None,
+    duration_seconds=None,
+    diff_summary=None,
+    policy_findings=None,
+):
     """Print the shared top-line summary for all console formats."""
-    print(f"\n{Fore.CYAN}{format_section_heading('Scan Results')}{Style.RESET_ALL}")
     open_device_count = sum(1 for device in results if device.get("open_ports"))
     open_port_count = count_open_ports(results)
-    print(
-        f"{len(results)} devices scanned | {open_device_count} with open ports | {open_port_count} open ports total"
+    change_parts = []
+    if diff_summary is not None:
+        change_specs = [
+            ("new_ports", "new"),
+            ("closed_ports", "closed"),
+            ("service_changes", "service"),
+            ("tls_changes", "TLS"),
+            ("ssh_changes", "SSH"),
+            ("http_changes", "HTTP"),
+        ]
+        change_parts = [
+            f"{len(diff_summary.get(key, []))} {label}"
+            for key, label in change_specs
+            if diff_summary.get(key)
+        ]
+    actionable = has_port_alerts(results, diff_summary) or bool(policy_findings)
+    print_scan_summary(
+        [
+            ("Target", target),
+            (
+                "Duration",
+                f"{duration_seconds:.1f}s" if duration_seconds is not None else None,
+            ),
+            (
+                "Devices",
+                f"{len(results)} scanned · {open_device_count} with open ports",
+            ),
+            ("Findings", f"{open_port_count} open ports"),
+            (
+                "Changes",
+                " · ".join(change_parts) if change_parts else (
+                    "none" if diff_summary is not None else None
+                ),
+            ),
+        ],
+        status=(
+            ("notice", "no devices discovered")
+            if not results
+            else (
+                ("alert", "review actionable findings")
+                if actionable
+                else (
+                    ("notice", "review detected changes")
+                    if change_parts
+                    else ("ok", "no actionable findings")
+                )
+            )
+        ),
+        leading_blank=True,
     )
 
 
@@ -704,9 +758,24 @@ def print_focus_port_scan_results(results):
         )
 
 
-def print_port_scan_results(results, output_format=DEFAULT_OUTPUT_FORMAT):
+def print_port_scan_results(
+    results,
+    output_format=DEFAULT_OUTPUT_FORMAT,
+    *,
+    target=None,
+    duration_seconds=None,
+    diff_summary=None,
+    policy_findings=None,
+):
     """Print human-readable port scan results."""
-    print_port_scan_summary(results)
+    print_port_scan_summary(
+        results,
+        target=target,
+        duration_seconds=duration_seconds,
+        diff_summary=diff_summary,
+        policy_findings=policy_findings,
+    )
+    print(f"\n{Fore.CYAN}{format_section_heading('Open Ports')}{Style.RESET_ALL}")
     if output_format == "table":
         print_table_port_scan_results(results)
         return

@@ -2,6 +2,7 @@ import argparse
 from contextlib import nullcontext, redirect_stdout
 from io import StringIO
 import sys
+import time
 
 from alert_delivery import build_alert_payload, send_webhook_payload
 from arp_scanner import resolve_scan_target
@@ -19,6 +20,7 @@ from network_health import (
 from reporting import (
     format_section_heading,
     format_status_marker,
+    print_scan_summary,
     render_markdown_table,
     save_json_report,
     save_markdown_report,
@@ -721,6 +723,40 @@ def format_network_profile_label(scan_context):
     return profile
 
 
+def build_health_summary_status(summary, assessment):
+    """Map health counts and trust assessment to the shared summary status."""
+    status_level = (
+        "alert" if summary.get("alert_checks") else (
+            "notice" if summary.get("notice_checks") else "ok"
+        )
+    )
+    status_message = assessment["level"]
+    if summary.get("notice_checks") and not summary.get("alert_checks"):
+        status_message += f" · review {summary['notice_checks']} notice(s)"
+    return status_level, status_message
+
+
+def build_health_scan_summary_fields(scan_context, summary, *, include_ok):
+    """Build relevant aligned fields for full and focus health reports."""
+    scan_context = scan_context or {}
+    duration_seconds = scan_context.get("duration_seconds")
+    return [
+        ("Target", scan_context.get("cidr")),
+        ("Interface", scan_context.get("interface")),
+        ("Profile", format_network_profile_label(scan_context)),
+        (
+            "Duration",
+            f"{duration_seconds:.1f}s" if duration_seconds is not None else None,
+        ),
+        (
+            "Checks",
+            format_health_count_summary(summary, include_ok=include_ok).removeprefix(
+                "Checks: "
+            ),
+        ),
+    ]
+
+
 def format_focus_recommendation(summary, assessment, scan_context=None):
     """Return one concise action line for the operator-facing focus report."""
     profile = format_network_profile_label(scan_context)
@@ -796,12 +832,10 @@ def fail_health_progress():
 
 def print_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary, scan_context=scan_context)
-    print(format_section_heading("Network Health Check"))
-    network_profile = format_network_profile_label(scan_context)
-    if network_profile:
-        print(f"Network profile: {network_profile}")
-    print(format_health_count_summary(summary, include_ok=True))
-    print(f"Trust assessment: {assessment['level']}")
+    print_scan_summary(
+        build_health_scan_summary_fields(scan_context, summary, include_ok=True),
+        status=build_health_summary_status(summary, assessment),
+    )
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
     for group_title, group_rows in group_checks(checks):
@@ -815,12 +849,10 @@ def print_health_report(checks, summary, scan_context=None):
 
 def print_focus_health_report(checks, summary, scan_context=None):
     assessment = build_trust_assessment(summary, scan_context=scan_context)
-    print(format_section_heading("Network Health Focus"))
-    network_profile = format_network_profile_label(scan_context)
-    if network_profile:
-        print(f"Network profile: {network_profile}")
-    print(format_health_count_summary(summary))
-    print(f"Trust assessment: {assessment['level']}")
+    print_scan_summary(
+        build_health_scan_summary_fields(scan_context, summary, include_ok=False),
+        status=build_health_summary_status(summary, assessment),
+    )
     print(assessment["summary"])
     print(format_top_alert_summary(summary))
     print(format_focus_recommendation(summary, assessment, scan_context=scan_context))
@@ -972,23 +1004,29 @@ def format_wifi_security_label(value):
 
 
 def print_alert_report(summary, scan_context=None):
-    print(format_section_heading("Network Health Alerts"))
     network_profile = format_network_profile_label(scan_context)
-    if network_profile:
-        print(f"Network profile: {network_profile}")
     alerts = summary["alerts"]
     report_summary = dict(summary)
     report_summary.setdefault("alert_checks", len(alerts))
     report_summary.setdefault("notice_checks", len(report_summary.get("notices", [])))
-    if "total_checks" in report_summary:
-        print(format_health_count_summary(report_summary))
+    assessment = build_trust_assessment(report_summary, scan_context=scan_context)
+    print_scan_summary(
+        [
+            ("Profile", network_profile),
+            (
+                "Checks",
+                format_health_count_summary(report_summary).removeprefix("Checks: ")
+                if "total_checks" in report_summary
+                else None,
+            ),
+        ],
+        status=build_health_summary_status(report_summary, assessment),
+    )
     if not alerts:
         notices = summary.get("notices", [])
         if notices:
-            assessment = build_trust_assessment(report_summary, scan_context=scan_context)
             prioritized_notices = prioritize_findings(notices)
             print("No actionable health alerts detected.")
-            print(f"Trust assessment: {assessment['level']}")
             print(assessment["summary"])
             notice_summary = format_top_notice_summary(summary)
             if notice_summary:
@@ -1001,8 +1039,6 @@ def print_alert_report(summary, scan_context=None):
         else:
             print("No actionable health alerts detected.")
         return
-    assessment = build_trust_assessment(report_summary, scan_context=scan_context)
-    print(f"Trust assessment: {assessment['level']}")
     print(assessment["summary"])
     print(format_top_alert_summary(report_summary))
     print(f"Alerts: {len(alerts)}")
@@ -1152,6 +1188,7 @@ def normalize_wifi_stability_seconds(raw_value):
 
 def run_health_check_collection(args):
     """Collect scan context, run health checks, and build summary/payload data."""
+    started_at = time.monotonic()
     interface, cidr = resolve_scan_target(args.iface, args.cidr)
     scan_context = build_scan_context(
         interface=interface,
@@ -1171,6 +1208,7 @@ def run_health_check_collection(args):
         ),
         progress_callback=print_health_progress,
     )
+    scan_context["duration_seconds"] = time.monotonic() - started_at
     summary = build_health_summary(checks)
     trust_assessment = build_trust_assessment(summary, scan_context=scan_context)
     payload = {

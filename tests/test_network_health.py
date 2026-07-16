@@ -1622,7 +1622,7 @@ Wi-Fi:
         with redirect_stdout(buffer):
             network_health_check.print_alert_report({"alerts": []}, scan_context={"network_profile": "travel"})
 
-        self.assertIn("Network profile: travel", buffer.getvalue())
+        self.assertIn("Profile: travel", buffer.getvalue())
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
 
     def test_print_alert_report_includes_notices_without_escalating(self):
@@ -1645,13 +1645,13 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("No actionable health alerts detected.", output)
         self.assertIn("Checks: 3 | Notices: 1 | Alerts: 0", output)
-        self.assertIn("Trust assessment: trusted", output)
+        self.assertIn("Status: [~] trusted · review 1 notice(s)", output)
         self.assertIn("No hard alerts detected. 1 notice(s) are present for review.", output)
         self.assertIn("Notice areas: Gateway exposure (1 total)", output)
         self.assertIn("Gateway exposure", output)
         self.assertIn("Review notices:", output)
         self.assertIn("- Gateway exposure: Private/local gateway exposes 2 local web/admin service(s) to the client on 192.168.2.254", output)
-        self.assertNotIn("[~]", output)
+        self.assertIn("[~]", output)
 
     def test_print_alert_report_surfaces_suspicious_notice_only_guest_context(self):
         buffer = StringIO()
@@ -1669,8 +1669,8 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Checks: 4 | Notices: 2 | Alerts: 0", output)
-        self.assertIn("Trust assessment: suspicious", output)
+        self.assertIn("Checks : 4 | Notices: 2 | Alerts: 0", output)
+        self.assertIn("Status : [~] suspicious · review 2 notice(s)", output)
         self.assertIn("local segment looks more exposed than expected for a guest network", output)
         self.assertIn("No actionable health alerts detected.", output)
 
@@ -1733,6 +1733,8 @@ Wi-Fi:
         self.assertEqual(summary["alert_checks"], 0)
         self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
         self.assertEqual(run_checks.call_args.kwargs["network_profile"], "guest")
+        self.assertGreaterEqual(scan_context["duration_seconds"], 0)
+        self.assertEqual(payload["scan_context"]["duration_seconds"], scan_context["duration_seconds"])
 
     def test_print_alert_report_uses_human_labels(self):
         buffer = StringIO()
@@ -1757,9 +1759,9 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Network profile: guest", output)
-        self.assertIn("Checks: 5 | Notices: 0 | Alerts: 2", output)
-        self.assertIn("Trust assessment: untrusted", output)
+        self.assertIn("Profile: guest", output)
+        self.assertIn("Checks : 5 | Notices: 0 | Alerts: 2", output)
+        self.assertIn("Status : [!] untrusted", output)
         self.assertIn("2 alerts are active. Treat this network as untrusted.", output)
         self.assertIn("Risk summary: 2 alert(s) in Active path, HTTPS", output)
         self.assertIn("Alerts: 2", output)
@@ -1934,7 +1936,7 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Network:", output)
         self.assertIn("DNS:", output)
-        self.assertIn("Trust assessment: trusted", output)
+        self.assertIn("Status: [OK] trusted", output)
         self.assertIn("Risk summary: no active alerts", output)
         self.assertIn("resolver classes:", output)
         self.assertIn("[on-link DNS]", output)
@@ -2077,7 +2079,7 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Network profile: home", output)
+        self.assertIn("Profile: home", output)
         self.assertIn("DNS trust reasoning", output)
         self.assertIn("hint level: gateway_dns_expected", output)
         self.assertIn("resolver profile: gateway_dns", output)
@@ -2285,10 +2287,10 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("--- Network Health Focus ---", output)
-        self.assertIn("Network profile: guest", output)
-        self.assertIn("Checks: 2 | Notices: 1 | Alerts: 0", output)
-        self.assertIn("Trust assessment: trusted", output)
+        self.assertIn("--- Scan Summary ---", output)
+        self.assertIn("Profile: guest", output)
+        self.assertIn("Checks : 2 | Notices: 1 | Alerts: 0", output)
+        self.assertIn("Status : [~] trusted · review 1 notice(s)", output)
         self.assertIn("Risk summary: no hard alerts; 1 notice(s) in Wi-Fi environment", output)
         self.assertIn("Action: review the notices", output)
         self.assertIn("Wi-Fi environment", output)
@@ -2348,7 +2350,7 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Checks: 6 | Notices: 6 | Alerts: 0", output)
+        self.assertIn("Checks : 6 | Notices: 6 | Alerts: 0", output)
         self.assertIn("Notice areas: notice 0, notice 1, notice 2, notice 3 ... (6 total)", output)
         self.assertIn("... 3 more notice(s)", output)
 

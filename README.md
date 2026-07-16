@@ -103,6 +103,22 @@ Decorative closing borders are omitted so adjacent result, change, and alert sec
 - `[~]` — reviewable notice or uncertain condition
 - `[!]` — actionable alert or detected change
 
+### Unified Scan Summary
+
+The normal output starts with the same compact summary structure in every tool. Fields that do not apply to the current command are omitted:
+
+```text
+--- Scan Summary ---
+Target  : 192.168.2.0/24
+Duration: 6.9s
+Devices : 27 scanned · 20 with open ports
+Findings: 31 open ports
+Changes : 3 new · 5 closed
+Status  : [~] review detected changes
+```
+
+`scan-health` uses the same block for interface, network profile, check counts, and the final trust status. A target-only port scan does not show historical changes unless `--show-changes` was requested.
+
 ### 1. ARP Scanner (`scan-arp`)
 
 This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.

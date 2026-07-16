@@ -23,6 +23,7 @@ from reporting import (
     build_report_payload,
     format_status_marker,
     print_change_report,
+    print_scan_summary,
     print_section_heading,
     render_markdown_table,
     save_csv_report,
@@ -1520,14 +1521,53 @@ def maybe_send_arp_webhook(webhook_url, timeout, interface, cidr, diff_summary):
     )
     return send_webhook_payload(webhook_url, payload, timeout=timeout, label="ARP webhook alert")
 
-def print_summary(table_data, new_devices, diff_summary=None):
+def print_summary(
+    table_data,
+    new_devices,
+    diff_summary=None,
+    *,
+    target=None,
+    duration_seconds=None,
+):
     """Prints the final summary to the console.\n\n    Args:\n        table_data (list): A list of lists containing device information for the table.\n        new_devices (list): A list of new device dictionaries.\n    """
+    change_counts = build_arp_alert_summary(diff_summary)
+    total_changes = sum(
+        change_counts[key]
+        for key in [
+            "new_devices",
+            "returned_devices",
+            "missing_devices",
+            "ip_changes",
+            "hostname_changes",
+        ]
+    )
+    print_scan_summary(
+        [
+            ("Target", target),
+            (
+                "Duration",
+                f"{duration_seconds:.1f}s" if duration_seconds is not None else None,
+            ),
+            ("Devices", f"{len(table_data)} found"),
+            ("Changes", total_changes if diff_summary is not None else "no baseline"),
+        ],
+        status=(
+            ("alert", "review detected changes")
+            if total_changes
+            else (
+                ("notice", "baseline unavailable")
+                if diff_summary is None
+                else ("ok", "no device changes detected")
+            )
+        ),
+        leading_blank=True,
+    )
     if not table_data:
-        print_section_heading("Scan Results", leading_blank=True)
+        print_section_heading("Devices", leading_blank=True)
         print("No devices found.")
         print_diff_summary(diff_summary)
         return
-    print_section_heading("Scan Results")
+    print_section_heading("Devices", leading_blank=True)
     print(tabulate(table_data, headers=["IP", "Hostname", "MAC", "Vendor"]))
     print(f"\nTotal devices found: {len(table_data)}")
     print_section_heading("New Devices", leading_blank=True)
@@ -1684,7 +1724,13 @@ def main():
                 if has_alerts(diff_summary):
                     exit_code = 2
             else:
-                print_summary(table_data, new_devices, diff_summary)
+                print_summary(
+                    table_data,
+                    new_devices,
+                    diff_summary,
+                    target=ip_range,
+                    duration_seconds=time.monotonic() - started_at,
+                )
             maybe_send_arp_webhook(
                 args.webhook_url,
                 args.webhook_timeout,
@@ -1718,7 +1764,13 @@ def main():
                 if has_alerts(diff_summary):
                     exit_code = 2
             else:
-                print_summary([], [], diff_summary)
+                print_summary(
+                    [],
+                    [],
+                    diff_summary,
+                    target=ip_range,
+                    duration_seconds=time.monotonic() - started_at,
+                )
             maybe_send_arp_webhook(
                 args.webhook_url,
                 args.webhook_timeout,

@@ -767,6 +767,32 @@ class ArpScannerTests(unittest.TestCase):
         self.assertIn("old.local", output)
         self.assertIn("new.local", output)
 
+    def test_print_summary_includes_shared_scan_metadata(self):
+        buffer = StringIO()
+        diff_summary = {
+            "new_devices": [],
+            "returned_devices": [],
+            "missing_devices": [],
+            "ip_changes": [],
+            "hostname_changes": [],
+        }
+
+        with redirect_stdout(buffer):
+            arp_scanner.print_summary(
+                [],
+                [],
+                diff_summary,
+                target="192.168.2.0/24",
+                duration_seconds=2.4,
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("--- Scan Summary ---", output)
+        self.assertIn("Target  : 192.168.2.0/24", output)
+        self.assertIn("Duration: 2.4s", output)
+        self.assertIn("Devices : 0 found", output)
+        self.assertIn("Status  : [OK] no device changes detected", output)
+
     def test_print_alert_summary_renders_actionable_findings(self):
         buffer = StringIO()
         with redirect_stdout(buffer):
