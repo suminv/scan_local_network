@@ -466,6 +466,40 @@ The standard health check now also pings the default gateway briefly. This catch
 
 DNS diagnostics compare resolver interface metadata with the current default-route interface. A reachable resolver on another interface is reported as a notice rather than a hard alert because VPN and split-DNS configurations can legitimately produce this layout. Direct public upstream DNS and failed name resolution retain stronger alert semantics.
 
+#### Connecting to a non-home Wi-Fi network
+
+Use the `public` profile for an unknown network in a cafe, airport, train, or other public place. Use `travel` for hotel or temporary accommodation Wi-Fi, and `guest` for a guest network operated by an organization or a person you know.
+
+Run the full check immediately after connecting:
+
+```bash
+./scan-health --network-profile public --output full --debug-wifi
+```
+
+If the network opens a sign-in or terms page, complete that process without entering unrelated credentials, then run the same command again. The first result may legitimately report captive-portal behavior; the second result should show a normal Internet and HTTPS path.
+
+Review these parts of the report:
+
+- **Overall trust explanation**: start here for the combined local-network and Internet-path assessment. Treat `suspicious` or `untrusted` as a reason to inspect the detailed findings before using the connection.
+- **Wi-Fi environment**: confirm the expected SSID, security mode, signal quality, BSSID, and channel when macOS exposes them. An open network, WEP, or the same SSID advertised with inconsistent security deserves attention. An SSID alone does not prove that an access point is genuine.
+- **Gateway and Active path**: confirm that the default route uses the interface you expect. Unexpected Ethernet, VPN, or tunnel routing can change which network is actually carrying traffic.
+- **Local peer visibility and Client isolation hint**: visible unrelated peers are more important on `public` and `travel` profiles than at home. Visibility does not by itself prove an attack, but it means the network is not fully isolating clients.
+- **DNS servers and DNS trust reasoning**: check the listed nameservers, resolver profile, and resolution issues. Gateway DNS is common on public Wi-Fi. Direct public DNS may be intentional. `dns_route_mismatch` can be normal with a VPN or split DNS, but the other interface should be one you recognize. Failed lookups or public domains resolving only to private addresses require investigation.
+- **Captive portal reasoning**: a portal is expected before sign-in. Repeated interception after sign-in is not expected.
+- **HTTPS trust reasoning**: certificate-validated HTTPS probes should succeed after portal sign-in. DNS that looks normal does not compensate for TLS or certificate failures.
+
+A reassuring post-login result normally has successful HTTPS probes, normal public-domain resolution, no unexplained route/interface change, and no hard alerts. Notices can still be expected—for example, a VPN resolver on a tunnel interface or visible peers on a poorly isolated hotspot—but they should have an explanation that matches your setup.
+
+If the report shows unexplained HTTPS failures, public domains resolving to private addresses, an unknown DNS/tunnel interface, or persistent captive interception, avoid sensitive activity on that network. Disconnect or use a trusted cellular connection. If you intentionally use a VPN, connect it and run the check again to confirm that the route and DNS findings changed as expected.
+
+For intermittent signal, roaming, or packet-loss problems, add a short stability observation:
+
+```bash
+sudo ./scan-health --network-profile public --output full --wifi-stability-seconds 20
+```
+
+This health check is diagnostic evidence, not proof that a public network is safe. It does not inspect all traffic or authenticate the operator of the access point.
+
 **To print only actionable health alerts:**
 
 ```bash
