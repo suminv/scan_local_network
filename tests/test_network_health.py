@@ -200,6 +200,64 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["reachable_services"][0]["port"], 53)
         self.assertEqual(result["details"]["risky_services"], [])
 
+    def test_collect_gateway_exposure_returns_profile_neutral_observation(self):
+        probes = [
+            {"port": 53, "label": "DNS", "risk": False},
+            {"port": 443, "label": "HTTPS admin", "risk": True},
+        ]
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.1", "en0"),
+        ):
+            with mock.patch(
+                "network_health.probe_tcp_service",
+                side_effect=lambda host, port, timeout=2: port == 443,
+            ):
+                with mock.patch(
+                    "network_health.inspect_gateway_http_surface",
+                    return_value={"status_code": 200},
+                ):
+                    observation = network_health.collect_gateway_exposure(
+                        timeout=3,
+                        probes=probes,
+                    )
+
+        self.assertEqual(observation["gateway_ip"], "192.168.2.1")
+        self.assertTrue(observation["is_private_gateway"])
+        self.assertEqual(observation["reachable_services"][0]["port"], 443)
+        self.assertEqual(observation["risky_services"][0]["port"], 443)
+        self.assertNotIn("status", observation)
+        self.assertNotIn("network_profile", observation)
+
+    def test_analyze_gateway_exposure_is_profile_aware_without_probing(self):
+        observation = {
+            "gateway_ip": "192.168.2.1",
+            "interface": "en0",
+            "is_private_gateway": True,
+            "reachable_services": [
+                {"port": 443, "label": "HTTPS admin", "risk": True}
+            ],
+            "risky_services": [
+                {"port": 443, "label": "HTTPS admin", "risk": True}
+            ],
+        }
+
+        home = network_health.analyze_gateway_exposure(
+            observation,
+            network_profile="home",
+        )
+        public = network_health.analyze_gateway_exposure(
+            observation,
+            network_profile="public",
+        )
+
+        self.assertEqual(home["status"], "ok")
+        self.assertEqual(public["status"], "notice")
+        self.assertEqual(
+            home["details"]["reachable_services"],
+            observation["reachable_services"],
+        )
+
     def test_extract_html_title_returns_clean_title(self):
         title = network_health.extract_html_title(
             "<html><head><title>\n Router Admin \n</title></head></html>"
@@ -345,6 +403,64 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["visible_peers"][0]["ip"], "192.168.2.22")
         self.assertEqual(result["details"]["context_note"], "often normal on a private/home LAN")
+
+    def test_collect_local_peer_visibility_filters_to_active_private_segment(self):
+        arp_output = (
+            "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
+            "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+            "? (169.254.1.2) at aa:bb:cc:dd:ee:01 on en0 ifscope [ethernet]\n"
+            "? (10.0.0.8) at 11:22:33:44:55:66 on en1 ifscope [ethernet]\n"
+        )
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.1", "en0"),
+        ):
+            with mock.patch("network_health.run_command", return_value=arp_output):
+                observation = network_health.collect_local_peer_visibility()
+
+        self.assertTrue(observation["available"])
+        self.assertEqual(
+            observation["visible_peers"],
+            [
+                {
+                    "ip": "192.168.2.22",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "interface": "en0",
+                }
+            ],
+        )
+        self.assertNotIn("status", observation)
+
+    def test_analyze_local_peer_visibility_is_profile_aware(self):
+        observation = {
+            "available": True,
+            "interface": "en0",
+            "gateway_ip": "192.168.2.1",
+            "is_private_gateway": True,
+            "visible_peers": [
+                {
+                    "ip": "192.168.2.22",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "interface": "en0",
+                }
+            ],
+        }
+
+        home = network_health.analyze_local_peer_visibility(
+            observation,
+            network_profile="home",
+        )
+        guest = network_health.analyze_local_peer_visibility(
+            observation,
+            network_profile="guest",
+        )
+
+        self.assertEqual(home["status"], "ok")
+        self.assertEqual(guest["status"], "notice")
+        self.assertEqual(
+            guest["details"]["visibility_assessment"],
+            "unexpected_guest_visibility",
+        )
 
     def test_build_local_peer_visibility_check_uses_guest_profile_expectation(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -732,6 +848,46 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(result["status"], "alert")
         self.assertEqual(result["details"]["level"], "lossy")
         self.assertIn("33% packet loss", result["summary"])
+
+    def test_collect_gateway_reachability_returns_raw_ping_observation(self):
+        ping_summary = {
+            "transmitted": 3,
+            "received": 3,
+            "loss_percent": 0.0,
+            "avg_ms": 4.1,
+        }
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.1", "en0"),
+        ):
+            with mock.patch(
+                "network_health.ping_host",
+                return_value=ping_summary,
+            ) as ping_host:
+                observation = network_health.collect_gateway_reachability(
+                    ping_count=5
+                )
+
+        ping_host.assert_called_once_with("192.168.2.1", count=5)
+        self.assertEqual(observation["ping"], ping_summary)
+        self.assertNotIn("status", observation)
+
+    def test_analyze_gateway_reachability_is_independent_from_ping_command(self):
+        result = network_health.analyze_gateway_reachability(
+            {
+                "gateway_ip": "192.168.2.1",
+                "interface": "en0",
+                "ping": {
+                    "transmitted": 3,
+                    "received": 3,
+                    "loss_percent": 0.0,
+                    "avg_ms": 75.0,
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["level"], "slow")
 
     def test_build_gateway_reachability_check_marks_gateway_reachable_as_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):

@@ -347,9 +347,8 @@ def inspect_gateway_http_surface(host, port, timeout=2):
     }
 
 
-def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT_NETWORK_PROFILE):
-    """Inspect only the default gateway for a small set of local services."""
-    network_profile = normalize_network_profile(network_profile)
+def collect_gateway_exposure(timeout=2, probes=None):
+    """Collect reachable service observations from the default gateway."""
     gateway_ip, interface = get_default_gateway()
     is_private_gateway = not is_public_ip(gateway_ip)
     reachable_services = []
@@ -372,6 +371,24 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
         reachable_services.append(service)
         if probe["risk"]:
             risky_services.append(service)
+
+    return {
+        "gateway_ip": gateway_ip,
+        "interface": interface,
+        "is_private_gateway": is_private_gateway,
+        "reachable_services": reachable_services,
+        "risky_services": risky_services,
+    }
+
+
+def analyze_gateway_exposure(observation, network_profile=DEFAULT_NETWORK_PROFILE):
+    """Interpret collected gateway services for the selected network profile."""
+    network_profile = normalize_network_profile(network_profile)
+    gateway_ip = observation["gateway_ip"]
+    interface = observation["interface"]
+    is_private_gateway = observation["is_private_gateway"]
+    reachable_services = observation.get("reachable_services", [])
+    risky_services = observation.get("risky_services", [])
 
     if risky_services:
         if not is_private_gateway:
@@ -457,6 +474,12 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
     }
 
 
+def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT_NETWORK_PROFILE):
+    """Collect and interpret a bounded set of default-gateway services."""
+    observation = collect_gateway_exposure(timeout=timeout, probes=probes)
+    return analyze_gateway_exposure(observation, network_profile=network_profile)
+
+
 def parse_arp_cache_entries(raw_output):
     """Parse `arp -an` output into structured entries."""
     entries = []
@@ -480,19 +503,19 @@ def parse_arp_cache_entries(raw_output):
     return entries
 
 
-def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
-    """Inspect the passive ARP cache for visible local peers on the current interface."""
-    network_profile = normalize_network_profile(network_profile)
+def collect_local_peer_visibility():
+    """Collect passive local-peer observations from the current ARP cache."""
     gateway_ip, interface = get_default_gateway()
     is_private_gateway = not is_public_ip(gateway_ip)
     try:
         entries = parse_arp_cache_entries(run_command(["arp", "-an"]))
     except (subprocess.CalledProcessError, FileNotFoundError):
         return {
-            "name": "local_peer_visibility",
-            "status": "ok",
-            "summary": "ARP cache inspection is unavailable on this platform/setup",
-            "details": {"interface": interface, "gateway_ip": gateway_ip, "visible_peers": []},
+            "available": False,
+            "interface": interface,
+            "gateway_ip": gateway_ip,
+            "is_private_gateway": is_private_gateway,
+            "visible_peers": [],
         }
 
     visible_peers = []
@@ -510,6 +533,35 @@ def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
         if not ip_obj.is_private:
             continue
         visible_peers.append(entry)
+
+    return {
+        "available": True,
+        "interface": interface,
+        "gateway_ip": gateway_ip,
+        "is_private_gateway": is_private_gateway,
+        "visible_peers": visible_peers,
+    }
+
+
+def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_PROFILE):
+    """Interpret passive local-peer visibility for the selected profile."""
+    network_profile = normalize_network_profile(network_profile)
+    interface = observation["interface"]
+    gateway_ip = observation["gateway_ip"]
+    is_private_gateway = observation["is_private_gateway"]
+    visible_peers = observation.get("visible_peers", [])
+
+    if not observation.get("available", True):
+        return {
+            "name": "local_peer_visibility",
+            "status": "ok",
+            "summary": "ARP cache inspection is unavailable on this platform/setup",
+            "details": {
+                "interface": interface,
+                "gateway_ip": gateway_ip,
+                "visible_peers": [],
+            },
+        }
 
     if visible_peers:
         status = "ok" if network_profile == "home" else "notice"
@@ -576,6 +628,15 @@ def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
             "visible_peers": visible_peers,
         },
     }
+
+
+def build_local_peer_visibility_check(network_profile=DEFAULT_NETWORK_PROFILE):
+    """Collect and interpret passive local-peer visibility."""
+    observation = collect_local_peer_visibility()
+    return analyze_local_peer_visibility(
+        observation,
+        network_profile=network_profile,
+    )
 
 
 def build_client_isolation_hint_check(
@@ -1557,10 +1618,22 @@ def ping_host(host, count=3):
     return parse_ping_summary(output)
 
 
-def build_gateway_reachability_check(ping_count=3):
-    """Check whether the current client can reliably reach the default gateway."""
+def collect_gateway_reachability(ping_count=3):
+    """Collect one bounded reachability observation for the default gateway."""
     gateway_ip, interface = get_default_gateway()
     ping_summary = ping_host(gateway_ip, count=ping_count)
+    return {
+        "gateway_ip": gateway_ip,
+        "interface": interface,
+        "ping": ping_summary,
+    }
+
+
+def analyze_gateway_reachability(observation):
+    """Interpret a collected gateway reachability observation."""
+    gateway_ip = observation["gateway_ip"]
+    interface = observation["interface"]
+    ping_summary = observation.get("ping", {})
     loss_percent = ping_summary.get("loss_percent")
     avg_ms = ping_summary.get("avg_ms")
     received = ping_summary.get("received")
@@ -1602,6 +1675,12 @@ def build_gateway_reachability_check(ping_count=3):
             "ping": ping_summary,
         },
     )
+
+
+def build_gateway_reachability_check(ping_count=3):
+    """Collect and interpret default-gateway reachability."""
+    observation = collect_gateway_reachability(ping_count=ping_count)
+    return analyze_gateway_reachability(observation)
 
 
 def summarize_wifi_stability(samples, gateway_ip):
