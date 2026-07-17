@@ -123,6 +123,9 @@ ACTIVE_WIFI_STATUSES = {
     "connected",
     "active",
 }
+WIFI_WEAK_RSSI_DBM = -75
+WIFI_HIGH_GATEWAY_LATENCY_MS = 30
+WIFI_UNSTABLE_PACKET_LOSS_PERCENT = 10
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -1859,10 +1862,16 @@ def summarize_wifi_stability(samples, gateway_ip):
                 rssi_values.append(float(wifi["rssi"]))
         except (TypeError, ValueError):
             pass
-        if ping.get("avg_ms") is not None:
-            latency_values.append(float(ping["avg_ms"]))
-        if ping.get("loss_percent") is not None:
-            loss_values.append(float(ping["loss_percent"]))
+        try:
+            if ping.get("avg_ms") is not None:
+                latency_values.append(float(ping["avg_ms"]))
+        except (TypeError, ValueError):
+            pass
+        try:
+            if ping.get("loss_percent") is not None:
+                loss_values.append(float(ping["loss_percent"]))
+        except (TypeError, ValueError):
+            pass
 
     bssid_changes = 0
     for previous, current in zip(bssids, bssids[1:]):
@@ -1872,21 +1881,38 @@ def summarize_wifi_stability(samples, gateway_ip):
     avg_rssi = sum(rssi_values) / len(rssi_values) if rssi_values else None
     avg_latency = sum(latency_values) / len(latency_values) if latency_values else None
     max_loss = max(loss_values) if loss_values else 0.0
+    max_latency = max(latency_values) if latency_values else None
+    weak_signal = avg_rssi is not None and avg_rssi <= WIFI_WEAK_RSSI_DBM
+    high_latency = (
+        avg_latency is not None
+        and avg_latency >= WIFI_HIGH_GATEWAY_LATENCY_MS
+    )
+    severe_loss = max_loss >= WIFI_UNSTABLE_PACKET_LOSS_PERCENT
+    performance_impact = severe_loss or weak_signal or high_latency
 
     reasons = []
     if bssid_changes > 0:
-        reasons.append(f"BSSID changed {bssid_changes} time(s)")
+        reasons.append(
+            "BSSID changed once (possibly normal mesh roaming)"
+            if bssid_changes == 1
+            else f"BSSID changed {bssid_changes} time(s)"
+        )
     if max_loss > 0:
         reasons.append(f"packet loss peaked at {max_loss:.0f}%")
-    if avg_rssi is not None and avg_rssi <= -75:
+    if weak_signal:
         reasons.append(f"weak average signal ({avg_rssi:.0f} dBm)")
-    if avg_latency is not None and avg_latency >= 30:
+    if high_latency:
         reasons.append(f"high average gateway latency ({avg_latency:.1f} ms)")
 
-    if bssid_changes > 1 or max_loss >= 10:
+    usable_measurements = len(bssids) + len(rssi_values) + len(latency_values) + len(loss_values)
+    if usable_measurements == 0:
+        level = "unavailable"
+    elif severe_loss or (bssid_changes > 1 and performance_impact):
         level = "unstable"
-    elif reasons:
+    elif bssid_changes > 1 or max_loss > 0 or weak_signal or high_latency:
         level = "degraded"
+    elif bssid_changes == 1:
+        level = "roaming"
     else:
         level = "stable"
 
@@ -1898,8 +1924,20 @@ def summarize_wifi_stability(samples, gateway_ip):
         recommendation = (
             "Review signal strength, gateway latency, and packet loss before troubleshooting applications."
         )
+    elif level == "roaming":
+        recommendation = (
+            "A single BSSID transition can be normal on a mesh network; investigate only if users noticed interruption."
+        )
+    elif level == "unavailable":
+        recommendation = "No usable Wi-Fi or gateway measurements were returned during the sample window."
     else:
         recommendation = "No material Wi-Fi instability was observed during the sample window."
+
+    confidence = (
+        "high"
+        if len(samples) >= 3 and len(latency_values) == len(samples) and len(rssi_values) == len(samples)
+        else "limited"
+    )
 
     return {
         "gateway_ip": gateway_ip,
@@ -1907,12 +1945,39 @@ def summarize_wifi_stability(samples, gateway_ip):
         "bssid_changes": bssid_changes,
         "avg_rssi": avg_rssi,
         "avg_latency_ms": avg_latency,
+        "max_latency_ms": max_latency,
         "max_loss_percent": max_loss,
+        "wifi_sample_count": len(rssi_values),
+        "ping_sample_count": len(latency_values),
+        "confidence": confidence,
         "reasons": reasons,
         "recommendation": recommendation,
         "level": level,
         "samples": samples,
     }
+
+
+def build_wifi_stability_check(summary):
+    """Convert a Wi-Fi stability summary into an operator-facing check."""
+    gateway_ip = summary["gateway_ip"]
+    level = summary["level"]
+    if level == "stable":
+        status = "ok"
+        text = f"Wi-Fi link to gateway {gateway_ip} looked stable across {summary['sample_count']} sample(s)"
+    elif level == "roaming":
+        status = "notice"
+        text = f"Wi-Fi link to gateway {gateway_ip} roamed once without measured degradation"
+    elif level == "degraded":
+        status = "notice"
+        text = f"Wi-Fi link to gateway {gateway_ip} looked degraded: {', '.join(summary['reasons'])}"
+    elif level == "unstable":
+        status = "alert"
+        text = f"Wi-Fi link to gateway {gateway_ip} looked unstable: {', '.join(summary['reasons'])}"
+    else:
+        status = "alert"
+        text = "Wi-Fi stability diagnostics were unavailable"
+
+    return build_check("wifi_stability", status, text, summary)
 
 
 def run_wifi_stability_diagnostics(
@@ -1960,26 +2025,7 @@ def run_wifi_stability_diagnostics(
             time.sleep(interval_seconds)
 
     summary = summarize_wifi_stability(samples, gateway_ip)
-    level = summary["level"]
-    if level == "stable":
-        status = "ok"
-        text = f"Wi-Fi link to gateway {gateway_ip} looked stable across {summary['sample_count']} sample(s)"
-    elif level == "degraded":
-        status = "alert"
-        text = f"Wi-Fi link to gateway {gateway_ip} looked degraded: {', '.join(summary['reasons'])}"
-    elif level == "unstable":
-        status = "alert"
-        text = f"Wi-Fi link to gateway {gateway_ip} looked unstable: {', '.join(summary['reasons'])}"
-    else:
-        status = "alert"
-        text = "Wi-Fi stability diagnostics were unavailable"
-
-    return {
-        "name": "wifi_stability",
-        "status": status,
-        "summary": text,
-        "details": summary,
-    }
+    return build_wifi_stability_check(summary)
 
 
 def extract_corewlan_network(network):

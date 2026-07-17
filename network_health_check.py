@@ -441,10 +441,19 @@ def format_wifi_stability_details(details):
         f"  gateway: {details.get('gateway_ip')}",
         f"  samples: {details.get('sample_count')}",
     ]
+    if details.get("confidence"):
+        lines.append(f"  confidence: {details['confidence']}")
+    if details.get("wifi_sample_count") is not None or details.get("ping_sample_count") is not None:
+        lines.append(
+            f"  coverage: Wi-Fi {details.get('wifi_sample_count', 0)}/{details.get('sample_count', 0)}"
+            f" · ping {details.get('ping_sample_count', 0)}/{details.get('sample_count', 0)}"
+        )
     if details.get("avg_rssi") is not None:
         lines.append(f"  avg rssi: {details['avg_rssi']:.0f} dBm")
     if details.get("avg_latency_ms") is not None:
         lines.append(f"  avg gateway latency: {details['avg_latency_ms']:.1f} ms")
+    if details.get("max_latency_ms") is not None:
+        lines.append(f"  max gateway latency: {details['max_latency_ms']:.1f} ms")
     if details.get("max_loss_percent") is not None:
         lines.append(f"  max packet loss: {details['max_loss_percent']:.0f}%")
     if details.get("bssid_changes") is not None:

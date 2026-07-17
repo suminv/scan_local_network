@@ -1089,6 +1089,62 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertTrue(summary["reasons"])
         self.assertIn("mesh roaming", summary["recommendation"])
 
+    def test_summarize_wifi_stability_treats_single_roam_as_notice_level(self):
+        summary = network_health.summarize_wifi_stability(
+            [
+                {
+                    "wifi": {"bssid": "aa:aa:aa:aa:aa:aa", "rssi": "-60"},
+                    "ping": {"avg_ms": 5.0, "loss_percent": 0.0},
+                },
+                {
+                    "wifi": {"bssid": "bb:bb:bb:bb:bb:bb", "rssi": "-62"},
+                    "ping": {"avg_ms": 6.0, "loss_percent": 0.0},
+                },
+            ],
+            gateway_ip="192.168.2.254",
+        )
+        check = network_health.build_wifi_stability_check(summary)
+
+        self.assertEqual(summary["level"], "roaming")
+        self.assertEqual(check["status"], "notice")
+        self.assertIn("possibly normal mesh roaming", summary["reasons"][0])
+        self.assertIn("without measured degradation", check["summary"])
+
+    def test_summarize_wifi_stability_requires_impact_for_unstable_roaming(self):
+        summary = network_health.summarize_wifi_stability(
+            [
+                {
+                    "wifi": {"bssid": "aa:aa:aa:aa:aa:aa", "rssi": "-60"},
+                    "ping": {"avg_ms": 5.0, "loss_percent": 0.0},
+                },
+                {
+                    "wifi": {"bssid": "bb:bb:bb:bb:bb:bb", "rssi": "-61"},
+                    "ping": {"avg_ms": 6.0, "loss_percent": 0.0},
+                },
+                {
+                    "wifi": {"bssid": "cc:cc:cc:cc:cc:cc", "rssi": "-62"},
+                    "ping": {"avg_ms": 7.0, "loss_percent": 0.0},
+                },
+            ],
+            gateway_ip="192.168.2.254",
+        )
+        check = network_health.build_wifi_stability_check(summary)
+
+        self.assertEqual(summary["level"], "degraded")
+        self.assertEqual(check["status"], "notice")
+        self.assertEqual(summary["confidence"], "high")
+
+    def test_summarize_wifi_stability_marks_missing_measurements_unavailable(self):
+        summary = network_health.summarize_wifi_stability(
+            [{"wifi": None, "ping": {}}],
+            gateway_ip="192.168.2.254",
+        )
+        check = network_health.build_wifi_stability_check(summary)
+
+        self.assertEqual(summary["level"], "unavailable")
+        self.assertEqual(summary["confidence"], "limited")
+        self.assertEqual(check["status"], "alert")
+
     def test_run_wifi_stability_diagnostics_reports_progress(self):
         progress_calls = []
 
@@ -3271,8 +3327,12 @@ Wi-Fi:
                     "level": "unstable",
                     "gateway_ip": "192.168.2.254",
                     "sample_count": 3,
+                    "confidence": "high",
+                    "wifi_sample_count": 3,
+                    "ping_sample_count": 3,
                     "avg_rssi": -73.0,
                     "avg_latency_ms": 35.0,
+                    "max_latency_ms": 55.0,
                     "max_loss_percent": 20.0,
                     "bssid_changes": 2,
                     "reasons": ["BSSID changed 2 time(s)", "packet loss peaked at 20%"],
@@ -3287,6 +3347,9 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Wi-Fi stability", output)
         self.assertIn("avg gateway latency", output)
+        self.assertIn("max gateway latency", output)
+        self.assertIn("confidence: high", output)
+        self.assertIn("coverage: Wi-Fi 3/3 · ping 3/3", output)
         self.assertIn("BSSID changes: 2", output)
 
     def test_print_wifi_debug_report_renders_diagnosis(self):

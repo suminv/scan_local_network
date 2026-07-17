@@ -223,6 +223,7 @@ Completed:
 - Wi-Fi environment and active-path checks now separate platform/default-route collection from security, channel, route-mismatch, dual-connectivity, and confidence interpretation.
 - Health orchestration now collects local, Internet, and Wi-Fi bundles separately and composes them through a tested stable report-order function, leaving `run_network_health_checks` responsible only for stage progression and top-level coordination.
 - Profile-aware local policy now distinguishes managed guest isolation, untrusted travel networks where isolation cannot be assumed, and public networks where isolation is expected but local trust is still withheld; overall trust also incorporates notice-only path signals.
+- Wi-Fi stability diagnostics now distinguish normal single mesh roaming from degraded and unstable links, reserve alerts for stronger measured impact, and expose measurement coverage, confidence, and latency peaks.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

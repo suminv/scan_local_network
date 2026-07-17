@@ -623,6 +623,8 @@ This adds a short observation window with repeated gateway latency checks and cu
 - packet loss to the gateway
 - elevated gateway latency
 
+The result distinguishes `stable`, `roaming`, `degraded`, `unstable`, and `unavailable`. A single BSSID transition without packet loss, weak signal, or high latency is treated as a reviewable mesh-roaming notice rather than an alert. Minor or incomplete degradation is also a notice; packet loss of 10% or more, or repeated roaming combined with measured performance impact, remains an alert. The report includes sample coverage and confidence so a short or partially collected window is not presented as conclusive.
+
 With `--alerts-only`, the process exits with:
 
 - `0` when no actionable health alerts are detected
