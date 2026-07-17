@@ -1012,16 +1012,26 @@ def print_alert_report(summary, scan_context=None):
     report_summary.setdefault("alert_checks", len(alerts))
     report_summary.setdefault("notice_checks", len(report_summary.get("notices", [])))
     assessment = build_trust_assessment(report_summary, scan_context=scan_context)
-    print_scan_summary(
-        [
+    if "total_checks" in report_summary:
+        summary_fields = build_health_scan_summary_fields(
+            scan_context,
+            report_summary,
+            include_ok=False,
+        )
+    else:
+        scan_context = scan_context or {}
+        duration_seconds = scan_context.get("duration_seconds")
+        summary_fields = [
+            ("Target", scan_context.get("cidr")),
+            ("Interface", scan_context.get("interface")),
             ("Profile", network_profile),
             (
-                "Checks",
-                format_health_count_summary(report_summary).removeprefix("Checks: ")
-                if "total_checks" in report_summary
-                else None,
+                "Duration",
+                f"{duration_seconds:.1f}s" if duration_seconds is not None else None,
             ),
-        ],
+        ]
+    print_scan_summary(
+        summary_fields,
         status=build_health_summary_status(report_summary, assessment),
     )
     if not alerts:

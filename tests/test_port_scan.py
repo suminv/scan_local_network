@@ -611,6 +611,26 @@ class PortScanTests(unittest.TestCase):
         self.assertIn("TLSv1.2, CN=old.local, status=expiring_soon, OLD_CIPHER", output)
         self.assertIn("TLSv1.3, CN=new.local, status=valid, NEW_CIPHER", output)
 
+    def test_print_port_focus_diff_summary_omits_detailed_change_rows(self):
+        diff_summary = {
+            "new_ports": [{"ip": "192.168.2.10", "port": 22}],
+            "closed_ports": [{"ip": "192.168.2.20", "port": 80}],
+            "service_changes": [],
+            "tls_changes": [],
+            "ssh_changes": [],
+            "http_changes": [],
+        }
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            port_scan.print_port_focus_diff_summary(diff_summary)
+
+        output = buffer.getvalue()
+        self.assertIn("New: 1 | Closed: 1", output)
+        self.assertIn("Use --output grouped", output)
+        self.assertNotIn("192.168.2.10", output)
+        self.assertNotIn("New open ports", output)
+
     def test_print_port_diff_summary_includes_hostname_when_available(self):
         buffer = StringIO()
         with redirect_stdout(buffer):
@@ -830,6 +850,38 @@ class PortScanTests(unittest.TestCase):
         print_alert_summary.assert_called_once_with(results, diff_summary)
         self.assertEqual(exit_code, 2)
 
+    def test_target_alert_output_hides_unrequested_historical_changes(self):
+        args = SimpleNamespace(
+            alerts_only=True,
+            output="grouped",
+            target="192.168.2.10",
+            show_changes=False,
+        )
+        results = [{"ip": "192.168.2.10", "open_ports": []}]
+        diff_summary = {"new_ports": [{"ip": "192.168.2.20", "port": 22}]}
+
+        with mock.patch("port_scan.print_port_alert_summary") as print_alert_summary:
+            exit_code = port_scan.render_port_scan_outcome(args, results, diff_summary)
+
+        print_alert_summary.assert_called_once_with(results, None)
+        self.assertEqual(exit_code, 0)
+
+    def test_target_alert_output_can_include_requested_historical_changes(self):
+        args = SimpleNamespace(
+            alerts_only=True,
+            output="grouped",
+            target="192.168.2.10",
+            show_changes=True,
+        )
+        results = [{"ip": "192.168.2.10", "open_ports": []}]
+        diff_summary = {"new_ports": [{"ip": "192.168.2.10", "port": 22}]}
+
+        with mock.patch("port_scan.print_port_alert_summary") as print_alert_summary:
+            exit_code = port_scan.render_port_scan_outcome(args, results, diff_summary)
+
+        print_alert_summary.assert_called_once_with(results, diff_summary)
+        self.assertEqual(exit_code, 2)
+
     def test_render_port_scan_orders_changes_and_policy_before_open_ports(self):
         args = SimpleNamespace(
             alerts_only=False,
@@ -897,6 +949,28 @@ class PortScanTests(unittest.TestCase):
         print_port_diff_summary.assert_called_once_with(diff_summary)
         self.assertEqual(exit_code, 0)
         self.assertIn("No devices found on the network.", buffer.getvalue())
+
+    def test_render_empty_alert_outcome_includes_scan_summary(self):
+        args = SimpleNamespace(
+            alerts_only=True,
+            target="192.168.2.12",
+            show_changes=False,
+        )
+        diff_summary = {"new_ports": [{"ip": "192.168.2.20", "port": 22}]}
+
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            exit_code = port_scan.render_empty_scan_outcome(
+                args,
+                diff_summary,
+                target="192.168.2.12",
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("--- Scan Summary ---", output)
+        self.assertIn("192.168.2.12", output)
+        self.assertIn("No actionable alerts detected.", output)
+        self.assertEqual(exit_code, 0)
 
     def test_save_port_scan_results_writes_snapshot_and_diff(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

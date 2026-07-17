@@ -119,6 +119,19 @@ Status  : [~] review detected changes
 
 `scan-health` uses the same block for interface, network profile, check counts, and the final trust status. A target-only port scan does not show historical changes unless `--show-changes` was requested.
 
+The output modes follow the same scope rules:
+
+| Command or mode | What is shown |
+| --- | --- |
+| default / `--output grouped` | Complete grouped inventory and complete change details |
+| `scan-ports --output table` | Complete current inventory in an adaptive flat table and complete change details |
+| `scan-ports --output focus` | Prioritized current hosts and compact change counters; use `grouped` for individual change rows |
+| `--alerts-only` | Scan context plus actionable findings only; exit code `2` means action is required |
+| `scan-ports -t IP` | Only observations for the requested target; historical changes stay hidden |
+| `scan-ports -t IP --show-changes` | Target observations plus explicitly requested history comparison |
+
+An empty scan still prints `Scan Summary`, including in `--alerts-only` mode. This makes redirected and scheduled output self-describing instead of producing a context-free “no alerts” line.
+
 After the summary, reports place actionable context before detailed inventory: changes first, then policy findings, then device or open-port details. ARP output no longer repeats new devices in both a dedicated section and the change report, and counts already present in the summary are not printed again.
 
 Standard runs keep report-save messages hidden. With `--verbose`, generated paths are collected once at the end:
@@ -380,6 +393,9 @@ passwords are rejected by validation and are never stored or tested.
     ./scan-ports --output focus
     ```
 
+    This view keeps only change counters. Run the grouped mode when the IP,
+    port, and old/new values for every historical change are needed.
+
 **To show setup, database, vendor, and progress diagnostics:**
 
 ```bash
@@ -402,6 +418,10 @@ With `--alerts-only`, the process exits with:
 
 - `0` when no actionable alerts are detected
 - `2` when TLS alerts, new open ports, service/SSH/HTTP changes, policy findings, or TLS metadata changes are detected
+
+For a target scan, historical changes affect this report and its exit code only
+when `--show-changes` is also present. Findings from the current target, such as
+an expired TLS certificate or a policy violation, remain actionable normally.
 
 **To send actionable port alerts to a webhook:**
 

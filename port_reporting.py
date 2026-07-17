@@ -385,6 +385,40 @@ def print_port_diff_summary(diff_summary):
     )
 
 
+def print_port_focus_diff_summary(diff_summary):
+    """Print only change counts for the compact focus output."""
+    print()
+    if diff_summary is None:
+        print_change_report(
+            title="=== Port Changes Since Last Scan ===",
+            unavailable_message="No previous port scan snapshot available.",
+        )
+        return
+
+    categories = [
+        ("New", diff_summary.get("new_ports", [])),
+        ("Closed", diff_summary.get("closed_ports", [])),
+        ("Service", diff_summary.get("service_changes", [])),
+        ("TLS", diff_summary.get("tls_changes", [])),
+        ("SSH", diff_summary.get("ssh_changes", [])),
+        ("HTTP", diff_summary.get("http_changes", [])),
+    ]
+    if not any(rows for _, rows in categories):
+        print_change_report(
+            title="=== Port Changes Since Last Scan ===",
+            empty_message="No port-level changes detected since last scan.",
+        )
+        return
+
+    print_change_report(
+        title="=== Port Changes Since Last Scan ===",
+        summary_line=" | ".join(
+            f"{label}: {len(rows)}" for label, rows in categories if rows
+        ),
+    )
+    print("Use --output grouped to see complete change details.")
+
+
 def print_port_alert_summary(results, diff_summary):
     """Print only actionable findings for scheduled/quiet monitoring runs."""
     observations = build_port_observations(results)

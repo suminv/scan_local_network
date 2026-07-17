@@ -1625,6 +1625,30 @@ Wi-Fi:
         self.assertIn("Profile: travel", buffer.getvalue())
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
 
+    def test_print_alert_report_includes_scan_context(self):
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            network_health_check.print_alert_report(
+                {
+                    "total_checks": 3,
+                    "ok_checks": 3,
+                    "alerts": [],
+                    "notices": [],
+                },
+                scan_context={
+                    "cidr": "192.168.2.0/24",
+                    "interface": "en6",
+                    "network_profile": "home",
+                    "duration_seconds": 2.4,
+                },
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Target   : 192.168.2.0/24", output)
+        self.assertIn("Interface: en6", output)
+        self.assertIn("Profile  : home", output)
+        self.assertIn("Duration : 2.4s", output)
+
     def test_print_alert_report_includes_notices_without_escalating(self):
         buffer = StringIO()
         with redirect_stdout(buffer):

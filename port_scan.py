@@ -58,6 +58,7 @@ from port_reporting import (
     print_grouped_port_scan_results,
     print_port_alert_summary,
     print_port_diff_summary,
+    print_port_focus_diff_summary,
     print_port_scan_results,
     print_port_scan_summary,
     print_table_port_scan_results,
@@ -467,22 +468,21 @@ def render_port_scan_outcome(
     duration_seconds=None,
 ):
     """Render scan output and return the appropriate process exit code."""
+    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    visible_diff = diff_summary if show_changes else None
     if args.alerts_only:
-        show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
         print_port_scan_summary(
             results,
             target=target,
             duration_seconds=duration_seconds,
-            diff_summary=diff_summary if show_changes else None,
+            diff_summary=visible_diff,
             policy_findings=policy_findings,
         )
-        print_port_alert_summary(results, diff_summary)
+        print_port_alert_summary(results, visible_diff)
         if policy_findings:
             print_policy_findings(policy_findings)
-        return 2 if (has_port_alerts(results, diff_summary) or policy_findings) else 0
+        return 2 if (has_port_alerts(results, visible_diff) or policy_findings) else 0
 
-    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
-    visible_diff = diff_summary if show_changes else None
     print_port_scan_summary(
         results,
         target=target,
@@ -491,7 +491,10 @@ def render_port_scan_outcome(
         policy_findings=policy_findings,
     )
     if show_changes:
-        print_port_diff_summary(diff_summary)
+        if args.output == "focus":
+            print_port_focus_diff_summary(diff_summary)
+        else:
+            print_port_diff_summary(diff_summary)
     if policy_findings:
         print_policy_findings(policy_findings)
     print_port_scan_results(
@@ -510,19 +513,32 @@ def render_empty_scan_outcome(
     args, diff_summary, policy_findings=None, *, target=None
 ):
     """Render the empty-discovery case and return the appropriate process exit code."""
+    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    visible_diff = diff_summary if show_changes else None
     if args.alerts_only:
-        print_port_alert_summary([], diff_summary)
-        return 2 if (has_port_alerts([], diff_summary) or policy_findings) else 0
+        print_port_scan_summary(
+            [],
+            target=target,
+            diff_summary=visible_diff,
+            policy_findings=policy_findings,
+        )
+        print_port_alert_summary([], visible_diff)
+        if policy_findings:
+            print_policy_findings(policy_findings)
+        return 2 if (has_port_alerts([], visible_diff) or policy_findings) else 0
 
     print_port_scan_summary(
         [],
         target=target,
-        diff_summary=diff_summary,
+        diff_summary=visible_diff,
         policy_findings=policy_findings,
     )
     print("\nNo devices found on the network.")
-    if not getattr(args, "target", None) or getattr(args, "show_changes", False):
-        print_port_diff_summary(diff_summary)
+    if show_changes:
+        if getattr(args, "output", DEFAULT_OUTPUT_FORMAT) == "focus":
+            print_port_focus_diff_summary(diff_summary)
+        else:
+            print_port_diff_summary(diff_summary)
     if policy_findings:
         print_policy_findings(policy_findings)
     return 0

@@ -146,7 +146,7 @@ Focus:
 
 ## Immediate Next Tasks
 
-1. Continue small refinements to focus-mode and alert-only wording as real network runs expose confusing cases.
+1. Continue small refinements to operator wording only as real network runs expose new confusing cases.
 2. Continue selective cleanup in `network_health.py` as new trust-check behavior is added.
 3. Continue improving guest/travel interpretation as more real-world network examples are observed.
 4. Revisit `network_scan` history modeling only if operational pressure appears.
@@ -163,6 +163,7 @@ Completed:
 - Verbose setup, vendor, database, discovery, and result-processing diagnostics now use the same compact section style as normal reports; the obsolete `tqdm` output example has been removed from README.
 - ARP inventory and flat port tables now adapt to terminal width, truncate long cells with an ellipsis, and switch to compact network-focused columns on narrow terminals.
 - CLI color is now semantic: neutral inventory is uncolored, health status/error colors are reserved for meaning, and ANSI is disabled for redirected output or `NO_COLOR`.
+- The CLI output-mode audit now covers grouped, table, focus, alert-only, target, and empty-result paths: focus uses compact port-change counters, every alert-only report retains scan context, and target history cannot affect output or exit status unless `--show-changes` is requested.
 - `--iface` added to both scanners.
 - `--cidr` added to both scanners.
 - Shared scan target resolution reused across both scanners.
