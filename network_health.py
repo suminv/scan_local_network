@@ -601,11 +601,21 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
     if not observation.get("available", True):
         return {
             "name": "local_peer_visibility",
-            "status": "ok",
-            "summary": "ARP cache inspection is unavailable on this platform/setup",
+            "status": "notice" if is_untrusted_profile(network_profile) else "ok",
+            "summary": (
+                "Passive ARP cache inspection is unavailable; local peer visibility and client isolation cannot be assessed"
+            ),
             "details": {
                 "interface": interface,
                 "gateway_ip": gateway_ip,
+                "network_profile": network_profile,
+                "profile_posture": profile_policy["posture"],
+                "recommended_action": profile_policy["recommended_action"],
+                "is_private_gateway": is_private_gateway,
+                "observation_available": False,
+                "evidence_source": "passive_arp_cache",
+                "inference_confidence": "none",
+                "visibility_assessment": "unavailable",
                 "visible_peers": [],
             },
         }
@@ -633,7 +643,26 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
             )
     else:
         status = "ok"
-        summary = f"No additional local peers are currently visible in ARP cache on {interface}"
+        if network_profile in {"guest", "public"}:
+            summary = (
+                f"No local peers were observed in the passive ARP cache on {interface}; "
+                "client isolation remains unconfirmed"
+            )
+        elif network_profile == "travel":
+            summary = (
+                f"No local peers were observed in the passive ARP cache on {interface}; "
+                "do not assume this travel network isolates clients"
+            )
+        elif network_profile == "home":
+            summary = (
+                f"No additional local peers are currently visible in the passive ARP cache on {interface}; "
+                "client isolation is not expected for this home profile"
+            )
+        else:
+            summary = (
+                f"No additional local peers are currently visible in the passive ARP cache on {interface}; "
+                "absence of observations does not confirm client isolation"
+            )
 
     return {
         "name": "local_peer_visibility",
@@ -646,6 +675,9 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
             "profile_posture": profile_policy["posture"],
             "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": is_private_gateway,
+            "observation_available": True,
+            "evidence_source": "passive_arp_cache",
+            "inference_confidence": "observed" if visible_peers else "inconclusive",
             "context_note": (
                 build_profile_context_note(network_profile, "peer_visibility")
                 if visible_peers and is_untrusted_profile(network_profile)
@@ -706,9 +738,16 @@ def build_client_isolation_hint_check(
     if is_private_gateway is None:
         is_private_gateway = exposure_details.get("is_private_gateway")
     visible_peers = peer_details.get("visible_peers", [])
+    peer_observation_available = peer_details.get("observation_available", True)
     risky_services = exposure_details.get("risky_services", [])
 
-    if visible_peers:
+    if not peer_observation_available:
+        status = "notice" if is_untrusted_profile(network_profile) else "ok"
+        hint_level = "visibility_unavailable"
+        summary = (
+            f"Client isolation cannot be assessed on {interface} because passive peer visibility data is unavailable"
+        )
+    elif visible_peers:
         status = "ok" if network_profile == "home" else "notice"
         hint_level = "peer_visibility_detected"
         if network_profile in {"travel", "public"}:
@@ -739,7 +778,12 @@ def build_client_isolation_hint_check(
     elif risky_services:
         status = "ok"
         hint_level = "gateway_only_visibility"
-        if is_private_gateway:
+        if is_untrusted_profile(network_profile):
+            summary = (
+                f"Only gateway-local services are visible on {interface}; no peers were observed, "
+                "but passive ARP data does not confirm client isolation"
+            )
+        elif is_private_gateway:
             summary = (
                 f"Only gateway-local services are visible on {interface}; no passive peer "
                 "visibility has been observed yet on this private/home LAN"
@@ -753,8 +797,7 @@ def build_client_isolation_hint_check(
         status = "ok"
         hint_level = "no_peer_visibility"
         summary = (
-            f"No local peer visibility is currently evident on {interface}; client isolation may "
-            "be present or peer traffic has not been observed yet"
+            f"No local peers were observed on {interface}; passive ARP evidence alone cannot confirm client isolation"
         )
 
     return {
@@ -768,11 +811,21 @@ def build_client_isolation_hint_check(
             "profile_posture": profile_policy["posture"],
             "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": bool(is_private_gateway),
+            "peer_observation_available": peer_observation_available,
+            "inference_confidence": (
+                "none"
+                if not peer_observation_available
+                else "observed"
+                if visible_peers
+                else "inconclusive"
+            ),
             "hint_level": hint_level,
             "isolation_expected": profile_policy["isolation_expected"],
             "isolation_desired": profile_policy["isolation_desired"],
             "isolation_assessment": (
-                "not_expected_home"
+                "not_assessed"
+                if not peer_observation_available
+                else "not_expected_home"
                 if visible_peers and network_profile == "home"
                 else "not_enforced_guest"
                 if visible_peers and network_profile == "guest"
@@ -2606,6 +2659,15 @@ def classify_overall_trust_signals(signals):
                 f"{', '.join(affected_components)}"
             ),
             "context_note": "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related",
+        }
+    if local_hint == "visibility_unavailable" and is_untrusted_profile(network_profile):
+        return {
+            "status": "notice",
+            "summary": (
+                f"Internet trust path looks healthy, but local peer visibility could not be assessed "
+                f"for this {network_profile} network"
+            ),
+            "context_note": "unavailable passive evidence must not be treated as proof of client isolation",
         }
     if (
         local_hint == "gateway_only_visibility"

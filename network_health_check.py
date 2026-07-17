@@ -191,6 +191,12 @@ def format_local_peer_visibility_details(details):
         f"  interface: {details.get('interface')}",
         f"  gateway: {details.get('gateway_ip')}",
     ]
+    if details.get("observation_available") is not None:
+        lines.append(
+            f"  passive observation: {'available' if details['observation_available'] else 'unavailable'}"
+        )
+    if details.get("inference_confidence"):
+        lines.append(f"  inference confidence: {details['inference_confidence']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
     if details.get("visibility_assessment"):
@@ -216,6 +222,12 @@ def format_client_isolation_hint_details(details):
         f"  visible peers: {details.get('visible_peer_count', 0)}",
         f"  risky gateway services: {details.get('risky_gateway_service_count', 0)}",
     ]
+    if details.get("peer_observation_available") is not None:
+        lines.append(
+            f"  passive peer data: {'available' if details['peer_observation_available'] else 'unavailable'}"
+        )
+    if details.get("inference_confidence"):
+        lines.append(f"  inference confidence: {details['inference_confidence']}")
     if details.get("isolation_expected") is not None:
         lines.append(f"  isolation expected: {'yes' if details['isolation_expected'] else 'no'}")
     if details.get("isolation_assessment"):

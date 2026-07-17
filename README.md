@@ -526,7 +526,7 @@ Use this when you want the report wording to reflect different expectations. For
 - `travel`: isolation is desirable but must not be assumed on hotel or temporary networks; visible peers are treated as untrusted.
 - `public`: isolation is expected on a well-configured shared network, but the local segment remains untrusted even when no peers are currently visible.
 
-The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. A passive empty ARP cache is never presented as proof that isolation exists.
+The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable ARP cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 

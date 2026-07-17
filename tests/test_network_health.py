@@ -536,6 +536,30 @@ class NetworkHealthTests(unittest.TestCase):
             "unexpected_guest_visibility",
         )
 
+    def test_local_peer_visibility_distinguishes_empty_from_unavailable(self):
+        base_observation = {
+            "interface": "en0",
+            "gateway_ip": "10.0.0.1",
+            "is_private_gateway": True,
+            "visible_peers": [],
+        }
+        empty = network_health.analyze_local_peer_visibility(
+            {**base_observation, "available": True},
+            network_profile="public",
+        )
+        unavailable = network_health.analyze_local_peer_visibility(
+            {**base_observation, "available": False},
+            network_profile="public",
+        )
+
+        self.assertEqual(empty["status"], "ok")
+        self.assertTrue(empty["details"]["observation_available"])
+        self.assertEqual(empty["details"]["inference_confidence"], "inconclusive")
+        self.assertIn("isolation remains unconfirmed", empty["summary"])
+        self.assertEqual(unavailable["status"], "notice")
+        self.assertFalse(unavailable["details"]["observation_available"])
+        self.assertEqual(unavailable["details"]["visibility_assessment"], "unavailable")
+
     def test_build_local_peer_visibility_check_uses_guest_profile_expectation(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
@@ -688,6 +712,64 @@ class NetworkHealthTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["details"]["hint_level"], "gateway_only_visibility")
+
+    def test_client_isolation_marks_unavailable_peer_evidence_not_assessed(self):
+        result = network_health.build_client_isolation_hint_check(
+            {
+                "details": {
+                    "gateway_ip": "10.0.0.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "risky_services": [],
+                }
+            },
+            {
+                "details": {
+                    "gateway_ip": "10.0.0.1",
+                    "interface": "en0",
+                    "is_private_gateway": True,
+                    "observation_available": False,
+                    "visible_peers": [],
+                }
+            },
+            network_profile="public",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["hint_level"], "visibility_unavailable")
+        self.assertEqual(result["details"]["isolation_assessment"], "not_assessed")
+        self.assertEqual(result["details"]["inference_confidence"], "none")
+
+    def test_overall_trust_reports_unavailable_local_visibility_on_public_network(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "notice",
+                "details": {
+                    "hint_level": "visibility_unavailable",
+                    "is_private_gateway": True,
+                },
+            },
+            {
+                "name": "dns_trust_reasoning",
+                "status": "ok",
+                "details": {"hint_level": "gateway_dns_expected"},
+            },
+            {
+                "name": "captive_trust_reasoning",
+                "status": "ok",
+                "details": {"hint_level": "normal_internet_path"},
+            },
+            {
+                "name": "https_trust_reasoning",
+                "status": "ok",
+                "details": {"hint_level": "normal_https_path"},
+            },
+            network_profile="public",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("could not be assessed", result["summary"])
 
     def test_parse_scutil_dns_extracts_nameservers(self):
         resolvers = network_health.parse_scutil_dns(
@@ -2765,6 +2847,8 @@ Wi-Fi:
                 "details": {
                     "interface": "en0",
                     "gateway_ip": "192.168.2.1",
+                    "observation_available": True,
+                    "inference_confidence": "observed",
                     "context_note": "often normal on a private/home LAN",
                     "visible_peers": [
                         {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
@@ -2781,6 +2865,8 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Local peer visibility", output)
         self.assertIn("context: often normal on a private/home LAN", output)
+        self.assertIn("passive observation: available", output)
+        self.assertIn("inference confidence: observed", output)
         self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
         self.assertIn("[~]", output)
 
@@ -2797,6 +2883,8 @@ Wi-Fi:
                     "hint_level": "peer_visibility_detected",
                     "visible_peer_count": 2,
                     "risky_gateway_service_count": 1,
+                    "peer_observation_available": True,
+                    "inference_confidence": "observed",
                     "context_note": "typical for a private/home LAN",
                     "visible_peers": [
                         {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
@@ -2814,6 +2902,8 @@ Wi-Fi:
         self.assertIn("hint level: peer_visibility_detected", output)
         self.assertIn("context: typical for a private/home LAN", output)
         self.assertIn("visible peers: 2", output)
+        self.assertIn("passive peer data: available", output)
+        self.assertIn("inference confidence: observed", output)
         self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
 
     def test_print_health_report_renders_dns_trust_reasoning_check(self):
