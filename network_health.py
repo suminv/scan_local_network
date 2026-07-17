@@ -50,6 +50,38 @@ NETWORK_PROFILE_EXPECTATIONS = {
         "overall": "public networks should be treated as untrusted when local peers or management surfaces are visible",
     },
 }
+NETWORK_PROFILE_LOCAL_POLICIES = {
+    "auto": {
+        "posture": "context_unknown",
+        "isolation_expected": None,
+        "isolation_desired": None,
+        "recommended_action": "Select an explicit network profile when local exposure needs a confident interpretation",
+    },
+    "home": {
+        "posture": "trusted_private_lan",
+        "isolation_expected": False,
+        "isolation_desired": False,
+        "recommended_action": "Treat visible peers as expected only when this is your trusted home network",
+    },
+    "guest": {
+        "posture": "managed_guest_segment",
+        "isolation_expected": True,
+        "isolation_desired": True,
+        "recommended_action": "Verify the guest network identity and avoid local administration when peer isolation is absent",
+    },
+    "travel": {
+        "posture": "untrusted_travel_network",
+        "isolation_expected": False,
+        "isolation_desired": True,
+        "recommended_action": "Assume local peers are untrusted and prefer a trusted VPN for sensitive activity",
+    },
+    "public": {
+        "posture": "untrusted_public_network",
+        "isolation_expected": True,
+        "isolation_desired": True,
+        "recommended_action": "Avoid local services and sensitive activity unless the Internet trust path is healthy",
+    },
+}
 DEFAULT_HTTP_PROBES = [
     {
         "name": "gstatic_204",
@@ -136,6 +168,12 @@ def normalize_network_profile(network_profile):
 def get_profile_expectation(network_profile, topic):
     network_profile = normalize_network_profile(network_profile)
     return NETWORK_PROFILE_EXPECTATIONS.get(network_profile, {}).get(topic)
+
+
+def get_profile_local_policy(network_profile):
+    """Return normalized local-segment expectations for one network profile."""
+    network_profile = normalize_network_profile(network_profile)
+    return NETWORK_PROFILE_LOCAL_POLICIES[network_profile]
 
 
 def is_untrusted_profile(network_profile):
@@ -384,6 +422,7 @@ def collect_gateway_exposure(timeout=2, probes=None):
 def analyze_gateway_exposure(observation, network_profile=DEFAULT_NETWORK_PROFILE):
     """Interpret collected gateway services for the selected network profile."""
     network_profile = normalize_network_profile(network_profile)
+    profile_policy = get_profile_local_policy(network_profile)
     gateway_ip = observation["gateway_ip"]
     interface = observation["interface"]
     is_private_gateway = observation["is_private_gateway"]
@@ -437,6 +476,8 @@ def analyze_gateway_exposure(observation, network_profile=DEFAULT_NETWORK_PROFIL
             "gateway_ip": gateway_ip,
             "interface": interface,
             "network_profile": network_profile,
+            "profile_posture": profile_policy["posture"],
+            "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": is_private_gateway,
             "context_note": (
                 build_profile_context_note(network_profile, "gateway_exposure")
@@ -462,8 +503,10 @@ def analyze_gateway_exposure(observation, network_profile=DEFAULT_NETWORK_PROFIL
                 if risky_services and network_profile == "home"
                 else "unexpected_guest_admin_surface"
                 if risky_services and network_profile == "guest"
-                else "untrusted_network_admin_surface"
-                if risky_services and network_profile in {"travel", "public"}
+                else "untrusted_travel_admin_surface"
+                if risky_services and network_profile == "travel"
+                else "untrusted_public_admin_surface"
+                if risky_services and network_profile == "public"
                 else "observed_unknown_profile"
                 if risky_services
                 else "no_admin_surface_observed"
@@ -546,6 +589,7 @@ def collect_local_peer_visibility():
 def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_PROFILE):
     """Interpret passive local-peer visibility for the selected profile."""
     network_profile = normalize_network_profile(network_profile)
+    profile_policy = get_profile_local_policy(network_profile)
     interface = observation["interface"]
     gateway_ip = observation["gateway_ip"]
     is_private_gateway = observation["is_private_gateway"]
@@ -596,6 +640,8 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
             "interface": interface,
             "gateway_ip": gateway_ip,
             "network_profile": network_profile,
+            "profile_posture": profile_policy["posture"],
+            "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": is_private_gateway,
             "context_note": (
                 build_profile_context_note(network_profile, "peer_visibility")
@@ -619,8 +665,10 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
                 if visible_peers and network_profile == "home"
                 else "unexpected_guest_visibility"
                 if visible_peers and network_profile == "guest"
+                else "untrusted_travel_visibility"
+                if visible_peers and network_profile == "travel"
                 else "untrusted_public_visibility"
-                if visible_peers and network_profile in {"travel", "public"}
+                if visible_peers and network_profile == "public"
                 else "observed_unknown_profile"
                 if visible_peers
                 else "no_peers_observed"
@@ -646,6 +694,7 @@ def build_client_isolation_hint_check(
 ):
     """Summarize whether the current segment appears to expose peer devices to the client."""
     network_profile = normalize_network_profile(network_profile)
+    profile_policy = get_profile_local_policy(network_profile)
     exposure_details = gateway_exposure_check.get("details", {})
     peer_details = local_peer_visibility_check.get("details", {})
     interface = peer_details.get("interface") or exposure_details.get("interface")
@@ -713,16 +762,21 @@ def build_client_isolation_hint_check(
             "interface": interface,
             "gateway_ip": gateway_ip,
             "network_profile": network_profile,
+            "profile_posture": profile_policy["posture"],
+            "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": bool(is_private_gateway),
             "hint_level": hint_level,
-            "isolation_expected": network_profile in {"guest", "travel", "public"},
+            "isolation_expected": profile_policy["isolation_expected"],
+            "isolation_desired": profile_policy["isolation_desired"],
             "isolation_assessment": (
                 "not_expected_home"
                 if visible_peers and network_profile == "home"
                 else "not_enforced_guest"
                 if visible_peers and network_profile == "guest"
+                else "untrusted_travel_segment"
+                if visible_peers and network_profile == "travel"
                 else "absent_or_relaxed_public"
-                if visible_peers and network_profile in {"travel", "public"}
+                if visible_peers and network_profile == "public"
                 else "unknown"
                 if visible_peers
                 else "possible_not_confirmed"
@@ -2451,6 +2505,7 @@ def collect_overall_trust_signals(
     https_details = https_trust_reasoning_check.get("details", {})
 
     affected_components = []
+    component_findings = []
     component_checks = [
         ("DNS", dns_trust_reasoning_check),
         ("Captive portal", captive_trust_reasoning_check),
@@ -2459,8 +2514,11 @@ def collect_overall_trust_signals(
         ("Gateway reachability", gateway_reachability_check),
     ]
     for label, check in component_checks:
-        if check and check.get("status") == "alert":
+        if check and check.get("status") in {"notice", "alert"}:
             affected_components.append(label)
+            component_findings.append(
+                {"component": label, "status": check["status"]}
+            )
 
     return {
         "local_hint": local_details.get("hint_level"),
@@ -2476,6 +2534,7 @@ def collect_overall_trust_signals(
             gateway_reachability_check.get("status") if gateway_reachability_check else None
         ),
         "affected_components": affected_components,
+        "component_findings": component_findings,
     }
 
 
@@ -2488,10 +2547,17 @@ def classify_overall_trust_signals(signals):
     is_private_gateway = signals["is_private_gateway"]
 
     if affected_components:
+        alert_components = [
+            item["component"]
+            for item in signals.get("component_findings", [])
+            if item["status"] == "alert"
+        ]
         return {
             "status": "notice",
             "summary": (
-                f"Internet trust path needs review: signals are active in {', '.join(affected_components)}"
+                f"Internet trust path needs review: "
+                f"{'alerts' if alert_components else 'notices'} are active in "
+                f"{', '.join(affected_components)}"
             ),
             "context_note": "check the reasoning sections below to see whether the issue is local-path, DNS, captive, or HTTPS related",
         }
@@ -2563,6 +2629,7 @@ def build_overall_trust_details(signals, decision):
         "active_path": signals["active_path_status"],
         "gateway_reachability": signals["gateway_reachability_status"],
         "affected_components": signals["affected_components"],
+        "component_findings": signals.get("component_findings", []),
         "context_note": decision["context_note"],
     }
 

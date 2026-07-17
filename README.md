@@ -519,7 +519,14 @@ It currently checks:
 ```
 
 Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
-`home`, `guest`, `travel`, and `public` are interpreted separately. Peer visibility is normal and reported as `OK` for an explicit home profile. Guest networks are expected to reduce peer visibility, while travel and public networks treat visible unrelated peers and gateway-management exposure as untrusted local-segment signals.
+`home`, `guest`, `travel`, and `public` are interpreted separately:
+
+- `home`: peer visibility and router administration surfaces can be expected; client isolation is normally not required.
+- `guest`: client isolation is expected on a managed guest segment, so visible peers or gateway administration deserve review.
+- `travel`: isolation is desirable but must not be assumed on hotel or temporary networks; visible peers are treated as untrusted.
+- `public`: isolation is expected on a well-configured shared network, but the local segment remains untrusted even when no peers are currently visible.
+
+The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. A passive empty ARP cache is never presented as proof that isolation exists.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
@@ -548,6 +555,8 @@ Gateway web/admin surfaces are treated as expected for an explicit `home` profil
 The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
 
 DNS diagnostics compare resolver interface metadata with the current default-route interface. A reachable resolver on another interface is reported as a notice rather than a hard alert because VPN and split-DNS configurations can legitimately produce this layout. Direct public upstream DNS and failed name resolution retain stronger alert semantics.
+
+The overall trust explanation includes both alerts and notices from DNS, captive portal, HTTPS, active-path, and gateway-reachability checks. A notice-only route mismatch or split-DNS condition therefore no longer produces a contradictory “path looks healthy” summary.
 
 #### Connecting to a non-home Wi-Fi network
 
@@ -668,7 +677,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`arp_scanner.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
 -   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
--   **`network_health_check.py --network-profile`**: Interprets the network as `auto`, `home`, `guest`, or `travel`. Defaults to `auto`.
+-   **`network_health_check.py --network-profile`**: Interprets the network as `auto`, `home`, `guest`, `travel`, or `public`. Defaults to `auto`.
 -   **`network_health_check.py --alerts-only`**: Compact alert-only console output with exit code `2` when actionable health findings are detected.
 -   **`network_health_check.py --output focus`**: Short operator view with trust assessment, compact counters, and key checks only.
 -   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.

@@ -34,6 +34,20 @@ class NetworkHealthTests(unittest.TestCase):
             {},
         )
 
+    def test_profile_local_policies_distinguish_isolation_expectations(self):
+        home = network_health.get_profile_local_policy("home")
+        guest = network_health.get_profile_local_policy("guest")
+        travel = network_health.get_profile_local_policy("travel")
+        public = network_health.get_profile_local_policy("public")
+
+        self.assertFalse(home["isolation_expected"])
+        self.assertTrue(guest["isolation_expected"])
+        self.assertFalse(travel["isolation_expected"])
+        self.assertTrue(travel["isolation_desired"])
+        self.assertTrue(public["isolation_expected"])
+        self.assertEqual(travel["posture"], "untrusted_travel_network")
+        self.assertEqual(public["posture"], "untrusted_public_network")
+
     def test_build_probe_reasoning_details_uses_consistent_defaults(self):
         self.assertEqual(
             network_health.build_probe_reasoning_details("no_probes", 0),
@@ -258,6 +272,66 @@ class NetworkHealthTests(unittest.TestCase):
             observation["reachable_services"],
         )
 
+    def test_travel_and_public_use_distinct_local_exposure_assessments(self):
+        gateway_observation = {
+            "gateway_ip": "10.0.0.1",
+            "interface": "en0",
+            "is_private_gateway": True,
+            "reachable_services": [
+                {"port": 443, "label": "HTTPS admin", "risk": True}
+            ],
+            "risky_services": [
+                {"port": 443, "label": "HTTPS admin", "risk": True}
+            ],
+        }
+        peer_observation = {
+            "available": True,
+            "interface": "en0",
+            "gateway_ip": "10.0.0.1",
+            "is_private_gateway": True,
+            "visible_peers": [
+                {
+                    "ip": "10.0.0.22",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "interface": "en0",
+                }
+            ],
+        }
+
+        travel_gateway = network_health.analyze_gateway_exposure(
+            gateway_observation,
+            network_profile="travel",
+        )
+        public_gateway = network_health.analyze_gateway_exposure(
+            gateway_observation,
+            network_profile="public",
+        )
+        travel_peers = network_health.analyze_local_peer_visibility(
+            peer_observation,
+            network_profile="travel",
+        )
+        public_peers = network_health.analyze_local_peer_visibility(
+            peer_observation,
+            network_profile="public",
+        )
+
+        self.assertEqual(
+            travel_gateway["details"]["exposure_assessment"],
+            "untrusted_travel_admin_surface",
+        )
+        self.assertEqual(
+            public_gateway["details"]["exposure_assessment"],
+            "untrusted_public_admin_surface",
+        )
+        self.assertEqual(
+            travel_peers["details"]["visibility_assessment"],
+            "untrusted_travel_visibility",
+        )
+        self.assertEqual(
+            public_peers["details"]["visibility_assessment"],
+            "untrusted_public_visibility",
+        )
+
     def test_extract_html_title_returns_clean_title(self):
         title = network_health.extract_html_title(
             "<html><head><title>\n Router Admin \n</title></head></html>"
@@ -359,7 +433,7 @@ class NetworkHealthTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["status"], "notice")
-        self.assertEqual(result["details"]["exposure_assessment"], "untrusted_network_admin_surface")
+        self.assertEqual(result["details"]["exposure_assessment"], "untrusted_public_admin_surface")
         self.assertIn("higher-risk on public networks", result["summary"])
 
     def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
@@ -559,6 +633,12 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(
             result["details"]["profile_expectation"],
             "travel networks should not be assumed to isolate clients unless evidence supports it",
+        )
+        self.assertFalse(result["details"]["isolation_expected"])
+        self.assertTrue(result["details"]["isolation_desired"])
+        self.assertEqual(
+            result["details"]["isolation_assessment"],
+            "untrusted_travel_segment",
         )
 
     def test_build_client_isolation_hint_does_not_flag_expected_home_visibility(self):
@@ -2000,6 +2080,49 @@ Wi-Fi:
 
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["affected_components"], ["DNS", "HTTPS", "Active path"])
+
+    def test_build_overall_trust_explanation_includes_notice_only_path_signals(self):
+        result = network_health.build_overall_trust_explanation_check(
+            {
+                "name": "client_isolation_hint",
+                "status": "ok",
+                "details": {
+                    "hint_level": "no_peer_visibility",
+                    "is_private_gateway": True,
+                },
+            },
+            {
+                "name": "dns_trust_reasoning",
+                "status": "notice",
+                "details": {"hint_level": "dns_route_mismatch"},
+            },
+            {
+                "name": "captive_trust_reasoning",
+                "status": "ok",
+                "details": {"hint_level": "normal_internet_path"},
+            },
+            {
+                "name": "https_trust_reasoning",
+                "status": "ok",
+                "details": {"hint_level": "normal_https_path"},
+            },
+            active_path_check={"name": "active_path", "status": "notice"},
+            network_profile="travel",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("notices are active", result["summary"])
+        self.assertEqual(
+            result["details"]["affected_components"],
+            ["DNS", "Active path"],
+        )
+        self.assertEqual(
+            result["details"]["component_findings"],
+            [
+                {"component": "DNS", "status": "notice"},
+                {"component": "Active path", "status": "notice"},
+            ],
+        )
 
     def test_collect_overall_trust_signals_extracts_component_state(self):
         signals = network_health.collect_overall_trust_signals(
