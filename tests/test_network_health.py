@@ -1636,6 +1636,61 @@ Wi-Fi:
         self.assertEqual(results[0]["status"], "alert")
         self.assertIn("Unexpected captive-portal probe response", results[0]["summary"])
 
+    def test_collect_captive_portal_observations_keeps_raw_response(self):
+        probe = {
+            "name": "probe",
+            "url": "http://probe.test",
+            "expected_status": 204,
+            "expected_body_contains": None,
+        }
+        response = {"status_code": 204, "headers": {}, "body": ""}
+        with mock.patch("network_health.fetch_url", return_value=response):
+            observations = network_health.collect_captive_portal_observations(
+                [probe],
+                timeout=7,
+            )
+
+        self.assertEqual(observations[0]["probe"], probe)
+        self.assertEqual(observations[0]["response"], response)
+        self.assertNotIn("status", observations[0])
+
+    def test_analyze_captive_portal_observation_detects_body_mismatch(self):
+        result = network_health.analyze_captive_portal_observation(
+            {
+                "probe": {
+                    "name": "apple",
+                    "url": "http://probe.test",
+                    "expected_status": 200,
+                    "expected_body_contains": "Success",
+                },
+                "response": {
+                    "status_code": 200,
+                    "headers": {},
+                    "body": "Hotel login",
+                },
+            }
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["body_preview"], "Hotel login")
+
+    def test_captive_transport_failure_becomes_alert_instead_of_crashing(self):
+        probe = {
+            "name": "offline",
+            "url": "http://probe.test",
+            "expected_status": 204,
+            "expected_body_contains": None,
+        }
+        with mock.patch(
+            "network_health.fetch_url",
+            side_effect=network_health.urllib.error.URLError("offline"),
+        ):
+            results = network_health.run_captive_portal_checks([probe])
+
+        self.assertEqual(results[0]["status"], "alert")
+        self.assertIn("Connectivity probe failed", results[0]["summary"])
+        self.assertIn("offline", results[0]["details"]["error"])
+
     def test_build_captive_trust_reasoning_marks_normal_path_ok(self):
         result = network_health.build_captive_trust_reasoning_check(
             [
@@ -1677,6 +1732,55 @@ Wi-Fi:
 
         self.assertEqual(results[0]["status"], "alert")
         self.assertIn("TLS verification failed", results[0]["summary"])
+
+    def test_collect_https_tls_observations_keeps_error_kinds(self):
+        probes = [
+            {"name": "ok", "url": "https://ok.test", "expected_statuses": [200]},
+            {"name": "tls", "url": "https://tls.test", "expected_statuses": [200]},
+            {
+                "name": "offline",
+                "url": "https://offline.test",
+                "expected_statuses": [200],
+            },
+        ]
+        with mock.patch(
+            "network_health.probe_https_endpoint",
+            side_effect=[
+                {"status_code": 200},
+                ssl.SSLError("verify failed"),
+                network_health.urllib.error.URLError("offline"),
+            ],
+        ):
+            observations = network_health.collect_https_tls_observations(probes)
+
+        self.assertEqual(observations[0]["response"]["status_code"], 200)
+        self.assertEqual(observations[1]["error_kind"], "tls")
+        self.assertEqual(observations[2]["error_kind"], "transport")
+        self.assertTrue(all("status" not in item for item in observations))
+
+    def test_analyze_https_tls_observation_classifies_response_and_errors(self):
+        probe = {
+            "name": "probe",
+            "url": "https://example.test",
+            "expected_statuses": [200, 204],
+        }
+        ok_result = network_health.analyze_https_tls_observation(
+            {"probe": probe, "response": {"status_code": 204}}
+        )
+        unexpected_result = network_health.analyze_https_tls_observation(
+            {"probe": probe, "response": {"status_code": 302}}
+        )
+        tls_result = network_health.analyze_https_tls_observation(
+            {"probe": probe, "error_kind": "tls", "error": "verify failed"}
+        )
+        transport_result = network_health.analyze_https_tls_observation(
+            {"probe": probe, "error_kind": "transport", "error": "offline"}
+        )
+
+        self.assertEqual(ok_result["status"], "ok")
+        self.assertEqual(unexpected_result["status"], "alert")
+        self.assertIn("TLS verification failed", tls_result["summary"])
+        self.assertIn("HTTPS probe failed", transport_result["summary"])
 
     def test_build_https_trust_reasoning_marks_normal_path_ok(self):
         result = network_health.build_https_trust_reasoning_check(

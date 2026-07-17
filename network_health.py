@@ -1320,37 +1320,65 @@ def fetch_url(url, timeout=5, context=None):
         }
 
 
-def run_captive_portal_checks(probes=None, timeout=5):
-    checks = []
+def collect_captive_portal_observations(probes=None, timeout=5):
+    """Collect raw HTTP connectivity-check responses."""
+    observations = []
     for probe in probes or DEFAULT_HTTP_PROBES:
-        response = fetch_url(probe["url"], timeout=timeout)
-        location = response["headers"].get("Location")
-        body = response["body"]
-        expected_status = probe["expected_status"]
-        expected_body_contains = probe["expected_body_contains"]
-        redirected = location is not None and 300 <= response["status_code"] < 400
-        body_mismatch = (
-            expected_body_contains is not None and expected_body_contains not in body
+        try:
+            response = fetch_url(probe["url"], timeout=timeout)
+            observations.append({"probe": dict(probe), "response": response})
+        except (urllib.error.URLError, OSError) as exc:
+            observations.append({"probe": dict(probe), "error": str(exc)})
+    return observations
+
+
+def analyze_captive_portal_observation(observation):
+    """Interpret one collected HTTP connectivity-check response."""
+    probe = observation["probe"]
+    if observation.get("error") is not None:
+        return build_check(
+            f"captive_{probe['name']}",
+            "alert",
+            f"Connectivity probe failed for {probe['url']}",
+            {"url": probe["url"], "error": observation["error"]},
         )
-        suspicious = response["status_code"] != expected_status or redirected or body_mismatch
-        checks.append(
-            build_check(
-                f"captive_{probe['name']}",
-                "alert" if suspicious else "ok",
-                (
-                    f"Unexpected captive-portal probe response for {probe['url']}"
-                    if suspicious
-                    else f"Connectivity probe looked normal for {probe['url']}"
-                ),
-                {
-                    "url": probe["url"],
-                    "status_code": response["status_code"],
-                    "location": location,
-                    "body_preview": body,
-                },
-            )
+
+    response = observation["response"]
+    location = response["headers"].get("Location")
+    body = response["body"]
+    expected_status = probe["expected_status"]
+    expected_body_contains = probe["expected_body_contains"]
+    redirected = location is not None and 300 <= response["status_code"] < 400
+    body_mismatch = (
+        expected_body_contains is not None and expected_body_contains not in body
+    )
+    suspicious = response["status_code"] != expected_status or redirected or body_mismatch
+    return build_check(
+        f"captive_{probe['name']}",
+        "alert" if suspicious else "ok",
+        (
+            f"Unexpected captive-portal probe response for {probe['url']}"
+            if suspicious
+            else f"Connectivity probe looked normal for {probe['url']}"
+        ),
+        {
+            "url": probe["url"],
+            "status_code": response["status_code"],
+            "location": location,
+            "body_preview": body,
+        },
+    )
+
+
+def run_captive_portal_checks(probes=None, timeout=5):
+    """Collect and interpret HTTP captive-portal probes."""
+    return [
+        analyze_captive_portal_observation(observation)
+        for observation in collect_captive_portal_observations(
+            probes=probes,
+            timeout=timeout,
         )
-    return checks
+    ]
 
 
 def build_captive_trust_reasoning_check(captive_checks):
@@ -2261,47 +2289,70 @@ def build_wifi_environment_check():
     return build_check("wifi_environment", status, summary, wifi)
 
 
-def run_https_tls_checks(probes=None, timeout=5):
-    checks = []
+def collect_https_tls_observations(probes=None, timeout=5):
+    """Collect certificate-validated HTTPS responses and transport errors."""
+    observations = []
     for probe in probes or DEFAULT_HTTPS_PROBES:
         try:
             response = probe_https_endpoint(probe["url"], timeout=timeout)
-            expected_statuses = probe["expected_statuses"]
-            suspicious = response["status_code"] not in expected_statuses
-            checks.append(
-                build_check(
-                    f"https_{probe['name']}",
-                    "alert" if suspicious else "ok",
-                    (
-                        f"Unexpected HTTPS response for {probe['url']}"
-                        if suspicious
-                        else f"HTTPS probe succeeded for {probe['url']}"
-                    ),
-                    {
-                        "url": probe["url"],
-                        "status_code": response["status_code"],
-                    },
-                )
-            )
+            observations.append({"probe": dict(probe), "response": response})
         except ssl.SSLError as exc:
-            checks.append(
-                build_check(
-                    f"https_{probe['name']}",
-                    "alert",
-                    f"TLS verification failed for {probe['url']}",
-                    {"url": probe["url"], "error": str(exc)},
-                )
+            observations.append(
+                {"probe": dict(probe), "error_kind": "tls", "error": str(exc)}
             )
         except (urllib.error.URLError, OSError) as exc:
-            checks.append(
-                build_check(
-                    f"https_{probe['name']}",
-                    "alert",
-                    f"HTTPS probe failed for {probe['url']}",
-                    {"url": probe["url"], "error": str(exc)},
-                )
+            observations.append(
+                {
+                    "probe": dict(probe),
+                    "error_kind": "transport",
+                    "error": str(exc),
+                }
             )
-    return checks
+    return observations
+
+
+def analyze_https_tls_observation(observation):
+    """Interpret one collected HTTPS response or transport error."""
+    probe = observation["probe"]
+    error_kind = observation.get("error_kind")
+    if error_kind == "tls":
+        return build_check(
+            f"https_{probe['name']}",
+            "alert",
+            f"TLS verification failed for {probe['url']}",
+            {"url": probe["url"], "error": observation["error"]},
+        )
+    if error_kind == "transport":
+        return build_check(
+            f"https_{probe['name']}",
+            "alert",
+            f"HTTPS probe failed for {probe['url']}",
+            {"url": probe["url"], "error": observation["error"]},
+        )
+
+    response = observation["response"]
+    suspicious = response["status_code"] not in probe["expected_statuses"]
+    return build_check(
+        f"https_{probe['name']}",
+        "alert" if suspicious else "ok",
+        (
+            f"Unexpected HTTPS response for {probe['url']}"
+            if suspicious
+            else f"HTTPS probe succeeded for {probe['url']}"
+        ),
+        {"url": probe["url"], "status_code": response["status_code"]},
+    )
+
+
+def run_https_tls_checks(probes=None, timeout=5):
+    """Collect and interpret certificate-validated HTTPS probes."""
+    return [
+        analyze_https_tls_observation(observation)
+        for observation in collect_https_tls_observations(
+            probes=probes,
+            timeout=timeout,
+        )
+    ]
 
 
 def build_https_trust_reasoning_check(https_checks):
