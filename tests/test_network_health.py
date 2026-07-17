@@ -650,6 +650,86 @@ nameserver 1.1.1.1
         self.assertEqual(config["source"], "resolv.conf")
         self.assertEqual(config["nameservers"], ["192.168.2.1"])
 
+    def test_collect_dns_environment_observation_includes_route_context(self):
+        configuration = {
+            "source": "scutil",
+            "nameservers": ["192.168.2.254"],
+            "resolvers": [],
+        }
+        networks = [ipaddress.ip_network("192.168.2.0/24")]
+        with mock.patch(
+            "network_health.collect_dns_configuration",
+            return_value=configuration,
+        ):
+            with mock.patch(
+                "network_health.get_default_gateway",
+                return_value=("192.168.2.254", "en6"),
+            ):
+                with mock.patch(
+                    "network_health.get_interface_networks",
+                    return_value=networks,
+                ):
+                    observation = (
+                        network_health.collect_dns_environment_observation()
+                    )
+
+        self.assertEqual(observation["configuration"], configuration)
+        self.assertEqual(observation["gateway_ip"], "192.168.2.254")
+        self.assertEqual(observation["default_interface"], "en6")
+        self.assertEqual(observation["interface_networks"], networks)
+        self.assertNotIn("status", observation)
+
+    def test_analyze_dns_environment_does_not_read_or_mutate_system_state(self):
+        configuration = {
+            "source": "scutil",
+            "nameservers": ["192.168.2.254", "1.1.1.1"],
+            "resolvers": [],
+        }
+        observation = {
+            "configuration": configuration,
+            "gateway_ip": "192.168.2.254",
+            "default_interface": "en6",
+            "interface_networks": [ipaddress.ip_network("192.168.2.0/24")],
+        }
+
+        with mock.patch(
+            "network_health.get_interface_networks",
+            side_effect=AssertionError("system state must not be read during analysis"),
+        ):
+            result = network_health.analyze_dns_environment(observation)
+
+        self.assertEqual(result["status"], "alert")
+        self.assertNotIn("analysis", configuration)
+        classifications = result["details"]["analysis"]["classifications"]
+        self.assertEqual(classifications[0]["classification"], "gateway_dns")
+        self.assertEqual(classifications[1]["classification"], "public_upstream")
+
+    def test_analyze_dns_environment_keeps_split_dns_mismatch_as_notice(self):
+        result = network_health.analyze_dns_environment(
+            {
+                "configuration": {
+                    "source": "scutil",
+                    "nameservers": ["10.0.0.53"],
+                    "resolvers": [
+                        {
+                            "nameservers": ["10.0.0.53"],
+                            "if_index": "7 (utun3)",
+                            "reach": "0x00020002 (Reachable,Directly Reachable Address)",
+                        }
+                    ],
+                },
+                "gateway_ip": "192.168.2.254",
+                "default_interface": "en6",
+                "interface_networks": [ipaddress.ip_network("192.168.2.0/24")],
+            }
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(
+            result["details"]["analysis"]["risks"][0]["severity"],
+            "notice",
+        )
+
     def test_analyze_dns_servers_flags_public_resolvers(self):
         analysis = network_health.analyze_dns_servers(
             ["192.168.2.1", "1.1.1.1"],
@@ -1503,6 +1583,42 @@ Wi-Fi:
 
         self.assertEqual(results[0]["status"], "alert")
         self.assertIn("non-public", results[0]["summary"])
+
+    def test_collect_dns_resolution_observations_keeps_raw_results_and_errors(self):
+        with mock.patch(
+            "network_health.resolve_domain_ips",
+            side_effect=[
+                ["104.18.33.45"],
+                network_health.socket.gaierror("lookup failed"),
+            ],
+        ):
+            observations = network_health.collect_dns_resolution_observations(
+                ["openai.com", "example.test"]
+            )
+
+        self.assertEqual(
+            observations[0],
+            {"domain": "openai.com", "ips": ["104.18.33.45"]},
+        )
+        self.assertEqual(observations[1]["domain"], "example.test")
+        self.assertIn("lookup failed", observations[1]["error"])
+        self.assertNotIn("status", observations[0])
+
+    def test_analyze_dns_resolution_observation_classifies_raw_answers(self):
+        public_result = network_health.analyze_dns_resolution_observation(
+            {"domain": "openai.com", "ips": ["104.18.33.45"]}
+        )
+        private_result = network_health.analyze_dns_resolution_observation(
+            {"domain": "example.com", "ips": ["192.168.2.10"]}
+        )
+        failed_result = network_health.analyze_dns_resolution_observation(
+            {"domain": "example.test", "error": "lookup failed"}
+        )
+
+        self.assertEqual(public_result["status"], "ok")
+        self.assertEqual(private_result["status"], "alert")
+        self.assertEqual(failed_result["status"], "alert")
+        self.assertIn("lookup failed", failed_result["details"]["error"])
 
     def test_run_captive_portal_checks_flags_redirects(self):
         with mock.patch(

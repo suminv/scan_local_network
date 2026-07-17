@@ -806,43 +806,54 @@ def resolve_domain_ips(domain):
     return ips
 
 
-def run_dns_consistency_checks(domains=None):
-    checks = []
+def collect_dns_resolution_observations(domains=None):
+    """Resolve configured domains and retain only raw addresses or errors."""
+    observations = []
     for domain in domains or DEFAULT_DNS_DOMAINS:
         try:
             ips = resolve_domain_ips(domain)
         except socket.gaierror as exc:
-            checks.append(
-                {
-                    "name": f"dns_{domain}",
-                    "status": "alert",
-                    "summary": f"DNS lookup failed for {domain}",
-                    "details": {"domain": domain, "error": str(exc)},
-                }
-            )
+            observations.append({"domain": domain, "error": str(exc)})
             continue
+        observations.append({"domain": domain, "ips": ips})
+    return observations
 
-        public_ips = [ip for ip in ips if is_public_ip(ip)]
-        if not public_ips:
-            checks.append(
-                {
-                    "name": f"dns_{domain}",
-                    "status": "alert",
-                    "summary": f"{domain} resolved only to non-public addresses",
-                    "details": {"domain": domain, "ips": ips},
-                }
-            )
-            continue
 
-        checks.append(
-            {
-                "name": f"dns_{domain}",
-                "status": "ok",
-                "summary": f"{domain} resolved to {len(public_ips)} public address(es)",
-                "details": {"domain": domain, "ips": ips},
-            }
+def analyze_dns_resolution_observation(observation):
+    """Interpret one collected domain-resolution observation."""
+    domain = observation["domain"]
+    if observation.get("error") is not None:
+        return build_check(
+            f"dns_{domain}",
+            "alert",
+            f"DNS lookup failed for {domain}",
+            {"domain": domain, "error": observation["error"]},
         )
-    return checks
+
+    ips = observation.get("ips", [])
+    public_ips = [ip for ip in ips if is_public_ip(ip)]
+    if not public_ips:
+        return build_check(
+            f"dns_{domain}",
+            "alert",
+            f"{domain} resolved only to non-public addresses",
+            {"domain": domain, "ips": ips},
+        )
+
+    return build_check(
+        f"dns_{domain}",
+        "ok",
+        f"{domain} resolved to {len(public_ips)} public address(es)",
+        {"domain": domain, "ips": ips},
+    )
+
+
+def run_dns_consistency_checks(domains=None):
+    """Collect and interpret configured DNS resolution probes."""
+    return [
+        analyze_dns_resolution_observation(observation)
+        for observation in collect_dns_resolution_observations(domains)
+    ]
 
 
 def parse_scutil_dns(raw_text):
@@ -954,14 +965,25 @@ def get_interface_networks(interface):
 
 
 def is_on_interface_network(ip, interface):
+    return is_on_networks(ip, get_interface_networks(interface))
+
+
+def is_on_networks(ip, networks):
+    """Return whether an address belongs to one of the supplied interface networks."""
     try:
         address = ipaddress.ip_address(normalize_ip_for_compare(ip))
     except ValueError:
         return False
-    return any(address in network for network in get_interface_networks(interface))
+    return any(address in network for network in networks)
 
 
-def classify_dns_server(server, resolver=None, default_interface=None, gateway_ip=None):
+def classify_dns_server(
+    server,
+    resolver=None,
+    default_interface=None,
+    gateway_ip=None,
+    interface_networks=None,
+):
     normalized_server = normalize_ip_for_compare(server)
     normalized_gateway = normalize_ip_for_compare(gateway_ip)
     if normalized_gateway and normalized_server == normalized_gateway:
@@ -1010,7 +1032,15 @@ def classify_dns_server(server, resolver=None, default_interface=None, gateway_i
             "reason": "DNS server is a private or link-local address",
         }
 
-    if default_interface and is_on_interface_network(server, default_interface):
+    if default_interface:
+        networks = (
+            get_interface_networks(default_interface)
+            if interface_networks is None
+            else interface_networks
+        )
+    else:
+        networks = []
+    if networks and is_on_networks(server, networks):
         return {
             "server": server,
             "classification": "on_link",
@@ -1049,7 +1079,13 @@ def classify_dns_server(server, resolver=None, default_interface=None, gateway_i
     }
 
 
-def analyze_dns_servers(nameservers, resolvers=None, default_interface=None, gateway_ip=None):
+def analyze_dns_servers(
+    nameservers,
+    resolvers=None,
+    default_interface=None,
+    gateway_ip=None,
+    interface_networks=None,
+):
     resolvers = resolvers or []
     risks = []
     classifications = []
@@ -1063,6 +1099,7 @@ def analyze_dns_servers(nameservers, resolvers=None, default_interface=None, gat
             resolver=matching_resolver,
             default_interface=default_interface,
             gateway_ip=gateway_ip,
+            interface_networks=interface_networks,
         )
         classifications.append(classification)
         if classification["risk"]:
@@ -1081,15 +1118,28 @@ def analyze_dns_servers(nameservers, resolvers=None, default_interface=None, gat
     }
 
 
-def build_dns_environment_check():
+def collect_dns_environment_observation():
+    """Collect resolver configuration and the active route context."""
     dns_config = collect_dns_configuration()
-    nameservers = dns_config.get("nameservers", [])
     gateway_ip, default_interface = get_default_gateway()
+    return {
+        "configuration": dns_config,
+        "gateway_ip": gateway_ip,
+        "default_interface": default_interface,
+        "interface_networks": get_interface_networks(default_interface),
+    }
+
+
+def analyze_dns_environment(observation):
+    """Classify a collected DNS configuration without reading system state."""
+    dns_config = dict(observation["configuration"])
+    nameservers = dns_config.get("nameservers", [])
     analysis = analyze_dns_servers(
         nameservers,
         resolvers=dns_config.get("resolvers", []),
-        default_interface=default_interface,
-        gateway_ip=gateway_ip,
+        default_interface=observation.get("default_interface"),
+        gateway_ip=observation.get("gateway_ip"),
+        interface_networks=observation.get("interface_networks", []),
     )
     dns_config["analysis"] = analysis
 
@@ -1124,6 +1174,12 @@ def build_dns_environment_check():
         f"Detected {len(nameservers)} DNS server(s) from {dns_config['source']}",
         dns_config,
     )
+
+
+def build_dns_environment_check():
+    """Collect and interpret the current DNS environment."""
+    observation = collect_dns_environment_observation()
+    return analyze_dns_environment(observation)
 
 
 def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks):
