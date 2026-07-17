@@ -1072,6 +1072,63 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertTrue(result["details"]["possible_dual_connectivity"])
         self.assertTrue(result["details"]["route_mismatch"])
 
+    def test_collect_active_path_observation_keeps_route_and_source_evidence(self):
+        wifi_environment = {
+            "inventory": {
+                "interfaces": [
+                    {"name": "en0", "status": "spairport_status_connected"}
+                ]
+            },
+            "current": {
+                "available": True,
+                "source": "system_profiler",
+                "interfaces": {"en0": {"ssid": "<redacted>"}},
+            },
+        }
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.254", "en6"),
+        ):
+            with mock.patch("network_health.is_macos", return_value=True):
+                observation = network_health.collect_active_path_observation(
+                    wifi_environment
+                )
+
+        self.assertEqual(observation["default_interface"], "en6")
+        self.assertEqual(observation["active_wifi_interface"], "en0")
+        self.assertEqual(
+            observation["current_details_source"],
+            "system_profiler",
+        )
+        self.assertNotIn("status", observation)
+
+    def test_analyze_active_path_uses_collected_confidence_without_system_calls(self):
+        high_confidence = network_health.analyze_active_path(
+            {
+                "platform": "macos",
+                "gateway_ip": "192.168.2.254",
+                "default_interface": "en6",
+                "active_wifi_interface": "en0",
+                "current_details_available": True,
+                "current_details_source": "wdutil",
+            }
+        )
+        low_confidence = network_health.analyze_active_path(
+            {
+                "platform": "macos",
+                "gateway_ip": "192.168.2.254",
+                "default_interface": "en6",
+                "active_wifi_interface": "en0",
+                "current_details_available": True,
+                "current_details_source": "system_profiler",
+            }
+        )
+
+        self.assertEqual(high_confidence["status"], "alert")
+        self.assertEqual(high_confidence["details"]["confidence"], "high")
+        self.assertEqual(low_confidence["status"], "notice")
+        self.assertEqual(low_confidence["details"]["confidence"], "low")
+
     def test_build_active_path_check_uses_system_profiler_connected_status(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
             with mock.patch("network_health.is_macos", return_value=True):
@@ -1418,6 +1475,42 @@ Wi-Fi:
 
         self.assertEqual(enriched["analysis"]["visible_network_count"], 0)
         self.assertEqual(enriched["analysis"]["risks"], [])
+
+    def test_analyze_wifi_environment_classifies_collected_open_network(self):
+        result = network_health.analyze_wifi_environment(
+            {
+                "inventory": {"interfaces": [{"name": "en0"}]},
+                "current": {"available": False, "interfaces": {}},
+                "nearby": {
+                    "available": True,
+                    "networks": [
+                        {
+                            "ssid": "Hotel WiFi",
+                            "bssid": "11:22:33:44:55:66",
+                            "rssi": "-70",
+                            "channel": "6",
+                            "security": "NONE",
+                        }
+                    ],
+                },
+            },
+            platform_name="Darwin",
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(
+            result["details"]["analysis"]["risks"][0]["type"],
+            "open_network",
+        )
+
+    def test_analyze_wifi_environment_handles_unsupported_platform_snapshot(self):
+        result = network_health.analyze_wifi_environment(
+            None,
+            platform_name="Linux",
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["platform"], "Linux")
 
     def test_summarize_wifi_environment_marks_unavailable_nearby_as_ok(self):
         status, summary = network_health.summarize_wifi_environment(

@@ -1579,9 +1579,34 @@ def build_current_wifi_snapshot(inventory, current_details):
     }
 
 
-def build_active_path_check(wifi_environment=None):
+def collect_active_path_observation(wifi_environment=None):
+    """Collect default-route and active Wi-Fi interface state."""
     gateway_ip, default_interface = get_default_gateway()
-    if not is_macos():
+    macos = is_macos()
+    if macos and wifi_environment is None:
+        wifi_environment = collect_wifi_environment()
+
+    inventory = (wifi_environment or {}).get("inventory", {})
+    current = (wifi_environment or {}).get("current", {})
+    active_wifi_interface = (
+        get_active_wifi_interface_name(inventory, current) if macos else None
+    )
+    return {
+        "platform": "macos" if macos else platform.system().lower(),
+        "gateway_ip": gateway_ip,
+        "default_interface": default_interface,
+        "active_wifi_interface": active_wifi_interface,
+        "current_details_available": current.get("available", False),
+        "current_details_source": current.get("source"),
+    }
+
+
+def analyze_active_path(observation):
+    """Interpret collected route and Wi-Fi state without system calls."""
+    gateway_ip = observation["gateway_ip"]
+    default_interface = observation["default_interface"]
+    active_wifi_interface = observation.get("active_wifi_interface")
+    if observation.get("platform") != "macos":
         return {
             "name": "active_path",
             "status": "ok",
@@ -1594,17 +1619,10 @@ def build_active_path_check(wifi_environment=None):
             },
         }
 
-    if wifi_environment is None:
-        wifi_environment = collect_wifi_environment()
-
-    inventory = (wifi_environment or {}).get("inventory", {})
-    current = (wifi_environment or {}).get("current", {})
-    active_wifi_interface = get_active_wifi_interface_name(inventory, current)
-
     if active_wifi_interface and active_wifi_interface != default_interface:
         inventory_only = (
-            not current.get("available", False)
-            or current.get("source") == "system_profiler"
+            not observation.get("current_details_available", False)
+            or observation.get("current_details_source") == "system_profiler"
         )
         status = "notice" if inventory_only else "alert"
         evidence = "system_profiler inventory only" if inventory_only else "current Wi-Fi details"
@@ -1662,6 +1680,12 @@ def build_active_path_check(wifi_environment=None):
                 "interpretation": "No active Wi-Fi interface was detected",
             },
     }
+
+
+def build_active_path_check(wifi_environment=None):
+    """Collect and interpret the active network path."""
+    observation = collect_active_path_observation(wifi_environment)
+    return analyze_active_path(observation)
 
 
 def parse_ping_summary(raw_text):
@@ -2273,20 +2297,29 @@ def summarize_wifi_environment(wifi_environment):
     )
 
 
-def build_wifi_environment_check():
-    wifi = collect_wifi_environment()
-    if wifi is None:
+def analyze_wifi_environment(wifi_environment, platform_name=None):
+    """Interpret a collected Wi-Fi environment without platform commands."""
+    if wifi_environment is None:
         return build_check(
             "wifi_environment",
             "ok",
             "Wi-Fi environment inspection is only implemented for macOS in this version",
-            {"platform": platform.system()},
+            {"platform": platform_name or platform.system()},
         )
 
-    wifi = build_wifi_environment_analysis(wifi)
+    wifi = build_wifi_environment_analysis(wifi_environment)
     status, summary = summarize_wifi_environment(wifi)
 
     return build_check("wifi_environment", status, summary, wifi)
+
+
+def build_wifi_environment_check():
+    """Collect and interpret the current Wi-Fi environment."""
+    wifi_environment = collect_wifi_environment()
+    return analyze_wifi_environment(
+        wifi_environment,
+        platform_name=platform.system(),
+    )
 
 
 def collect_https_tls_observations(probes=None, timeout=5):

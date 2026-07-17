@@ -220,6 +220,7 @@ Completed:
 - Local-segment health checks now use explicit collection and analysis boundaries for gateway service exposure, passive peer visibility, and gateway reachability, so profile rules and thresholds can be tested without network commands.
 - DNS health checks now separate resolver/route and domain-resolution collection from DNS classification and trust reasoning, including gateway, on-link, public-upstream, and VPN/split-DNS paths.
 - Captive-portal and HTTPS/TLS checks now separate raw response/error collection from interpretation; unavailable captive probes are reported as alerts instead of terminating the health run.
+- Wi-Fi environment and active-path checks now separate platform/default-route collection from security, channel, route-mismatch, dual-connectivity, and confidence interpretation.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
