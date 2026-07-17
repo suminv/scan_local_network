@@ -224,7 +224,8 @@ Completed:
 - Health orchestration now collects local, Internet, and Wi-Fi bundles separately and composes them through a tested stable report-order function, leaving `run_network_health_checks` responsible only for stage progression and top-level coordination.
 - Profile-aware local policy now distinguishes managed guest isolation, untrusted travel networks where isolation cannot be assumed, and public networks where isolation is expected but local trust is still withheld; overall trust also incorporates notice-only path signals.
 - Wi-Fi stability diagnostics now distinguish normal single mesh roaming from degraded and unstable links, reserve alerts for stronger measured impact, and expose measurement coverage, confidence, and latency peaks.
-- Passive local-segment reasoning now distinguishes confirmed peer visibility, inconclusive absence, and unavailable ARP evidence; untrusted profiles no longer treat missing observation data as possible proof of client isolation.
+- Passive local-segment reasoning now distinguishes confirmed peer visibility, inconclusive absence, and unavailable neighbor-cache evidence; untrusted profiles no longer treat missing observation data as possible proof of client isolation.
+- Passive peer visibility now combines IPv4 ARP with macOS/Linux IPv6 neighbor caches, excludes router entries, and deduplicates dual-stack devices by MAC without sending discovery traffic.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

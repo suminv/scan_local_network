@@ -549,23 +549,117 @@ def parse_arp_cache_entries(raw_output):
     return entries
 
 
+def parse_ipv6_neighbor_entries(raw_output):
+    """Parse macOS `ndp -an` and Linux `ip -6 neigh` cache output."""
+    entries = []
+    mac_pattern = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+    linux_pattern = re.compile(
+        r"^(?P<ip>\S+)\s+dev\s+(?P<interface>\S+)(?:\s+lladdr\s+(?P<mac>[0-9a-fA-F:]+))?(?P<rest>.*)$"
+    )
+    for raw_line in raw_output.splitlines():
+        line = raw_line.strip()
+        if not line or line.lower().startswith("neighbor"):
+            continue
+
+        linux_match = linux_pattern.match(line)
+        if linux_match:
+            mac = linux_match.group("mac")
+            rest = linux_match.group("rest")
+            if not mac or "FAILED" in rest or "INCOMPLETE" in rest:
+                continue
+            entries.append(
+                {
+                    "ip": linux_match.group("ip").split("%", 1)[0],
+                    "mac": mac.lower(),
+                    "interface": linux_match.group("interface"),
+                    "is_router": " router " in f" {rest.lower()} ",
+                    "address_family": "ipv6",
+                }
+            )
+            continue
+
+        tokens = line.split()
+        if not tokens:
+            continue
+        scoped_ip = tokens[0]
+        ip_text, _, scoped_interface = scoped_ip.partition("%")
+        try:
+            address = ipaddress.ip_address(ip_text)
+        except ValueError:
+            continue
+        if address.version != 6:
+            continue
+        mac_index = next(
+            (index for index, token in enumerate(tokens) if mac_pattern.match(token)),
+            None,
+        )
+        if mac_index is None:
+            continue
+        interface = scoped_interface or (
+            tokens[mac_index + 1] if len(tokens) > mac_index + 1 else None
+        )
+        if not interface:
+            continue
+        flags = tokens[mac_index + 2 :]
+        entries.append(
+            {
+                "ip": ip_text,
+                "mac": tokens[mac_index].lower(),
+                "interface": interface,
+                "is_router": any(flag == "R" for flag in flags),
+                "address_family": "ipv6",
+            }
+        )
+    return entries
+
+
+def collect_passive_neighbor_entries():
+    """Read available IPv4 and IPv6 neighbor tables without sending traffic."""
+    entries = []
+    available_sources = []
+    try:
+        entries.extend(parse_arp_cache_entries(run_command(["arp", "-an"])))
+        available_sources.append("arp")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
+
+    try:
+        ipv6_output = run_command(["ndp", "-an"])
+        entries.extend(parse_ipv6_neighbor_entries(ipv6_output))
+        available_sources.append("ndp")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        try:
+            ipv6_output = run_command(["ip", "-6", "neigh", "show"])
+            entries.extend(parse_ipv6_neighbor_entries(ipv6_output))
+            available_sources.append("ip-neigh")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+
+    return {
+        "available": bool(available_sources),
+        "sources": available_sources,
+        "entries": entries,
+    }
+
+
 def collect_local_peer_visibility():
-    """Collect passive local-peer observations from the current ARP cache."""
+    """Collect passive local-peer observations from OS neighbor caches."""
     gateway_ip, interface = get_default_gateway()
     is_private_gateway = not is_public_ip(gateway_ip)
-    try:
-        entries = parse_arp_cache_entries(run_command(["arp", "-an"]))
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    neighbor_observation = collect_passive_neighbor_entries()
+    if not neighbor_observation["available"]:
         return {
             "available": False,
             "interface": interface,
             "gateway_ip": gateway_ip,
             "is_private_gateway": is_private_gateway,
+            "evidence_sources": [],
             "visible_peers": [],
         }
 
     visible_peers = []
-    for entry in entries:
+    peers_by_mac = {}
+    for entry in neighbor_observation["entries"]:
         if entry["interface"] != interface:
             continue
         if entry["ip"] == gateway_ip:
@@ -574,17 +668,34 @@ def collect_local_peer_visibility():
             ip_obj = ipaddress.ip_address(entry["ip"])
         except ValueError:
             continue
-        if ip_obj.version != 4 or ip_obj.is_loopback or ip_obj.is_link_local:
+        if ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_unspecified:
             continue
-        if not ip_obj.is_private:
+        if entry.get("is_router"):
             continue
-        visible_peers.append(entry)
+        if ip_obj.version == 4 and (ip_obj.is_link_local or not ip_obj.is_private):
+            continue
+
+        identity = entry["mac"].lower()
+        existing = peers_by_mac.get(identity)
+        if existing is None:
+            peer = {
+                "ip": entry["ip"],
+                "mac": entry["mac"],
+                "interface": entry["interface"],
+            }
+            if ip_obj.version == 6:
+                peer["address_family"] = "ipv6"
+            peers_by_mac[identity] = peer
+            visible_peers.append(peer)
+        elif ip_obj.version == 6:
+            existing.setdefault("ipv6_addresses", []).append(entry["ip"])
 
     return {
         "available": True,
         "interface": interface,
         "gateway_ip": gateway_ip,
         "is_private_gateway": is_private_gateway,
+        "evidence_sources": neighbor_observation["sources"],
         "visible_peers": visible_peers,
     }
 
@@ -597,13 +708,14 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
     gateway_ip = observation["gateway_ip"]
     is_private_gateway = observation["is_private_gateway"]
     visible_peers = observation.get("visible_peers", [])
+    evidence_sources = observation.get("evidence_sources", ["arp"])
 
     if not observation.get("available", True):
         return {
             "name": "local_peer_visibility",
             "status": "notice" if is_untrusted_profile(network_profile) else "ok",
             "summary": (
-                "Passive ARP cache inspection is unavailable; local peer visibility and client isolation cannot be assessed"
+                "Passive IPv4/IPv6 neighbor-cache inspection is unavailable; local peer visibility and client isolation cannot be assessed"
             ),
             "details": {
                 "interface": interface,
@@ -613,7 +725,7 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
                 "recommended_action": profile_policy["recommended_action"],
                 "is_private_gateway": is_private_gateway,
                 "observation_available": False,
-                "evidence_source": "passive_arp_cache",
+                "evidence_sources": evidence_sources,
                 "inference_confidence": "none",
                 "visibility_assessment": "unavailable",
                 "visible_peers": [],
@@ -624,43 +736,43 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
         status = "ok" if network_profile == "home" else "notice"
         if network_profile in {"travel", "public"}:
             summary = (
-                f"ARP cache already shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
+                f"Passive neighbor caches already show {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
                 f"treat local peers as untrusted on this {network_profile} network"
             )
         elif network_profile == "guest":
             summary = (
-                f"ARP cache already shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
+                f"Passive neighbor caches already show {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
                 "this is more open than expected on many guest networks"
             )
         elif network_profile == "home":
             summary = (
-                f"ARP cache shows {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
+                f"Passive neighbor caches show {len(visible_peers)} local peer(s) besides the gateway on {interface}; "
                 "peer visibility is normal for this home network profile"
             )
         else:
             summary = (
-                f"ARP cache shows {len(visible_peers)} local peer(s) besides the gateway on {interface}"
+                f"Passive neighbor caches show {len(visible_peers)} local peer(s) besides the gateway on {interface}"
             )
     else:
         status = "ok"
         if network_profile in {"guest", "public"}:
             summary = (
-                f"No local peers were observed in the passive ARP cache on {interface}; "
+                f"No local peers were observed in the passive neighbor caches on {interface}; "
                 "client isolation remains unconfirmed"
             )
         elif network_profile == "travel":
             summary = (
-                f"No local peers were observed in the passive ARP cache on {interface}; "
+                f"No local peers were observed in the passive neighbor caches on {interface}; "
                 "do not assume this travel network isolates clients"
             )
         elif network_profile == "home":
             summary = (
-                f"No additional local peers are currently visible in the passive ARP cache on {interface}; "
+                f"No additional local peers are currently visible in the passive neighbor caches on {interface}; "
                 "client isolation is not expected for this home profile"
             )
         else:
             summary = (
-                f"No additional local peers are currently visible in the passive ARP cache on {interface}; "
+                f"No additional local peers are currently visible in the passive neighbor caches on {interface}; "
                 "absence of observations does not confirm client isolation"
             )
 
@@ -676,7 +788,7 @@ def analyze_local_peer_visibility(observation, network_profile=DEFAULT_NETWORK_P
             "recommended_action": profile_policy["recommended_action"],
             "is_private_gateway": is_private_gateway,
             "observation_available": True,
-            "evidence_source": "passive_arp_cache",
+            "evidence_sources": evidence_sources,
             "inference_confidence": "observed" if visible_peers else "inconclusive",
             "context_note": (
                 build_profile_context_note(network_profile, "peer_visibility")

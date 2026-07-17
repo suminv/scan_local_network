@@ -462,6 +462,28 @@ class NetworkHealthTests(unittest.TestCase):
             ],
         )
 
+    def test_parse_ipv6_neighbor_entries_supports_macos_and_linux(self):
+        macos_entries = network_health.parse_ipv6_neighbor_entries(
+            """
+Neighbor                             Linklayer Address Netif Expire S Flags
+fe80::1%en0                          40:3f:8c:c6:39:37 en0 23h59m S R
+fe80::22%en0                         aa:bb:cc:dd:ee:ff en0 20m S
+"""
+        )
+        linux_entries = network_health.parse_ipv6_neighbor_entries(
+            """
+fe80::33 dev eth0 lladdr 11:22:33:44:55:66 REACHABLE
+fe80::44 dev eth0 FAILED
+"""
+        )
+
+        self.assertTrue(macos_entries[0]["is_router"])
+        self.assertFalse(macos_entries[1]["is_router"])
+        self.assertEqual(macos_entries[1]["interface"], "en0")
+        self.assertEqual(linux_entries[0]["ip"], "fe80::33")
+        self.assertEqual(linux_entries[0]["interface"], "eth0")
+        self.assertEqual(len(linux_entries), 1)
+
     def test_build_local_peer_visibility_check_marks_visible_private_peers_as_notice(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
@@ -504,6 +526,40 @@ class NetworkHealthTests(unittest.TestCase):
             ],
         )
         self.assertNotIn("status", observation)
+
+    def test_collect_local_peer_visibility_merges_ipv4_and_ipv6_by_mac(self):
+        arp_output = (
+            "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
+            "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+        )
+        ndp_output = """
+fe80::1%en0 40:3f:8c:c6:39:37 en0 23h59m S R
+fe80::22%en0 aa:bb:cc:dd:ee:ff en0 20m S
+fe80::33%en0 11:22:33:44:55:66 en0 20m S
+"""
+
+        def command_output(command):
+            if command[0] == "arp":
+                return arp_output
+            if command[0] == "ndp":
+                return ndp_output
+            raise AssertionError(f"unexpected command: {command}")
+
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.1", "en0"),
+        ):
+            with mock.patch("network_health.run_command", side_effect=command_output):
+                observation = network_health.collect_local_peer_visibility()
+
+        self.assertEqual(observation["evidence_sources"], ["arp", "ndp"])
+        self.assertEqual(len(observation["visible_peers"]), 2)
+        ipv4_peer = observation["visible_peers"][0]
+        self.assertEqual(ipv4_peer["ip"], "192.168.2.22")
+        self.assertEqual(ipv4_peer["ipv6_addresses"], ["fe80::22"])
+        ipv6_only_peer = observation["visible_peers"][1]
+        self.assertEqual(ipv6_only_peer["ip"], "fe80::33")
+        self.assertEqual(ipv6_only_peer["address_family"], "ipv6")
 
     def test_analyze_local_peer_visibility_is_profile_aware(self):
         observation = {
@@ -2849,9 +2905,14 @@ Wi-Fi:
                     "gateway_ip": "192.168.2.1",
                     "observation_available": True,
                     "inference_confidence": "observed",
+                    "evidence_sources": ["arp", "ndp"],
                     "context_note": "often normal on a private/home LAN",
                     "visible_peers": [
-                        {"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"},
+                        {
+                            "ip": "192.168.2.22",
+                            "mac": "aa:bb:cc:dd:ee:ff",
+                            "ipv6_addresses": ["fe80::22"],
+                        },
                         {"ip": "192.168.2.23", "mac": "11:22:33:44:55:66"},
                     ],
                 },
@@ -2867,6 +2928,8 @@ Wi-Fi:
         self.assertIn("context: often normal on a private/home LAN", output)
         self.assertIn("passive observation: available", output)
         self.assertIn("inference confidence: observed", output)
+        self.assertIn("evidence sources: arp, ndp", output)
+        self.assertIn("IPv6: fe80::22", output)
         self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
         self.assertIn("[~]", output)
 

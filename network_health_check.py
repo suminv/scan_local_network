@@ -197,6 +197,8 @@ def format_local_peer_visibility_details(details):
         )
     if details.get("inference_confidence"):
         lines.append(f"  inference confidence: {details['inference_confidence']}")
+    if details.get("evidence_sources"):
+        lines.append(f"  evidence sources: {', '.join(details['evidence_sources'])}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
     if details.get("visibility_assessment"):
@@ -207,7 +209,12 @@ def format_local_peer_visibility_details(details):
         return lines
     lines.append("  visible peers:")
     for peer in peers[:8]:
-        lines.append(f"    - {peer['ip']} ({peer['mac']})")
+        address_suffix = ""
+        if peer.get("ipv6_addresses"):
+            address_suffix = f" · IPv6: {', '.join(peer['ipv6_addresses'])}"
+        elif peer.get("address_family") == "ipv6":
+            address_suffix = " · IPv6"
+        lines.append(f"    - {peer['ip']} ({peer['mac']}){address_suffix}")
     extra_count = max(0, len(peers) - 8)
     if extra_count:
         lines.append(f"    - ... {extra_count} more")

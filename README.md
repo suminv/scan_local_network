@@ -484,7 +484,7 @@ It currently checks:
 - default gateway MAC/vendor fingerprint when available from the local ARP cache
 - whether the default gateway exposes common local services such as DNS or web/admin endpoints to the current client
 - basic reachability to the default gateway using a short local ping probe
-- whether the passive ARP cache already shows other local peers besides the gateway on the current interface
+- whether passive IPv4 ARP and IPv6 neighbor caches already show other local peers besides the gateway on the current interface
 - a client-isolation hint that summarizes whether the current segment appears to expose peer devices to the client
 - whether an active Wi-Fi interface is present while the default route is using a different interface
 - macOS Wi-Fi interface inventory and best-effort nearby Wi-Fi visibility
@@ -526,7 +526,9 @@ Use this when you want the report wording to reflect different expectations. For
 - `travel`: isolation is desirable but must not be assumed on hotel or temporary networks; visible peers are treated as untrusted.
 - `public`: isolation is expected on a well-configured shared network, but the local segment remains untrusted even when no peers are currently visible.
 
-The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable ARP cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
+The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
+
+Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, and router entries are excluded from the peer count.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
