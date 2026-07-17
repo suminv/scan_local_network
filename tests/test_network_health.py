@@ -2072,6 +2072,98 @@ Wi-Fi:
             "https_trust_reasoning",
         ])
 
+    def test_collect_wifi_path_checks_reuses_environment_details(self):
+        wifi_environment_check = {
+            "name": "wifi_environment",
+            "status": "ok",
+            "details": {"inventory": {"interfaces": [{"name": "en0"}]}},
+        }
+        active_path_check = {"name": "active_path", "status": "ok"}
+        with mock.patch(
+            "network_health.build_wifi_environment_check",
+            return_value=wifi_environment_check,
+        ):
+            with mock.patch(
+                "network_health.build_active_path_check",
+                return_value=active_path_check,
+            ) as build_active_path_check:
+                checks = network_health.collect_wifi_path_checks()
+
+        build_active_path_check.assert_called_once_with(
+            wifi_environment_check["details"]
+        )
+        self.assertEqual(checks["wifi_environment"], wifi_environment_check)
+        self.assertEqual(checks["active_path"], active_path_check)
+
+    def test_compose_network_health_checks_preserves_report_order(self):
+        def check(name):
+            return {"name": name, "status": "ok"}
+
+        local_segment = {
+            "gateway_identity": check("gateway_identity"),
+            "gateway_fingerprint": check("gateway_fingerprint"),
+            "gateway_exposure": check("gateway_exposure"),
+            "local_peer_visibility": check("local_peer_visibility"),
+            "client_isolation_hint": check("client_isolation_hint"),
+        }
+        gateway_reachability = check("gateway_reachability")
+        internet_path = {
+            "dns_environment": check("dns_environment"),
+            "dns_trust_reasoning": check("dns_trust_reasoning"),
+            "dns_resolution_checks": [check("dns_example.com")],
+            "captive_checks": [check("captive_gstatic")],
+            "captive_trust_reasoning": check("captive_trust_reasoning"),
+            "https_checks": [check("https_example")],
+            "https_trust_reasoning": check("https_trust_reasoning"),
+        }
+        wifi_path = {
+            "wifi_environment": check("wifi_environment"),
+            "active_path": check("active_path"),
+        }
+        stability = check("wifi_stability")
+        overall = check("overall_trust_explanation")
+
+        with mock.patch(
+            "network_health.build_overall_trust_explanation_check",
+            return_value=overall,
+        ) as build_overall:
+            checks = network_health.compose_network_health_checks(
+                local_segment,
+                gateway_reachability,
+                internet_path,
+                wifi_path,
+                network_profile="travel",
+                wifi_stability_check=stability,
+            )
+
+        self.assertEqual(
+            [item["name"] for item in checks],
+            [
+                "gateway_identity",
+                "gateway_fingerprint",
+                "gateway_exposure",
+                "gateway_reachability",
+                "local_peer_visibility",
+                "client_isolation_hint",
+                "dns_environment",
+                "dns_trust_reasoning",
+                "wifi_environment",
+                "active_path",
+                "dns_example.com",
+                "captive_gstatic",
+                "captive_trust_reasoning",
+                "https_example",
+                "https_trust_reasoning",
+                "overall_trust_explanation",
+                "wifi_stability",
+            ],
+        )
+        self.assertEqual(build_overall.call_args.kwargs["network_profile"], "travel")
+        self.assertIs(
+            build_overall.call_args.kwargs["active_path_check"],
+            wifi_path["active_path"],
+        )
+
     def test_build_health_summary_counts_alerts(self):
         summary = network_health.build_health_summary(
             [

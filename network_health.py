@@ -2644,6 +2644,59 @@ def collect_internet_path_checks(*, dns_domains=None, timeout=5):
     }
 
 
+def collect_wifi_path_checks():
+    """Collect Wi-Fi environment and active-route checks as one bundle."""
+    wifi_environment_check = build_wifi_environment_check()
+    active_path_check = build_active_path_check(wifi_environment_check.get("details"))
+    return {
+        "wifi_environment": wifi_environment_check,
+        "active_path": active_path_check,
+    }
+
+
+def compose_network_health_checks(
+    local_segment,
+    gateway_reachability_check,
+    internet_path,
+    wifi_path,
+    *,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+    wifi_stability_check=None,
+):
+    """Compose collected check bundles into the stable report order."""
+    active_path_check = wifi_path["active_path"]
+    overall_trust_check = build_overall_trust_explanation_check(
+        local_segment["client_isolation_hint"],
+        internet_path["dns_trust_reasoning"],
+        internet_path["captive_trust_reasoning"],
+        internet_path["https_trust_reasoning"],
+        active_path_check=active_path_check,
+        gateway_reachability_check=gateway_reachability_check,
+        network_profile=network_profile,
+    )
+    checks = [
+        local_segment["gateway_identity"],
+        local_segment["gateway_fingerprint"],
+        local_segment["gateway_exposure"],
+        gateway_reachability_check,
+        local_segment["local_peer_visibility"],
+        local_segment["client_isolation_hint"],
+        internet_path["dns_environment"],
+        internet_path["dns_trust_reasoning"],
+        wifi_path["wifi_environment"],
+        active_path_check,
+        *internet_path["dns_resolution_checks"],
+        *internet_path["captive_checks"],
+        internet_path["captive_trust_reasoning"],
+        *internet_path["https_checks"],
+        internet_path["https_trust_reasoning"],
+        overall_trust_check,
+    ]
+    if wifi_stability_check is not None:
+        checks.append(wifi_stability_check)
+    return checks
+
+
 def run_network_health_checks(
     *,
     dns_domains=None,
@@ -2670,45 +2723,23 @@ def run_network_health_checks(
         dns_domains=dns_domains,
         timeout=timeout,
     )
-    checks = [
-        local_segment["gateway_identity"],
-        local_segment["gateway_fingerprint"],
-        local_segment["gateway_exposure"],
-        gateway_reachability_check,
-        local_segment["local_peer_visibility"],
-        local_segment["client_isolation_hint"],
-        internet_path["dns_environment"],
-        internet_path["dns_trust_reasoning"],
-    ]
     if progress_callback:
         progress_callback("Wi-Fi environment", 4, progress_steps)
-    wifi_environment_check = build_wifi_environment_check()
-    checks.append(wifi_environment_check)
-    active_path_check = build_active_path_check(wifi_environment_check.get("details"))
-    checks.append(active_path_check)
-    checks.extend(internet_path["dns_resolution_checks"])
-    checks.extend(internet_path["captive_checks"])
-    checks.append(internet_path["captive_trust_reasoning"])
-    checks.extend(internet_path["https_checks"])
-    checks.append(internet_path["https_trust_reasoning"])
-    checks.append(
-        build_overall_trust_explanation_check(
-            local_segment["client_isolation_hint"],
-            internet_path["dns_trust_reasoning"],
-            internet_path["captive_trust_reasoning"],
-            internet_path["https_trust_reasoning"],
-            active_path_check=active_path_check,
-            gateway_reachability_check=gateway_reachability_check,
-            network_profile=network_profile,
-        )
-    )
+    wifi_path = collect_wifi_path_checks()
+    stability_check = None
     if wifi_stability_seconds and wifi_stability_seconds > 0:
         stability_check = run_wifi_stability_diagnostics(
             duration_seconds=wifi_stability_seconds,
             progress_callback=wifi_stability_progress_callback,
         )
-        if stability_check is not None:
-            checks.append(stability_check)
+    checks = compose_network_health_checks(
+        local_segment,
+        gateway_reachability_check,
+        internet_path,
+        wifi_path,
+        network_profile=network_profile,
+        wifi_stability_check=stability_check,
+    )
     if progress_callback:
         progress_callback("finalizing report", 5, progress_steps)
     return checks
