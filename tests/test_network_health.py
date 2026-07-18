@@ -968,7 +968,7 @@ nameserver 1.1.1.1
         ):
             result = network_health.analyze_dns_environment(observation)
 
-        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["status"], "notice")
         self.assertNotIn("analysis", configuration)
         classifications = result["details"]["analysis"]["classifications"]
         self.assertEqual(classifications[0]["classification"], "gateway_dns")
@@ -1047,7 +1047,7 @@ nameserver 1.1.1.1
         self.assertEqual(analysis["classifications"][0]["classification"], "resolver_interface_mismatch")
         self.assertEqual(analysis["risks"][0]["severity"], "notice")
 
-    def test_build_dns_environment_check_marks_public_dns_as_alert(self):
+    def test_build_dns_environment_check_marks_public_dns_as_notice(self):
         with mock.patch(
             "network_health.collect_dns_configuration",
             return_value={"source": "scutil", "nameservers": ["192.168.2.1", "1.1.1.1"], "resolvers": []},
@@ -1055,8 +1055,8 @@ nameserver 1.1.1.1
             with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en0")):
                 result = network_health.build_dns_environment_check()
 
-        self.assertEqual(result["status"], "alert")
-        self.assertIn("risk signal", result["summary"])
+        self.assertEqual(result["status"], "notice")
+        self.assertIn("resolver setting", result["summary"])
 
     def test_build_dns_environment_check_keeps_on_link_dns_ok(self):
         with mock.patch(
@@ -1105,11 +1105,11 @@ nameserver 1.1.1.1
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["details"]["hint_level"], "gateway_dns_expected")
 
-    def test_build_dns_trust_reasoning_flags_public_upstream_dns(self):
+    def test_build_dns_trust_reasoning_reviews_public_upstream_dns(self):
         result = network_health.build_dns_trust_reasoning_check(
             {
                 "name": "dns_environment",
-                "status": "alert",
+                "status": "notice",
                 "details": {
                     "nameservers": ["1.1.1.1"],
                     "analysis": {
@@ -1121,7 +1121,7 @@ nameserver 1.1.1.1
             [],
         )
 
-        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["hint_level"], "public_upstream_dns_present")
 
     def test_build_dns_trust_reasoning_notices_interface_mismatch(self):

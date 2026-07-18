@@ -232,6 +232,7 @@ Completed:
 - Health report labels now use consistent operator-facing network terminology (`Wi-Fi`, `MAC`, `URL`, `RSSI`, and readable multiword fields) while exported JSON keys remain stable.
 - Network trust selection is now reduced to two supported profiles: trusted `home` and default `untrusted`; former `auto`, `guest`, `travel`, and `public` inputs normalize to `untrusted` as compatibility aliases.
 - Captive-portal HTTP responses are now profile-aware: sign-in behavior is a repeat-after-login notice on `untrusted`, remains an alert on `home`, and never weakens transport or HTTPS/TLS failures.
+- Direct public DNS is now a reviewable resolver-path notice instead of a hard alert; lookup failures and public domains resolving only to private addresses retain alert severity.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

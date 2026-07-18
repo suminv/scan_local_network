@@ -1271,6 +1271,7 @@ def classify_dns_server(
             "server": server,
             "classification": "public_upstream",
             "risk": True,
+            "severity": "notice",
             "reason": "system resolver points directly at a global address",
         }
 
@@ -1367,7 +1368,7 @@ def analyze_dns_environment(observation):
         return build_check(
             "dns_environment",
             "notice",
-            "DNS resolver path differs from the current default-route interface",
+            f"DNS configuration contains {len(analysis['risks'])} resolver setting(s) to review",
             dns_config,
         )
 
@@ -1398,7 +1399,7 @@ def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks
     if not nameservers:
         return build_check(
             "dns_trust_reasoning",
-            "alert",
+            "notice",
             "DNS trust cannot be assessed because no active DNS servers were detected",
             build_dns_reasoning_details("dns_unavailable"),
         )
@@ -1442,7 +1443,7 @@ def build_dns_trust_reasoning_check(dns_environment_check, dns_resolution_checks
         mixed_local_and_public = any(item in local_classes for item in classification_types)
         return build_check(
             "dns_trust_reasoning",
-            "alert",
+            "notice",
             (
                 "DNS path mixes local/private and public upstream resolvers"
                 if mixed_local_and_public
