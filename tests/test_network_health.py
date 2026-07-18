@@ -462,6 +462,17 @@ class NetworkHealthTests(unittest.TestCase):
             ],
         )
 
+    def test_neighbor_parsers_normalize_single_digit_mac_octets(self):
+        arp_entries = network_health.parse_arp_cache_entries(
+            "? (192.168.2.27) at 82:c7:e:a4:84:47 on en6 ifscope [ethernet]\n"
+        )
+        ndp_entries = network_health.parse_ipv6_neighbor_entries(
+            "fe80::27%en6 82:c7:e:a4:84:47 en6 20m S\n"
+        )
+
+        self.assertEqual(arp_entries[0]["mac"], "82:c7:0e:a4:84:47")
+        self.assertEqual(ndp_entries[0]["mac"], "82:c7:0e:a4:84:47")
+
     def test_parse_ipv6_neighbor_entries_supports_macos_and_linux(self):
         macos_entries = network_health.parse_ipv6_neighbor_entries(
             """
@@ -1402,6 +1413,11 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(high_confidence["details"]["confidence"], "high")
         self.assertEqual(low_confidence["status"], "notice")
         self.assertEqual(low_confidence["details"]["confidence"], "low")
+        self.assertIn("Ethernet is preferred", low_confidence["summary"])
+        self.assertEqual(
+            low_confidence["details"]["route_assessment"],
+            "alternate_interface_preferred",
+        )
 
     def test_build_active_path_check_uses_system_profiler_connected_status(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
@@ -1712,6 +1728,9 @@ Wi-Fi:
         self.assertEqual(analysis["visible_network_count"], 1)
         self.assertTrue(analysis["limited_scan"])
         self.assertFalse(any(risk["type"] == "open_network" for risk in analysis["risks"]))
+        self.assertEqual(analysis["analyzable_network_count"], 0)
+        self.assertEqual(analysis["risks"], [])
+        self.assertEqual(analysis["channel_overlaps"], [])
 
     def test_analyze_nearby_wifi_networks_detects_potential_channel_overlap(self):
         analysis = network_health.analyze_nearby_wifi_networks([
@@ -3468,6 +3487,27 @@ Wi-Fi:
         self.assertIn("restricted by macOS/CoreWLAN", output)
         self.assertIn("hidden/incomplete objects only", output)
         self.assertNotIn("<hidden> | ch 6", output)
+
+    def test_wifi_environment_details_humanize_current_security(self):
+        lines = network_health_check.format_wifi_environment_details(
+            {
+                "inventory": {"interfaces": []},
+                "nearby": {"available": False, "reason": "restricted"},
+                "analysis": {"limited_scan": False, "risks": [], "channel_overlaps": []},
+                "current": {
+                    "available": True,
+                    "interfaces": {
+                        "en0": {
+                            "ssid": "<redacted>",
+                            "security": "spairport_security_mode_wpa2_personal",
+                        }
+                    },
+                },
+            }
+        )
+
+        self.assertIn("    - security: WPA2 Personal", lines)
+        self.assertNotIn("    - security: spairport_security_mode_wpa2_personal", lines)
 
     def test_print_health_report_formats_wifi_stability_section(self):
         buffer = StringIO()

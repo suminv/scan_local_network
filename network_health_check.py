@@ -378,7 +378,7 @@ def format_wifi_environment_details(details):
             ssid = network.get("ssid") or "<hidden>"
             channel = network.get("channel") or "?"
             rssi = network.get("rssi") or "?"
-            security = network.get("security") or "unknown security"
+            security = format_wifi_security_label(network.get("security"))
             bssid = network.get("bssid") or "-"
             lines.append(
                 f"    - {ssid} | ch {channel} | rssi {rssi} | {security} | {bssid}"
@@ -415,7 +415,10 @@ def format_wifi_environment_details(details):
         lines.append(f"    - interface: {interface_name}")
         for label, key in (("SSID", "ssid"), ("BSSID", "bssid"), ("channel", "channel"), ("RSSI", "rssi"), ("noise", "noise"), ("security", "security"), ("tx rate", "tx_rate"), ("PHY mode", "phy_mode")):
             if connection.get(key) is not None:
-                lines.append(f"    - {label}: {connection[key]}")
+                value = connection[key]
+                if key == "security":
+                    value = format_wifi_security_label(value)
+                lines.append(f"    - {label}: {value}")
         signal = assess_wifi_signal(connection.get("rssi"), connection.get("noise"))
         if signal:
             lines.append(f"    - signal assessment: {signal['summary']} (SNR {signal['snr_db']:.0f} dB)")

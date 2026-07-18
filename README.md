@@ -87,7 +87,7 @@ sudo ./venv/bin/python port_scan.py
 Port scan [████████░░░░░░░░░░] 44% · 4400/9999 ports · 192.168.2.45
 ```
 
-The indicator is written to `stderr`, so redirected reports and machine-readable `stdout` remain clean. In an interactive terminal it updates in place. In redirected logs, high-frequency counter updates are suppressed while meaningful stage changes and the final completion line are retained. Port scans count ports for a single target and completed devices for a subnet scan; ARP and network-health checks show their current processing stage.
+The indicator is written to `stderr`, so redirected reports and machine-readable `stdout` remain clean. In an interactive terminal it updates in place and erases the complete previous line, so a shorter completion message cannot leave fragments of the preceding stage. In redirected logs, high-frequency counter updates are suppressed while meaningful stage changes and the final completion line are retained. Port scans count ports for a single target and completed devices for a subnet scan; ARP and network-health checks show their current processing stage.
 
 ### Consistent Report Style
 
@@ -528,11 +528,11 @@ Use this when you want the report wording to reflect different expectations. For
 
 The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
 
-Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, and router entries are excluded from the peer count.
+Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, router entries are excluded from the peer count, and abbreviated macOS MAC octets are normalized to the standard two-digit form.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
-For nearby Wi-Fi inventory on modern macOS, the tool first tries an optional `PyObjC/CoreWLAN` backend. If macOS returns hidden/incomplete objects without SSID, BSSID, or security data, the report states that nearby analysis is unavailable instead of presenting those objects as usable networks.
+For nearby Wi-Fi inventory on modern macOS, the tool first tries an optional `PyObjC/CoreWLAN` backend. If macOS returns hidden/incomplete objects without usable SSID, BSSID, and security data, the report states that nearby analysis is unavailable. Such records are excluded from signal-risk and channel-overlap analysis instead of being presented as real nearby networks.
 
 **To inspect the current Wi-Fi connection and nearby-analysis status:**
 

@@ -47,6 +47,19 @@ class ProgressIndicatorTests(unittest.TestCase):
         self.assertIn("100% · 4/4 steps · completed", output)
         self.assertTrue(output.endswith("\n"))
 
+    def test_interactive_finish_erases_tail_of_longer_detail(self):
+        stream = StringIO()
+        progress = ProgressIndicator(
+            "Network health", 5, unit="steps", stream=stream, interactive=True, min_interval=0
+        )
+
+        progress.update(4, "collecting Wi-Fi environment identity")
+        progress.finish("completed")
+
+        final_render = stream.getvalue().split("\r")[-1]
+        self.assertIn("100% · 5/5 steps · completed", final_render)
+        self.assertNotIn("ironment identity", final_render)
+
     def test_failure_keeps_current_position_and_terminates_line(self):
         stream = StringIO()
         progress = ProgressIndicator(

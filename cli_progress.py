@@ -39,7 +39,20 @@ class ProgressIndicator:
         self.current = 0
         self.started_at = time.monotonic()
         self.last_rendered_at = 0.0
+        self.last_rendered_width = 0
         self.finished = False
+
+    def _write_line(self, line, *, terminate=False):
+        """Render a line and erase any tail left by a longer previous update."""
+        if self.interactive:
+            padding = " " * max(0, self.last_rendered_width - len(line))
+            self.stream.write(f"\r{line}{padding}")
+            if terminate:
+                self.stream.write("\n")
+            self.last_rendered_width = 0 if terminate else len(line)
+        else:
+            self.stream.write(line + "\n")
+        self.stream.flush()
 
     def format_line(self, current=None, detail=None):
         current = self.current if current is None else current
@@ -64,10 +77,7 @@ class ProgressIndicator:
         if not should_render:
             return
         line = self.format_line(detail=detail)
-        self.stream.write(("\r" if self.interactive else "") + line)
-        if not self.interactive:
-            self.stream.write("\n")
-        self.stream.flush()
+        self._write_line(line)
         self.last_rendered_at = now
 
     def finish(self, detail=None):
@@ -75,10 +85,11 @@ class ProgressIndicator:
             return
         elapsed = time.monotonic() - self.started_at
         final_detail = detail or f"completed in {elapsed:.1f}s"
-        self.update(self.total, final_detail, force=True)
         if self.interactive:
-            self.stream.write("\n")
-            self.stream.flush()
+            self.current = self.total
+            self._write_line(self.format_line(detail=final_detail), terminate=True)
+        else:
+            self.update(self.total, final_detail, force=True)
         self.finished = True
 
     def fail(self, detail="failed"):
@@ -86,6 +97,5 @@ class ProgressIndicator:
         if self.finished:
             return
         line = self.format_line(detail=detail)
-        self.stream.write(("\r" if self.interactive else "") + line + "\n")
-        self.stream.flush()
+        self._write_line(line, terminate=True)
         self.finished = True

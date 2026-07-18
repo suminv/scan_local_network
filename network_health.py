@@ -526,6 +526,15 @@ def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT
     return analyze_gateway_exposure(observation, network_profile=network_profile)
 
 
+def normalize_mac_address(value):
+    """Normalize one- or two-digit MAC octets for display and identity matching."""
+    text = str(value or "").strip().lower()
+    parts = text.split(":")
+    if len(parts) == 6 and all(re.fullmatch(r"[0-9a-f]{1,2}", part) for part in parts):
+        return ":".join(part.zfill(2) for part in parts)
+    return text
+
+
 def parse_arp_cache_entries(raw_output):
     """Parse `arp -an` output into structured entries."""
     entries = []
@@ -542,7 +551,7 @@ def parse_arp_cache_entries(raw_output):
         entries.append(
             {
                 "ip": match.group("ip"),
-                "mac": mac,
+                "mac": normalize_mac_address(mac),
                 "interface": match.group("interface"),
             }
         )
@@ -552,7 +561,7 @@ def parse_arp_cache_entries(raw_output):
 def parse_ipv6_neighbor_entries(raw_output):
     """Parse macOS `ndp -an` and Linux `ip -6 neigh` cache output."""
     entries = []
-    mac_pattern = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+    mac_pattern = re.compile(r"^[0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5}$")
     linux_pattern = re.compile(
         r"^(?P<ip>\S+)\s+dev\s+(?P<interface>\S+)(?:\s+lladdr\s+(?P<mac>[0-9a-fA-F:]+))?(?P<rest>.*)$"
     )
@@ -570,7 +579,7 @@ def parse_ipv6_neighbor_entries(raw_output):
             entries.append(
                 {
                     "ip": linux_match.group("ip").split("%", 1)[0],
-                    "mac": mac.lower(),
+                    "mac": normalize_mac_address(mac),
                     "interface": linux_match.group("interface"),
                     "is_router": " router " in f" {rest.lower()} ",
                     "address_family": "ipv6",
@@ -604,7 +613,7 @@ def parse_ipv6_neighbor_entries(raw_output):
         entries.append(
             {
                 "ip": ip_text,
-                "mac": tokens[mac_index].lower(),
+                "mac": normalize_mac_address(tokens[mac_index]),
                 "interface": interface,
                 "is_router": any(flag == "R" for flag in flags),
                 "address_family": "ipv6",
@@ -675,12 +684,13 @@ def collect_local_peer_visibility():
         if ip_obj.version == 4 and (ip_obj.is_link_local or not ip_obj.is_private):
             continue
 
-        identity = entry["mac"].lower()
+        normalized_mac = normalize_mac_address(entry["mac"])
+        identity = normalized_mac
         existing = peers_by_mac.get(identity)
         if existing is None:
             peer = {
                 "ip": entry["ip"],
-                "mac": entry["mac"],
+                "mac": normalized_mac,
                 "interface": entry["interface"],
             }
             if ip_obj.version == 6:
@@ -993,7 +1003,7 @@ def lookup_arp_mac(ip, interface=None):
         mac = match.group("mac")
         if mac == "(incomplete)":
             return None
-        return mac
+        return normalize_mac_address(mac)
     return None
 
 
@@ -1852,9 +1862,11 @@ def analyze_active_path(observation):
             "name": "active_path",
             "status": status,
             "summary": (
-                f"Wi-Fi interface {active_wifi_interface} is reported as active, but the default route "
-                f"currently uses {default_interface}"
-                + ("; verify whether this is intentional dual connectivity" if inventory_only else "")
+                f"Default route uses non-Wi-Fi interface {default_interface} while Wi-Fi "
+                f"{active_wifi_interface} remains connected; this commonly means Ethernet is preferred"
+                if inventory_only
+                else f"Wi-Fi interface {active_wifi_interface} is active, but the default route "
+                f"currently uses {default_interface}; verify the intended route"
             ),
             "details": {
                 "gateway_ip": gateway_ip,
@@ -1865,9 +1877,15 @@ def analyze_active_path(observation):
                 "possible_dual_connectivity": True,
                 "confidence": "low" if inventory_only else "high",
                 "evidence": evidence,
+                "route_assessment": (
+                    "alternate_interface_preferred"
+                    if inventory_only
+                    else "confirmed_wifi_route_mismatch"
+                ),
                 "interpretation": (
-                    "Wi-Fi is active on a different interface; the system may intentionally prefer "
-                    "an Ethernet or other route"
+                    "The system appears to prefer Ethernet or another interface while Wi-Fi remains associated"
+                    if inventory_only
+                    else "Wi-Fi is active on a different interface than the current default route"
                 ),
             },
         }
@@ -2404,7 +2422,15 @@ def analyze_nearby_wifi_networks(networks, current_network=None):
     channel_overlaps = []
     by_ssid = {}
 
-    for network in networks:
+    analyzable_networks = [
+        network
+        for network in networks
+        if (network.get("ssid") or "<hidden>") != "<hidden>"
+        and bool(network.get("bssid"))
+        and bool(network.get("security"))
+    ]
+
+    for network in analyzable_networks:
         ssid = network.get("ssid") or "<hidden>"
         by_ssid.setdefault(ssid, []).append(network)
 
@@ -2461,7 +2487,7 @@ def analyze_nearby_wifi_networks(networks, current_network=None):
                 }
             )
 
-    channel_networks = [(network, False) for network in networks]
+    channel_networks = [(network, False) for network in analyzable_networks]
     if current_network:
         channel_networks.append((current_network, True))
     usable = []
@@ -2497,13 +2523,11 @@ def analyze_nearby_wifi_networks(networks, current_network=None):
 
     return {
         "visible_network_count": len(networks),
+        "analyzable_network_count": len(analyzable_networks),
         "duplicate_ssids": duplicate_ssids,
         "channel_overlaps": channel_overlaps,
         "limited_scan": (
-            len(networks) > 0
-            and all((network.get("ssid") or "<hidden>") == "<hidden>" for network in networks)
-            and all(not network.get("bssid") for network in networks)
-            and all(not network.get("security") for network in networks)
+            len(networks) > 0 and not analyzable_networks
         ),
         "risks": risks,
     }
@@ -2521,6 +2545,7 @@ def build_wifi_environment_analysis(wifi_environment):
         if nearby_networks
         else {
             "visible_network_count": 0,
+            "analyzable_network_count": 0,
             "duplicate_ssids": [],
             "channel_overlaps": [],
             "limited_scan": False,

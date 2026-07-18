@@ -226,6 +226,7 @@ Completed:
 - Wi-Fi stability diagnostics now distinguish normal single mesh roaming from degraded and unstable links, reserve alerts for stronger measured impact, and expose measurement coverage, confidence, and latency peaks.
 - Passive local-segment reasoning now distinguishes confirmed peer visibility, inconclusive absence, and unavailable neighbor-cache evidence; untrusted profiles no longer treat missing observation data as possible proof of client isolation.
 - Passive peer visibility now combines IPv4 ARP with macOS/Linux IPv6 neighbor caches, excludes router entries, and deduplicates dual-stack devices by MAC without sending discovery traffic.
+- Health output now clears stale progress-line tails, ignores incomplete CoreWLAN placeholders during risk analysis, humanizes current Wi-Fi security labels, normalizes abbreviated MAC octets, and describes low-confidence Ethernet-first dual connectivity as an expected route preference.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
