@@ -34,19 +34,16 @@ class NetworkHealthTests(unittest.TestCase):
             {},
         )
 
-    def test_profile_local_policies_distinguish_isolation_expectations(self):
+    def test_profile_local_policies_distinguish_home_and_untrusted(self):
         home = network_health.get_profile_local_policy("home")
-        guest = network_health.get_profile_local_policy("guest")
-        travel = network_health.get_profile_local_policy("travel")
-        public = network_health.get_profile_local_policy("public")
+        untrusted = network_health.get_profile_local_policy("untrusted")
 
         self.assertFalse(home["isolation_expected"])
-        self.assertTrue(guest["isolation_expected"])
-        self.assertFalse(travel["isolation_expected"])
-        self.assertTrue(travel["isolation_desired"])
-        self.assertTrue(public["isolation_expected"])
-        self.assertEqual(travel["posture"], "untrusted_travel_network")
-        self.assertEqual(public["posture"], "untrusted_public_network")
+        self.assertFalse(untrusted["isolation_expected"])
+        self.assertTrue(untrusted["isolation_desired"])
+        self.assertEqual(untrusted["posture"], "untrusted_network")
+        for alias in ("auto", "guest", "travel", "public"):
+            self.assertEqual(network_health.normalize_network_profile(alias), "untrusted")
 
     def test_build_probe_reasoning_details_uses_consistent_defaults(self):
         self.assertEqual(
@@ -149,9 +146,15 @@ class NetworkHealthTests(unittest.TestCase):
     def test_build_parser_supports_network_profile(self):
         parser = network_health_check.build_parser()
 
-        args = parser.parse_args(["--network-profile", "guest"])
+        args = parser.parse_args(["--network-profile", "untrusted"])
 
-        self.assertEqual(args.network_profile, "guest")
+        self.assertEqual(args.network_profile, "untrusted")
+        self.assertEqual(
+            parser.parse_args(["--network-profile", "guest"]).network_profile,
+            "untrusted",
+        )
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(["--network-profile", "typo"])
 
     def test_build_parser_supports_webhook_flags(self):
         parser = network_health_check.build_parser()
@@ -272,7 +275,7 @@ class NetworkHealthTests(unittest.TestCase):
             observation["reachable_services"],
         )
 
-    def test_travel_and_public_use_distinct_local_exposure_assessments(self):
+    def test_legacy_untrusted_aliases_use_the_same_local_assessments(self):
         gateway_observation = {
             "gateway_ip": "10.0.0.1",
             "interface": "en0",
@@ -315,21 +318,15 @@ class NetworkHealthTests(unittest.TestCase):
             network_profile="public",
         )
 
+        self.assertEqual(travel_gateway, public_gateway)
+        self.assertEqual(travel_peers, public_peers)
         self.assertEqual(
             travel_gateway["details"]["exposure_assessment"],
-            "untrusted_travel_admin_surface",
-        )
-        self.assertEqual(
-            public_gateway["details"]["exposure_assessment"],
-            "untrusted_public_admin_surface",
+            "untrusted_network_admin_surface",
         )
         self.assertEqual(
             travel_peers["details"]["visibility_assessment"],
-            "untrusted_travel_visibility",
-        )
-        self.assertEqual(
-            public_peers["details"]["visibility_assessment"],
-            "untrusted_public_visibility",
+            "untrusted_network_visibility",
         )
 
     def test_extract_html_title_returns_clean_title(self):
@@ -374,7 +371,7 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(service["http_probe"]["page_hint"], "single-page app shell")
         self.assertEqual(result["status"], "notice")
 
-    def test_build_gateway_exposure_check_alerts_on_gateway_web_admin_service(self):
+    def test_build_gateway_exposure_check_uses_untrusted_default(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
                 "network_health.probe_tcp_service",
@@ -384,11 +381,11 @@ class NetworkHealthTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "notice")
         self.assertIn("Private/local gateway exposes", result["summary"])
-        self.assertIn("home LAN", result["summary"])
+        self.assertIn("untrusted network", result["summary"])
         self.assertEqual(result["details"]["risky_services"][0]["port"], 443)
-        self.assertEqual(result["details"]["context_note"], "often expected on a private/home LAN")
+        self.assertEqual(result["details"]["network_profile"], "untrusted")
 
-    def test_build_gateway_exposure_check_uses_travel_profile_expectation(self):
+    def test_build_gateway_exposure_check_normalizes_travel_alias(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
                 "network_health.probe_tcp_service",
@@ -400,11 +397,12 @@ class NetworkHealthTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["status"], "notice")
-        self.assertIn("higher-risk on travel networks", result["summary"])
+        self.assertIn("sensitive on an untrusted network", result["summary"])
         self.assertEqual(
             result["details"]["profile_expectation"],
-            "travel networks should be treated as untrusted when gateway admin/web surfaces are visible",
+            "untrusted networks should not expose gateway admin/web surfaces unnecessarily",
         )
+        self.assertEqual(result["details"]["network_profile"], "untrusted")
 
     def test_build_gateway_exposure_check_treats_home_admin_surface_as_expected(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -421,7 +419,7 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(result["details"]["exposure_assessment"], "expected_home_admin_surface")
         self.assertIn("expected for the selected home profile", result["summary"])
 
-    def test_build_gateway_exposure_check_marks_public_admin_surface_sensitive(self):
+    def test_build_gateway_exposure_check_normalizes_public_alias(self):
         with mock.patch("network_health.get_default_gateway", return_value=("10.0.0.1", "en0")):
             with mock.patch(
                 "network_health.probe_tcp_service",
@@ -433,8 +431,22 @@ class NetworkHealthTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["status"], "notice")
-        self.assertEqual(result["details"]["exposure_assessment"], "untrusted_public_admin_surface")
-        self.assertIn("higher-risk on public networks", result["summary"])
+        self.assertEqual(result["details"]["exposure_assessment"], "untrusted_network_admin_surface")
+        self.assertIn("sensitive on an untrusted network", result["summary"])
+
+    def test_untrusted_gateway_admin_surface_uses_sensitive_marker(self):
+        lines = network_health_check.format_gateway_exposure_details(
+            {
+                "gateway_ip": "10.0.0.1",
+                "interface": "en0",
+                "exposure_assessment": "untrusted_network_admin_surface",
+                "reachable_services": [
+                    {"port": 80, "label": "HTTP admin/web", "risk": True}
+                ],
+            }
+        )
+
+        self.assertIn("    - 80/tcp HTTP admin/web [sensitive]", lines)
 
     def test_build_gateway_exposure_check_alerts_on_public_gateway_web_admin_service(self):
         with mock.patch("network_health.get_default_gateway", return_value=("8.8.8.8", "en0")):
@@ -509,7 +521,10 @@ fe80::44 dev eth0 FAILED
 
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["visible_peers"][0]["ip"], "192.168.2.22")
-        self.assertEqual(result["details"]["context_note"], "often normal on a private/home LAN")
+        self.assertEqual(
+            result["details"]["context_note"],
+            "devices visible on an untrusted local segment must be treated as untrusted",
+        )
 
     def test_collect_local_peer_visibility_filters_to_active_private_segment(self):
         arp_output = (
@@ -616,16 +631,16 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
             observation,
             network_profile="home",
         )
-        guest = network_health.analyze_local_peer_visibility(
+        untrusted = network_health.analyze_local_peer_visibility(
             observation,
-            network_profile="guest",
+            network_profile="untrusted",
         )
 
         self.assertEqual(home["status"], "ok")
-        self.assertEqual(guest["status"], "notice")
+        self.assertEqual(untrusted["status"], "notice")
         self.assertEqual(
-            guest["details"]["visibility_assessment"],
-            "unexpected_guest_visibility",
+            untrusted["details"]["visibility_assessment"],
+            "untrusted_network_visibility",
         )
 
     def test_local_peer_visibility_distinguishes_empty_from_unavailable(self):
@@ -647,12 +662,12 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
         self.assertEqual(empty["status"], "ok")
         self.assertTrue(empty["details"]["observation_available"])
         self.assertEqual(empty["details"]["inference_confidence"], "inconclusive")
-        self.assertIn("isolation remains unconfirmed", empty["summary"])
+        self.assertIn("do not assume this untrusted network isolates clients", empty["summary"])
         self.assertEqual(unavailable["status"], "notice")
         self.assertFalse(unavailable["details"]["observation_available"])
         self.assertEqual(unavailable["details"]["visibility_assessment"], "unavailable")
 
-    def test_build_local_peer_visibility_check_uses_guest_profile_expectation(self):
+    def test_build_local_peer_visibility_check_uses_untrusted_profile_expectation(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
                 "network_health.run_command",
@@ -661,13 +676,13 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
                     "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
                 ),
             ):
-                result = network_health.build_local_peer_visibility_check(network_profile="guest")
+                result = network_health.build_local_peer_visibility_check(network_profile="untrusted")
 
         self.assertEqual(result["status"], "notice")
-        self.assertIn("more open than expected on many guest networks", result["summary"])
+        self.assertIn("treat local peers as untrusted", result["summary"])
         self.assertEqual(
             result["details"]["profile_expectation"],
-            "guest networks usually limit client-to-client visibility",
+            "devices visible on an untrusted local segment must be treated as untrusted",
         )
 
     def test_build_local_peer_visibility_check_treats_home_peers_as_expected(self):
@@ -717,9 +732,9 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["hint_level"], "peer_visibility_detected")
         self.assertEqual(result["details"]["visible_peer_count"], 1)
-        self.assertIn("typical for a private/home LAN", result["summary"])
+        self.assertIn("on this untrusted network", result["summary"])
 
-    def test_build_client_isolation_hint_uses_travel_profile_expectation(self):
+    def test_build_client_isolation_hint_uses_untrusted_profile_expectation(self):
         result = network_health.build_client_isolation_hint_check(
             {
                 "name": "gateway_exposure",
@@ -741,20 +756,20 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
                     "visible_peers": [{"ip": "192.168.2.22", "mac": "aa:bb:cc:dd:ee:ff"}],
                 },
             },
-            network_profile="travel",
+            network_profile="untrusted",
         )
 
         self.assertEqual(result["status"], "notice")
-        self.assertIn("travel network", result["summary"])
+        self.assertIn("untrusted network", result["summary"])
         self.assertEqual(
             result["details"]["profile_expectation"],
-            "travel networks should not be assumed to isolate clients unless evidence supports it",
+            "client isolation is desirable but must not be assumed on an untrusted network",
         )
         self.assertFalse(result["details"]["isolation_expected"])
         self.assertTrue(result["details"]["isolation_desired"])
         self.assertEqual(
             result["details"]["isolation_assessment"],
-            "untrusted_travel_segment",
+            "untrusted_segment",
         )
 
     def test_build_client_isolation_hint_does_not_flag_expected_home_visibility(self):
@@ -767,16 +782,17 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
         self.assertFalse(result["details"]["isolation_expected"])
         self.assertEqual(result["details"]["isolation_assessment"], "not_expected_home")
 
-    def test_build_client_isolation_hint_uses_public_profile(self):
+    def test_build_client_isolation_hint_normalizes_public_alias(self):
         result = network_health.build_client_isolation_hint_check(
             {"details": {"gateway_ip": "10.0.0.1", "interface": "en0", "is_private_gateway": True, "risky_services": []}},
             {"details": {"gateway_ip": "10.0.0.1", "interface": "en0", "is_private_gateway": True, "visible_peers": [{"ip": "10.0.0.22", "mac": "aa:bb:cc:dd:ee:ff"}]}},
             network_profile="public",
         )
         self.assertEqual(result["status"], "notice")
-        self.assertTrue(result["details"]["isolation_expected"])
-        self.assertEqual(result["details"]["isolation_assessment"], "absent_or_relaxed_public")
-        self.assertIn("public network", result["summary"])
+        self.assertFalse(result["details"]["isolation_expected"])
+        self.assertEqual(result["details"]["isolation_assessment"], "untrusted_segment")
+        self.assertIn("untrusted network", result["summary"])
+        self.assertEqual(result["details"]["network_profile"], "untrusted")
 
     def test_build_client_isolation_hint_marks_gateway_only_visibility_ok(self):
         result = network_health.build_client_isolation_hint_check(
@@ -2247,12 +2263,13 @@ Wi-Fi:
             {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
             {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
             {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
+            network_profile="home",
         )
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("typical private/home LAN", result["summary"])
 
-    def test_build_overall_trust_explanation_marks_guest_peer_visibility_as_notice(self):
+    def test_build_overall_trust_explanation_marks_untrusted_peer_visibility_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
             {
                 "name": "client_isolation_hint",
@@ -2265,17 +2282,17 @@ Wi-Fi:
             {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
             {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
             {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
-            network_profile="guest",
+            network_profile="untrusted",
         )
 
         self.assertEqual(result["status"], "notice")
-        self.assertIn("guest network", result["summary"])
+        self.assertIn("untrusted network", result["summary"])
         self.assertEqual(
             result["details"]["profile_expectation"],
-            "guest networks should minimize local peer and gateway-management exposure",
+            "untrusted networks require stricter local-exposure, DNS, and HTTPS expectations",
         )
 
-    def test_build_overall_trust_explanation_marks_guest_gateway_only_visibility_as_notice(self):
+    def test_build_overall_trust_explanation_marks_untrusted_gateway_only_visibility_as_notice(self):
         result = network_health.build_overall_trust_explanation_check(
             {
                 "name": "client_isolation_hint",
@@ -2289,15 +2306,15 @@ Wi-Fi:
             {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
             {"name": "captive_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_internet_path"}},
             {"name": "https_trust_reasoning", "status": "ok", "details": {"hint_level": "normal_https_path"}},
-            network_profile="travel",
+            network_profile="untrusted",
         )
 
         self.assertEqual(result["status"], "notice")
         self.assertIn("gateway-local admin/web surfaces", result["summary"])
-        self.assertIn("travel network", result["summary"])
+        self.assertIn("untrusted network", result["summary"])
         self.assertEqual(
             result["details"]["profile_expectation"],
-            "travel networks should be assessed with stricter local-exposure expectations",
+            "untrusted networks require stricter local-exposure, DNS, and HTTPS expectations",
         )
 
     def test_build_overall_trust_explanation_marks_internet_anomalies_as_notice(self):
@@ -2380,10 +2397,10 @@ Wi-Fi:
             network_profile="travel",
         )
 
-        self.assertEqual(signals["network_profile"], "travel")
+        self.assertEqual(signals["network_profile"], "untrusted")
         self.assertEqual(
             signals["profile_expectation"],
-            "travel networks should be assessed with stricter local-exposure expectations",
+            "untrusted networks require stricter local-exposure, DNS, and HTTPS expectations",
         )
         self.assertEqual(signals["local_hint"], "gateway_only_visibility")
         self.assertEqual(signals["risky_gateway_service_count"], 1)
@@ -2544,7 +2561,7 @@ Wi-Fi:
         with redirect_stdout(buffer):
             network_health_check.print_alert_report({"alerts": []}, scan_context={"network_profile": "travel"})
 
-        self.assertIn("Profile: travel", buffer.getvalue())
+        self.assertIn("Profile: untrusted", buffer.getvalue())
         self.assertIn("No actionable health alerts detected.", buffer.getvalue())
 
     def test_print_alert_report_includes_scan_context(self):
@@ -2617,7 +2634,7 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Checks : 4 | Notices: 2 | Alerts: 0", output)
         self.assertIn("Status : [~] suspicious · review 2 notice(s)", output)
-        self.assertIn("local segment looks more exposed than expected for a guest network", output)
+        self.assertIn("local segment looks more exposed than expected for an untrusted network", output)
         self.assertIn("No actionable health alerts detected.", output)
 
     def test_resolve_report_output_paths_uses_defaults_and_optional_overrides(self):
@@ -2674,11 +2691,11 @@ Wi-Fi:
                 scan_context, checks, summary, payload = network_health_check.run_health_check_collection(args)
 
         self.assertEqual(scan_context["interface"], "en0")
-        self.assertEqual(scan_context["network_profile"], "guest")
+        self.assertEqual(scan_context["network_profile"], "untrusted")
         self.assertEqual(checks[0]["name"], "gateway_identity")
         self.assertEqual(summary["alert_checks"], 0)
         self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
-        self.assertEqual(run_checks.call_args.kwargs["network_profile"], "guest")
+        self.assertEqual(run_checks.call_args.kwargs["network_profile"], "untrusted")
         self.assertGreaterEqual(scan_context["duration_seconds"], 0)
         self.assertEqual(payload["scan_context"]["duration_seconds"], scan_context["duration_seconds"])
 
@@ -2705,7 +2722,7 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Profile: guest", output)
+        self.assertIn("Profile: untrusted", output)
         self.assertIn("Checks : 5 | Notices: 0 | Alerts: 2", output)
         self.assertIn("Status : [!] untrusted", output)
         self.assertIn("2 alerts are active. Treat this network as untrusted.", output)
@@ -2791,7 +2808,7 @@ Wi-Fi:
             "untrusted",
         )
 
-    def test_build_trust_assessment_marks_guest_local_exposure_combo_as_suspicious(self):
+    def test_build_trust_assessment_marks_untrusted_local_exposure_combo_as_suspicious(self):
         assessment = network_health_check.build_trust_assessment(
             {
                 "alert_checks": 0,
@@ -2801,11 +2818,11 @@ Wi-Fi:
                     {"name": "overall_trust_explanation"},
                 ],
             },
-            scan_context={"network_profile": "guest"},
+            scan_context={"network_profile": "untrusted"},
         )
 
         self.assertEqual(assessment["level"], "suspicious")
-        self.assertIn("guest network", assessment["summary"])
+        self.assertIn("untrusted network", assessment["summary"])
         self.assertIn("Primary reasons: Gateway exposure, Overall trust explanation", assessment["summary"])
 
     def test_format_notice_reason_labels_returns_human_readable_summary(self):
@@ -3264,7 +3281,7 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("--- Scan Summary ---", output)
-        self.assertIn("Profile: guest", output)
+        self.assertIn("Profile: untrusted", output)
         self.assertIn("Checks : 2 | Notices: 1 | Alerts: 0", output)
         self.assertIn("Status : [~] trusted · review 1 notice(s)", output)
         self.assertIn("Risk summary: no hard alerts; 1 notice(s) in Wi-Fi environment", output)

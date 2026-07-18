@@ -5,7 +5,7 @@ A Python-based suite of network scanning tools, including an ARP scanner for dev
 Current milestone: `v1.0.0`
 
 - `network_scan` is a working LAN inventory and change-monitoring tool.
-- `network-health-check` is a working safe trust-assessment tool for guest and untrusted networks.
+- `network-health-check` is a working safe trust-assessment tool with `home` and `untrusted` profiles.
 - The current `v1` scope is CLI-first, report-oriented, and intentionally avoids broad active probing of third-party networks.
 
 ## ✨ Features
@@ -150,7 +150,7 @@ ARP inventory and `scan-ports --output table` adapt to the current terminal widt
 Color is semantic and optional. Ordinary IP, MAC, vendor, table, and open-port text remains neutral; green, yellow, and red are reserved for `[OK]`, `[~]`, `[!]`, and actual error messages. ANSI color is disabled automatically when output is redirected. Set the standard `NO_COLOR` environment variable to disable it explicitly:
 
 ```bash
-NO_COLOR=1 ./scan-health --network-profile public
+NO_COLOR=1 ./scan-health --network-profile untrusted
 ```
 
 ### 1. ARP Scanner (`scan-arp`)
@@ -478,7 +478,7 @@ No port-level changes detected since last scan.
 
 ### 3. Network Health Check (`scan-health`)
 
-This tool performs safe network trust checks intended for guest Wi-Fi and other untrusted networks without doing broad host discovery.
+This tool performs safe network trust checks for trusted home and untrusted networks without doing broad host discovery.
 
 It currently checks:
 
@@ -502,33 +502,24 @@ It currently checks:
 ./scan-health
 ```
 
-**To tell the tool what kind of network you expect:**
+**Select one of two network profiles:**
 
 ```bash
 ./scan-health --network-profile home
 ```
 
 ```bash
-./scan-health --network-profile guest
+./scan-health --network-profile untrusted
 ```
 
-```bash
-./scan-health --network-profile travel
-```
-
-```bash
-./scan-health --network-profile public
-```
-
-Use this when you want the report wording to reflect different expectations. For example, peer visibility and gateway-local web surfaces are often normal on a home LAN, but deserve more attention on guest or travel networks.
-`home`, `guest`, `travel`, and `public` are interpreted separately:
+`untrusted` is the safe default. Use `home` only for a LAN that you control and whose local devices you trust:
 
 - `home`: peer visibility and router administration surfaces can be expected; client isolation is normally not required.
-- `guest`: client isolation is expected on a managed guest segment, so visible peers or gateway administration deserve review.
-- `travel`: isolation is desirable but must not be assumed on hotel or temporary networks; visible peers are treated as untrusted.
-- `public`: isolation is expected on a well-configured shared network, but the local segment remains untrusted even when no peers are currently visible.
+- `untrusted`: use for guest Wi-Fi, hotels, cafes, airports, trains, offices you do not administer, and every other non-home network. Local peers and gateway administration deserve review; client isolation is desirable but is never assumed.
 
-The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
+For compatibility, the former `auto`, `guest`, `travel`, and `public` values are accepted as aliases for `untrusted`. Reports and JSON always store the normalized profile name. New scripts should use only `home` or `untrusted`.
+
+The detailed checks expose the normalized profile posture, whether isolation is desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice under the `untrusted` profile.
 
 Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, router entries and the current host's own interface identities are excluded from the peer count, and abbreviated macOS MAC octets are normalized to the standard two-digit form.
 
@@ -549,12 +540,12 @@ The Wi-Fi section now also raises risk signals for:
 - open or unencrypted visible networks
 - weak legacy security such as WEP
 - duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
-- very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
+- very weak nearby signal levels that can correlate with unstable behavior on an untrusted network
 
 On macOS, the report also identifies cases where an active Wi-Fi interface is present but the system default route uses another interface such as Ethernet. A lower-confidence `system_profiler` observation is reported as healthy Ethernet-first connectivity; only direct current-interface evidence can promote a conflicting route to an alert.
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
-Gateway web/admin surfaces are treated as expected for an explicit `home` profile, reviewable on `guest`, and sensitive on `travel` or `public`. The service marker follows the same context (`expected`, `review`, `sensitive`, or `alert`) instead of labeling every private router page as an alert.
+Gateway web/admin surfaces are treated as expected for an explicit `home` profile and sensitive under `untrusted`. The service marker follows that context (`expected`, `sensitive`, or `alert`) instead of labeling every private router page as an alert.
 
 The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
 
@@ -564,12 +555,12 @@ The overall trust explanation includes both alerts and notices from DNS, captive
 
 #### Connecting to a non-home Wi-Fi network
 
-Use the `public` profile for an unknown network in a cafe, airport, train, or other public place. Use `travel` for hotel or temporary accommodation Wi-Fi, and `guest` for a guest network operated by an organization or a person you know.
+Use `untrusted` for every network that you do not personally administer, including guest Wi-Fi, hotels, cafes, airports, trains, and temporary accommodation.
 
 Run the full check immediately after connecting:
 
 ```bash
-./scan-health --network-profile public --output full --debug-wifi
+./scan-health --network-profile untrusted --output full --debug-wifi
 ```
 
 If the network opens a sign-in or terms page, complete that process without entering unrelated credentials, then run the same command again. The first result may legitimately report captive-portal behavior; the second result should show a normal Internet and HTTPS path.
@@ -579,7 +570,7 @@ Review these parts of the report:
 - **Overall trust explanation**: start here for the combined local-network and Internet-path assessment. Treat `suspicious` or `untrusted` as a reason to inspect the detailed findings before using the connection.
 - **Wi-Fi environment**: confirm the expected SSID, security mode, signal quality, BSSID, and channel when macOS exposes them. An open network, WEP, or the same SSID advertised with inconsistent security deserves attention. An SSID alone does not prove that an access point is genuine.
 - **Gateway and Active path**: confirm that the default route uses the interface you expect. Unexpected Ethernet, VPN, or tunnel routing can change which network is actually carrying traffic.
-- **Local peer visibility and Client isolation hint**: visible unrelated peers are more important on `public` and `travel` profiles than at home. Visibility does not by itself prove an attack, but it means the network is not fully isolating clients.
+- **Local peer visibility and Client isolation hint**: visible unrelated peers deserve review under `untrusted`. Visibility does not by itself prove an attack, but it means the network is not fully isolating clients.
 - **DNS servers and DNS trust reasoning**: check the listed nameservers, resolver profile, and resolution issues. Gateway DNS is common on public Wi-Fi. Direct public DNS may be intentional. `dns_route_mismatch` can be normal with a VPN or split DNS, but the other interface should be one you recognize. Failed lookups or public domains resolving only to private addresses require investigation.
 - **Captive portal reasoning**: a portal is expected before sign-in. Repeated interception after sign-in is not expected.
 - **HTTPS trust reasoning**: certificate-validated HTTPS probes should succeed after portal sign-in. DNS that looks normal does not compensate for TLS or certificate failures.
@@ -591,7 +582,7 @@ If the report shows unexplained HTTPS failures, public domains resolving to priv
 For intermittent signal, roaming, or packet-loss problems, add a short stability observation:
 
 ```bash
-sudo ./scan-health --network-profile public --output full --wifi-stability-seconds 20
+sudo ./scan-health --network-profile untrusted --output full --wifi-stability-seconds 20
 ```
 
 This health check is diagnostic evidence, not proof that a public network is safe. It does not inspect all traffic or authenticate the operator of the access point.
@@ -683,7 +674,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`arp_scanner.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`network_health_check.py --json-out`**: Defaults to `"network_health_check_result.json"` in the working directory.
 -   **`network_health_check.py --md-out`**: Optional Markdown health report export path.
--   **`network_health_check.py --network-profile`**: Interprets the network as `auto`, `home`, `guest`, `travel`, or `public`. Defaults to `auto`.
+-   **`network_health_check.py --network-profile`**: Interprets the network as `home` or `untrusted`. Defaults to `untrusted`; former profile names remain compatibility aliases.
 -   **`network_health_check.py --alerts-only`**: Compact alert-only console output with exit code `2` when actionable health findings are detected.
 -   **`network_health_check.py --output focus`**: Short operator view with trust assessment, compact counters, and key checks only.
 -   **`network_health_check.py --webhook-url`**: Optional webhook URL for actionable network health alerts.

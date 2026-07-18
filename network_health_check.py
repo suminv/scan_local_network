@@ -12,7 +12,9 @@ from models import build_scan_context
 from network_health import (
     DEFAULT_DNS_DOMAINS,
     DEFAULT_NETWORK_PROFILE,
+    NETWORK_PROFILE_ALIASES,
     NETWORK_PROFILES,
+    normalize_network_profile,
     build_health_summary,
     parse_wifi_number,
     run_network_health_checks,
@@ -33,6 +35,15 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
+
+
+def parse_network_profile(value):
+    """Accept two supported profiles plus deprecated aliases with strict typo handling."""
+    if value not in NETWORK_PROFILES and value not in NETWORK_PROFILE_ALIASES:
+        raise argparse.ArgumentTypeError("network profile must be home or untrusted")
+    return normalize_network_profile(value)
+
+
 FOCUS_CONTEXT_CHECKS = {
     "gateway_fingerprint",
     "gateway_reachability",
@@ -141,7 +152,7 @@ def format_gateway_exposure_details(details):
             risk_marker = ""
         elif assessment == "expected_home_admin_surface":
             risk_marker = " [expected]"
-        elif assessment in {"unexpected_guest_admin_surface", "observed_unknown_profile"}:
+        elif assessment == "observed_unknown_profile":
             risk_marker = " [review]"
         elif assessment == "untrusted_network_admin_surface":
             risk_marker = " [sensitive]"
@@ -699,7 +710,7 @@ def build_trust_assessment(summary, scan_context=None):
     network_profile = format_network_profile_label(scan_context)
     notice_names = {check["name"] for check in summary.get("notices", [])}
     if alert_count == 0:
-        if network_profile in {"guest", "travel", "public"}:
+        if network_profile == "untrusted":
             local_segment_notice_count = len(
                 notice_names.intersection(
                     {
@@ -720,7 +731,7 @@ def build_trust_assessment(summary, scan_context=None):
                     "level": "suspicious",
                     "summary": (
                         f"No hard alerts are active, but the local segment looks more exposed than expected "
-                        f"for a {network_profile} network.{reason_suffix}"
+                        f"for an untrusted network.{reason_suffix}"
                     ),
                 }
         if notice_count:
@@ -756,7 +767,7 @@ def format_network_profile_label(scan_context):
     profile = scan_context.get("network_profile")
     if not profile:
         return None
-    return profile
+    return normalize_network_profile(profile)
 
 
 def build_health_summary_status(summary, assessment):
@@ -799,7 +810,7 @@ def format_focus_recommendation(summary, assessment, scan_context=None):
     if assessment.get("level") == "untrusted":
         return "Action: avoid sensitive activity until the active alerts are understood."
     if assessment.get("level") == "suspicious":
-        if profile in {"guest", "travel", "public"}:
+        if profile == "untrusted":
             return f"Action: treat this {profile} network as untrusted and review the listed exposure."
         return "Action: review the listed finding before trusting this network."
     if summary.get("notice_checks", 0):
@@ -1129,7 +1140,7 @@ def build_health_markdown_report(scan_context, checks, summary):
 def build_parser():
     """Build the CLI parser for network health checks."""
     parser = argparse.ArgumentParser(
-        description="Safe network health checks for untrusted Wi-Fi and guest networks."
+        description="Safe network health checks for trusted home and untrusted networks."
     )
     parser.add_argument(
         "--iface",
@@ -1143,10 +1154,10 @@ def build_parser():
     )
     parser.add_argument(
         "--network-profile",
-        type=str,
         default=DEFAULT_NETWORK_PROFILE,
+        type=parse_network_profile,
         choices=NETWORK_PROFILES,
-        help="Interpret the network as auto, home, guest, travel, or public. Defaults to auto.",
+        help="Interpret the network as home or untrusted. Defaults to untrusted.",
     )
     parser.add_argument(
         "--json-out",
@@ -1236,10 +1247,11 @@ def run_health_check_collection(args):
     """Collect scan context, run health checks, and build summary/payload data."""
     started_at = time.monotonic()
     interface, cidr = resolve_scan_target(args.iface, args.cidr)
+    network_profile = normalize_network_profile(args.network_profile)
     scan_context = build_scan_context(
         interface=interface,
         cidr=cidr,
-        network_profile=args.network_profile,
+        network_profile=network_profile,
     )
     wifi_stability_seconds = normalize_wifi_stability_seconds(
         getattr(args, "wifi_stability_seconds", 0)
@@ -1247,7 +1259,7 @@ def run_health_check_collection(args):
     checks = run_network_health_checks(
         dns_domains=args.dns_domains or DEFAULT_DNS_DOMAINS,
         timeout=args.timeout,
-        network_profile=args.network_profile,
+        network_profile=network_profile,
         wifi_stability_seconds=wifi_stability_seconds,
         wifi_stability_progress_callback=(
             print_wifi_stability_progress if wifi_stability_seconds > 0 else None

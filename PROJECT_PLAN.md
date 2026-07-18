@@ -107,7 +107,7 @@ Remaining work:
 - continue refining the operator-facing wording now that the overall trust/path explanation exists
 - keep refining mesh instability and route/path diagnostics from real-world reports
 - expand macOS-first Wi-Fi environment detail where the platform allows it
-- improve guest/open-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
+- improve untrusted-network exposure assessment beyond the current gateway-local and passive local-peer visibility checks without crossing into broad active scanning
 - continue cleanup inside `network_health.py` so collection, analysis, and rendering boundaries stay explicit
 
 Backlog:
@@ -121,7 +121,7 @@ Backlog:
 
 Primary focus: `network-health-check`
 
-1. Continue environment-aware trust interpretation for `home`, `guest`, `travel`, and `public` from real-world reports.
+1. Continue environment-aware trust interpretation for the two supported profiles, `home` and `untrusted`, from real-world reports.
 2. Better operator output and shorter focus-mode wording.
 3. Continue safe local-segment reasoning without broad active probing.
 4. Improve route/path interpretation for dual-connected and unstable Wi-Fi cases.
@@ -148,7 +148,7 @@ Focus:
 
 1. Continue small refinements to operator wording only as real network runs expose new confusing cases.
 2. Continue selective cleanup in `network_health.py` as new trust-check behavior is added.
-3. Continue improving guest/travel interpretation as more real-world network examples are observed.
+3. Continue improving `untrusted` interpretation as more real-world network examples are observed.
 4. Revisit `network_scan` history modeling only if operational pressure appears.
 5. Keep Synology scheduler work in backlog unless automation pressure becomes real.
 
@@ -204,12 +204,12 @@ Completed:
 - `network-health-check` now includes a derived `client_isolation_hint` that summarizes whether the current segment appears to expose peer devices to the client based on passive visibility signals.
 - `network-health-check` now includes aggregated `dns_trust_reasoning`, `captive_trust_reasoning`, and `https_trust_reasoning` checks on top of the existing probe results.
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
-- `network-health-check` now supports environment-aware interpretation through `network_profile` values such as `home`, `guest`, and `travel`.
-- `network-health-check` now carries separate profile expectations for `home`, `guest`, and `travel` into local exposure, client isolation, and overall trust details.
+- `network-health-check` originally introduced multiple environment labels and now exposes the simpler `home` and `untrusted` model.
+- `network-health-check` carries separate expectations for trusted home and untrusted networks into local exposure, client isolation, and overall trust details.
 - `network-health-check` now supports a separate `public` profile and applies profile-aware interpretation to peer visibility, client isolation, and gateway exposure.
 - `network-health-check` now reports current macOS Wi-Fi signal, noise, SNR quality, channel width, security, and PHY details when the platform exposes them, with a compact diagnostic view for incomplete CoreWLAN results.
 - DNS diagnostics now compare resolver interface metadata with the default-route interface and distinguish likely VPN or split-DNS routing from hard resolution failures.
-- README now includes an operator checklist for guest, travel, and public Wi-Fi connections.
+- README includes an operator checklist for non-home networks under the unified `untrusted` profile.
 - `network-health-check` collection, reporting, and Wi-Fi environment logic have started being split into cleaner orchestration helpers.
 - `network-health-check` focus and alert-only output now use tighter operator-oriented summaries that suppress routine OK detail and keep notice-only reports compact.
 - `network-health-check` focus and alert-only output now prioritize notice-only findings, avoid duplicate notice summary lines, and truncate long notice lists with an explicit remaining count.
@@ -222,7 +222,7 @@ Completed:
 - Captive-portal and HTTPS/TLS checks now separate raw response/error collection from interpretation; unavailable captive probes are reported as alerts instead of terminating the health run.
 - Wi-Fi environment and active-path checks now separate platform/default-route collection from security, channel, route-mismatch, dual-connectivity, and confidence interpretation.
 - Health orchestration now collects local, Internet, and Wi-Fi bundles separately and composes them through a tested stable report-order function, leaving `run_network_health_checks` responsible only for stage progression and top-level coordination.
-- Profile-aware local policy now distinguishes managed guest isolation, untrusted travel networks where isolation cannot be assumed, and public networks where isolation is expected but local trust is still withheld; overall trust also incorporates notice-only path signals.
+- Profile-aware local policy now distinguishes only trusted `home` from `untrusted`; client isolation is desirable but never assumed outside home, and overall trust incorporates notice-only path signals.
 - Wi-Fi stability diagnostics now distinguish normal single mesh roaming from degraded and unstable links, reserve alerts for stronger measured impact, and expose measurement coverage, confidence, and latency peaks.
 - Passive local-segment reasoning now distinguishes confirmed peer visibility, inconclusive absence, and unavailable neighbor-cache evidence; untrusted profiles no longer treat missing observation data as possible proof of client isolation.
 - Passive peer visibility now combines IPv4 ARP with macOS/Linux IPv6 neighbor caches, excludes router entries, and deduplicates dual-stack devices by MAC without sending discovery traffic.
@@ -230,6 +230,7 @@ Completed:
 - Passive peer inventory now excludes the host's own IP and MAC identities across all interfaces, while low-confidence Ethernet-first macOS routing is classified as healthy rather than generating duplicate trust notices.
 - Full health reports now preserve nested indentation for service metadata, peer lists, resolver risks, and other structured detail instead of flattening every line to one level.
 - Health report labels now use consistent operator-facing network terminology (`Wi-Fi`, `MAC`, `URL`, `RSSI`, and readable multiword fields) while exported JSON keys remain stable.
+- Network trust selection is now reduced to two supported profiles: trusted `home` and default `untrusted`; former `auto`, `guest`, `travel`, and `public` inputs normalize to `untrusted` as compatibility aliases.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
