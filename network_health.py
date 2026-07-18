@@ -1535,15 +1535,24 @@ def collect_captive_portal_observations(probes=None, timeout=5):
     return observations
 
 
-def analyze_captive_portal_observation(observation):
+def analyze_captive_portal_observation(
+    observation,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
     """Interpret one collected HTTP connectivity-check response."""
+    network_profile = normalize_network_profile(network_profile)
     probe = observation["probe"]
     if observation.get("error") is not None:
         return build_check(
             f"captive_{probe['name']}",
             "alert",
             f"Connectivity probe failed for {probe['url']}",
-            {"url": probe["url"], "error": observation["error"]},
+            {
+                "url": probe["url"],
+                "error": observation["error"],
+                "finding_kind": "transport_failure",
+                "network_profile": network_profile,
+            },
         )
 
     response = observation["response"]
@@ -1558,9 +1567,17 @@ def analyze_captive_portal_observation(observation):
     suspicious = response["status_code"] != expected_status or redirected or body_mismatch
     return build_check(
         f"captive_{probe['name']}",
-        "alert" if suspicious else "ok",
         (
-            f"Unexpected captive-portal probe response for {probe['url']}"
+            "notice"
+            if suspicious and network_profile == "untrusted"
+            else "alert"
+            if suspicious
+            else "ok"
+        ),
+        (
+            f"Captive-portal response detected for {probe['url']}; sign-in may be required"
+            if suspicious and network_profile == "untrusted"
+            else f"Unexpected captive-portal probe response for {probe['url']}"
             if suspicious
             else f"Connectivity probe looked normal for {probe['url']}"
         ),
@@ -1569,14 +1586,23 @@ def analyze_captive_portal_observation(observation):
             "status_code": response["status_code"],
             "location": location,
             "body_preview": body,
+            "finding_kind": "unexpected_response" if suspicious else "expected_response",
+            "network_profile": network_profile,
         },
     )
 
 
-def run_captive_portal_checks(probes=None, timeout=5):
+def run_captive_portal_checks(
+    probes=None,
+    timeout=5,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
     """Collect and interpret HTTP captive-portal probes."""
     return [
-        analyze_captive_portal_observation(observation)
+        analyze_captive_portal_observation(
+            observation,
+            network_profile=network_profile,
+        )
         for observation in collect_captive_portal_observations(
             probes=probes,
             timeout=timeout,
@@ -1584,9 +1610,40 @@ def run_captive_portal_checks(probes=None, timeout=5):
     ]
 
 
-def build_captive_trust_reasoning_check(captive_checks):
+def build_captive_trust_reasoning_check(
+    captive_checks,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
     """Summarize captive-portal probe results into one trust interpretation."""
+    network_profile = normalize_network_profile(network_profile)
     alert_count = len(get_alert_checks(captive_checks))
+    notice_checks = [check for check in captive_checks if check.get("status") == "notice"]
+    finding_count = alert_count + len(notice_checks)
+    affected_probes = [
+        check["name"].replace("captive_", "")
+        for check in captive_checks
+        if check.get("status") in {"notice", "alert"}
+    ]
+    if network_profile == "untrusted" and notice_checks and not alert_count:
+        all_affected = finding_count == len(captive_checks)
+        return build_check(
+            "captive_trust_reasoning",
+            "notice",
+            (
+                "Captive portal detected on this untrusted network; complete the expected sign-in and run the check again"
+                if all_affected
+                else f"{finding_count} of {len(captive_checks)} captive-portal probe(s) suggest a sign-in page or partial HTTP interception"
+            ),
+            build_probe_reasoning_details(
+                "likely_captive_portal" if all_affected else "partial_http_interception",
+                len(captive_checks),
+                alert_probe_count=finding_count,
+                affected_probes=affected_probes,
+                context_note=(
+                    "a sign-in portal can be normal before Internet access is granted; HTTPS must behave normally after sign-in"
+                ),
+            ),
+        )
     return build_probe_trust_reasoning_check(
         name="captive_trust_reasoning",
         checks=captive_checks,
@@ -2892,16 +2949,28 @@ def collect_local_segment_checks(*, timeout=5, network_profile=DEFAULT_NETWORK_P
     }
 
 
-def collect_internet_path_checks(*, dns_domains=None, timeout=5):
+def collect_internet_path_checks(
+    *,
+    dns_domains=None,
+    timeout=5,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
     """Collect DNS, captive-portal, and HTTPS trust checks as one composable bundle."""
+    network_profile = normalize_network_profile(network_profile)
     dns_environment_check = build_dns_environment_check()
     dns_resolution_checks = run_dns_consistency_checks(dns_domains)
     dns_trust_reasoning_check = build_dns_trust_reasoning_check(
         dns_environment_check,
         dns_resolution_checks,
     )
-    captive_checks = run_captive_portal_checks(timeout=timeout)
-    captive_trust_reasoning_check = build_captive_trust_reasoning_check(captive_checks)
+    captive_checks = run_captive_portal_checks(
+        timeout=timeout,
+        network_profile=network_profile,
+    )
+    captive_trust_reasoning_check = build_captive_trust_reasoning_check(
+        captive_checks,
+        network_profile=network_profile,
+    )
     https_checks = run_https_tls_checks(timeout=timeout)
     https_trust_reasoning_check = build_https_trust_reasoning_check(https_checks)
     return {
@@ -2993,6 +3062,7 @@ def run_network_health_checks(
     internet_path = collect_internet_path_checks(
         dns_domains=dns_domains,
         timeout=timeout,
+        network_profile=network_profile,
     )
     if progress_callback:
         progress_callback("Wi-Fi environment", 4, progress_steps)

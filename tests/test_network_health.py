@@ -2047,7 +2047,7 @@ Wi-Fi:
         self.assertEqual(failed_result["status"], "alert")
         self.assertIn("lookup failed", failed_result["details"]["error"])
 
-    def test_run_captive_portal_checks_flags_redirects(self):
+    def test_run_captive_portal_checks_treats_untrusted_redirect_as_notice(self):
         with mock.patch(
             "network_health.fetch_url",
             return_value={
@@ -2058,6 +2058,23 @@ Wi-Fi:
         ):
             results = network_health.run_captive_portal_checks(
                 [{"name": "probe", "url": "http://probe.test", "expected_status": 204, "expected_body_contains": None}]
+            )
+
+        self.assertEqual(results[0]["status"], "notice")
+        self.assertIn("sign-in may be required", results[0]["summary"])
+
+    def test_run_captive_portal_checks_treats_home_redirect_as_alert(self):
+        with mock.patch(
+            "network_health.fetch_url",
+            return_value={
+                "status_code": 302,
+                "headers": {"Location": "http://login.example/"},
+                "body": "",
+            },
+        ):
+            results = network_health.run_captive_portal_checks(
+                [{"name": "probe", "url": "http://probe.test", "expected_status": 204, "expected_body_contains": None}],
+                network_profile="home",
             )
 
         self.assertEqual(results[0]["status"], "alert")
@@ -2095,7 +2112,8 @@ Wi-Fi:
                     "headers": {},
                     "body": "Hotel login",
                 },
-            }
+            },
+            network_profile="home",
         )
 
         self.assertEqual(result["status"], "alert")
@@ -2139,6 +2157,19 @@ Wi-Fi:
 
         self.assertEqual(result["status"], "alert")
         self.assertEqual(result["details"]["hint_level"], "likely_captive_portal")
+
+    def test_build_captive_trust_reasoning_marks_untrusted_portal_as_notice(self):
+        result = network_health.build_captive_trust_reasoning_check(
+            [
+                {"name": "captive_gstatic_204", "status": "notice"},
+                {"name": "captive_apple_captive", "status": "notice"},
+            ],
+            network_profile="untrusted",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["hint_level"], "likely_captive_portal")
+        self.assertIn("run the check again", result["summary"])
 
     def test_build_captive_trust_reasoning_marks_partial_interception(self):
         result = network_health.build_captive_trust_reasoning_check(
@@ -2449,6 +2480,23 @@ Wi-Fi:
             "https_checks",
             "https_trust_reasoning",
         ])
+
+    def test_collect_internet_path_checks_passes_normalized_profile_to_captive_analysis(self):
+        with mock.patch("network_health.build_dns_environment_check", return_value={"name": "dns_environment", "status": "ok"}), \
+             mock.patch("network_health.run_dns_consistency_checks", return_value=[]), \
+             mock.patch("network_health.build_dns_trust_reasoning_check", return_value={"name": "dns_trust_reasoning", "status": "ok"}), \
+             mock.patch("network_health.run_captive_portal_checks", return_value=[]) as run_captive, \
+             mock.patch("network_health.build_captive_trust_reasoning_check", return_value={"name": "captive_trust_reasoning", "status": "ok"}) as build_captive, \
+             mock.patch("network_health.run_https_tls_checks", return_value=[]), \
+             mock.patch("network_health.build_https_trust_reasoning_check", return_value={"name": "https_trust_reasoning", "status": "ok"}):
+            network_health.collect_internet_path_checks(
+                dns_domains=["example.com"],
+                timeout=4,
+                network_profile="public",
+            )
+
+        run_captive.assert_called_once_with(timeout=4, network_profile="untrusted")
+        build_captive.assert_called_once_with([], network_profile="untrusted")
 
     def test_collect_wifi_path_checks_reuses_environment_details(self):
         wifi_environment_check = {

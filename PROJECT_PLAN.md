@@ -231,6 +231,7 @@ Completed:
 - Full health reports now preserve nested indentation for service metadata, peer lists, resolver risks, and other structured detail instead of flattening every line to one level.
 - Health report labels now use consistent operator-facing network terminology (`Wi-Fi`, `MAC`, `URL`, `RSSI`, and readable multiword fields) while exported JSON keys remain stable.
 - Network trust selection is now reduced to two supported profiles: trusted `home` and default `untrusted`; former `auto`, `guest`, `travel`, and `public` inputs normalize to `untrusted` as compatibility aliases.
+- Captive-portal HTTP responses are now profile-aware: sign-in behavior is a repeat-after-login notice on `untrusted`, remains an alert on `home`, and never weakens transport or HTTPS/TLS failures.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 
