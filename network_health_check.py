@@ -35,6 +35,7 @@ JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
 FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
+DERIVED_FINDING_NAMES = {"overall_trust_explanation", "client_isolation_hint"}
 
 
 def parse_network_profile(value):
@@ -252,11 +253,6 @@ def format_client_isolation_hint_details(details):
         lines.append(f"  assessment: {details['isolation_assessment']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
-    peers = details.get("visible_peers", [])
-    if peers:
-        lines.append("  peer samples:")
-        for peer in peers[:5]:
-            lines.append(f"    - {peer['ip']} ({peer['mac']})")
     return lines
 
 
@@ -341,7 +337,10 @@ def format_overall_trust_explanation_details(details):
         lines.append(f"  network profile: {details['network_profile']}")
     if details.get("context_note"):
         lines.append(f"  context: {details['context_note']}")
-    if details.get("profile_expectation"):
+    if (
+        details.get("profile_expectation")
+        and details.get("profile_expectation") != details.get("context_note")
+    ):
         lines.append(f"  profile expectation: {details['profile_expectation']}")
     if details.get("local_segment"):
         lines.append(f"  local segment: {details['local_segment']}")
@@ -602,9 +601,13 @@ def format_top_alert_summary(summary):
     notices = prioritize_findings(summary.get("notices", []))
     if not alerts:
         if notices:
-            labels = [format_check_label(check["name"]) for check in notices[:4]]
-            suffix = " ..." if len(notices) > 4 else ""
-            return f"Risk summary: no hard alerts; {len(notices)} notice(s) in {', '.join(labels)}{suffix}"
+            primary_notices = select_primary_findings(notices)
+            labels = [format_check_label(check["name"]) for check in primary_notices[:4]]
+            suffix = " …" if len(primary_notices) > 4 else ""
+            return (
+                f"Risk summary: no hard alerts; {len(primary_notices)} primary notice(s) in "
+                f"{', '.join(labels)}{suffix}"
+            )
         return "Risk summary: no active alerts"
     labels = []
     for check in alerts[:4]:
@@ -626,7 +629,7 @@ def format_top_alert_summary(summary):
 
 
 def format_top_notice_summary(summary):
-    notices = prioritize_findings(summary.get("notices", []))
+    notices = prioritize_findings(select_primary_findings(summary.get("notices", [])))
     if not notices:
         return None
     labels = [format_check_label(check["name"]) for check in notices[:4]]
@@ -635,12 +638,20 @@ def format_top_notice_summary(summary):
 
 
 def format_notice_reason_labels(summary, limit=3):
-    notices = prioritize_findings(summary.get("notices", []))
+    notices = prioritize_findings(select_primary_findings(summary.get("notices", [])))
     if not notices:
         return None
     labels = [format_check_label(check["name"]) for check in notices[:limit]]
-    suffix = " ..." if len(notices) > limit else ""
+    suffix = " …" if len(notices) > limit else ""
     return f"Primary reasons: {', '.join(labels)}{suffix}"
+
+
+def select_primary_findings(checks):
+    """Suppress derived summaries when their source observations are present."""
+    primary = [
+        check for check in checks if check.get("name") not in DERIVED_FINDING_NAMES
+    ]
+    return primary or list(checks)
 
 
 def format_health_count_summary(summary, include_ok=False):
@@ -676,7 +687,11 @@ def prioritize_findings(checks):
 def select_focus_checks(checks):
     """Return the compact operator-facing subset in a stable risk-first order."""
     alerts = prioritize_findings([check for check in checks if check["status"] == "alert"])
-    notices = prioritize_findings([check for check in checks if check["status"] == "notice"])
+    notices = prioritize_findings(
+        select_primary_findings(
+            [check for check in checks if check["status"] == "notice"]
+        )
+    )
     baseline = [
         check
         for check in checks
@@ -716,17 +731,12 @@ def build_trust_assessment(summary, scan_context=None):
                     {
                         "gateway_exposure",
                         "local_peer_visibility",
-                        "client_isolation_hint",
-                        "overall_trust_explanation",
                     }
                 )
             )
-            if local_segment_notice_count >= 2 and (
-                "overall_trust_explanation" in notice_names
-                or "client_isolation_hint" in notice_names
-            ):
+            if local_segment_notice_count >= 2:
                 reason_labels = format_notice_reason_labels(summary)
-                reason_suffix = f" {reason_labels}." if reason_labels else ""
+                reason_suffix = f" {reason_labels}" if reason_labels else ""
                 return {
                     "level": "suspicious",
                     "summary": (
@@ -1082,17 +1092,18 @@ def print_alert_report(summary, scan_context=None):
     if not alerts:
         notices = summary.get("notices", [])
         if notices:
-            prioritized_notices = prioritize_findings(notices)
+            primary_notices = select_primary_findings(notices)
+            prioritized_notices = prioritize_findings(primary_notices)
             print("No actionable health alerts detected.")
             print(assessment["summary"])
             notice_summary = format_top_notice_summary(summary)
             if notice_summary:
-                print(f"{notice_summary} ({len(notices)} total)")
+                print(f"{notice_summary} ({len(primary_notices)} total)")
             print("Review notices:")
             for check in prioritized_notices[:NOTICE_REPORT_LIMIT]:
                 print(f"- {format_check_label(check['name'])}: {check['summary']}")
-            if len(notices) > NOTICE_REPORT_LIMIT:
-                print(f"... {len(notices) - NOTICE_REPORT_LIMIT} more notice(s)")
+            if len(primary_notices) > NOTICE_REPORT_LIMIT:
+                print(f"... {len(primary_notices) - NOTICE_REPORT_LIMIT} more notice(s)")
         else:
             print("No actionable health alerts detected.")
         return

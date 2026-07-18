@@ -2673,6 +2673,7 @@ Wi-Fi:
                     "alerts": [],
                     "notices": [
                         {"name": "gateway_exposure", "summary": "Gateway exposes web/admin services"},
+                        {"name": "local_peer_visibility", "summary": "Local peers are visible"},
                         {"name": "overall_trust_explanation", "summary": "Local segment looks exposed for guest Wi-Fi"},
                     ],
                 },
@@ -2680,8 +2681,8 @@ Wi-Fi:
             )
 
         output = buffer.getvalue()
-        self.assertIn("Checks : 4 | Notices: 2 | Alerts: 0", output)
-        self.assertIn("Status : [~] suspicious · review 2 notice(s)", output)
+        self.assertIn("Checks : 4 | Notices: 3 | Alerts: 0", output)
+        self.assertIn("Status : [~] suspicious · review 3 notice(s)", output)
         self.assertIn("local segment looks more exposed than expected for an untrusted network", output)
         self.assertIn("No actionable health alerts detected.", output)
 
@@ -2860,9 +2861,10 @@ Wi-Fi:
         assessment = network_health_check.build_trust_assessment(
             {
                 "alert_checks": 0,
-                "notice_checks": 2,
+                "notice_checks": 3,
                 "notices": [
                     {"name": "gateway_exposure"},
+                    {"name": "local_peer_visibility"},
                     {"name": "overall_trust_explanation"},
                 ],
             },
@@ -2871,7 +2873,7 @@ Wi-Fi:
 
         self.assertEqual(assessment["level"], "suspicious")
         self.assertIn("untrusted network", assessment["summary"])
-        self.assertIn("Primary reasons: Gateway exposure, Overall trust explanation", assessment["summary"])
+        self.assertIn("Primary reasons: Gateway exposure, Local peer visibility", assessment["summary"])
 
     def test_format_notice_reason_labels_returns_human_readable_summary(self):
         labels = network_health_check.format_notice_reason_labels(
@@ -2886,7 +2888,25 @@ Wi-Fi:
 
         self.assertEqual(
             labels,
-            "Primary reasons: Gateway exposure, Overall trust explanation, Client isolation hint",
+            "Primary reasons: Gateway exposure",
+        )
+
+    def test_untrusted_risk_summary_counts_only_primary_observations(self):
+        summary = network_health_check.format_top_alert_summary(
+            {
+                "alerts": [],
+                "notices": [
+                    {"name": "gateway_exposure"},
+                    {"name": "local_peer_visibility"},
+                    {"name": "overall_trust_explanation"},
+                    {"name": "client_isolation_hint"},
+                ],
+            }
+        )
+
+        self.assertEqual(
+            summary,
+            "Risk summary: no hard alerts; 2 primary notice(s) in Gateway exposure, Local peer visibility",
         )
 
     def test_format_health_count_summary_can_include_or_hide_ok_count(self):
@@ -3090,7 +3110,7 @@ Wi-Fi:
         self.assertIn("visible peers: 2", output)
         self.assertIn("passive peer data: available", output)
         self.assertIn("inference confidence: observed", output)
-        self.assertIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
+        self.assertNotIn("192.168.2.22 (aa:bb:cc:dd:ee:ff)", output)
 
     def test_print_health_report_renders_dns_trust_reasoning_check(self):
         buffer = StringIO()
@@ -3332,7 +3352,7 @@ Wi-Fi:
         self.assertIn("Profile: untrusted", output)
         self.assertIn("Checks : 2 | Notices: 1 | Alerts: 0", output)
         self.assertIn("Status : [~] trusted · review 1 notice(s)", output)
-        self.assertIn("Risk summary: no hard alerts; 1 notice(s) in Wi-Fi environment", output)
+        self.assertIn("Risk summary: no hard alerts; 1 primary notice(s) in Wi-Fi environment", output)
         self.assertIn("Action: review the notices", output)
         self.assertIn("Wi-Fi environment", output)
         self.assertIn("[~]", output)
@@ -3411,11 +3431,11 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn(
-            "Notice areas: Gateway exposure, Overall trust explanation, DNS trust reasoning, Wi-Fi environment (4 total)",
+            "Notice areas: Gateway exposure, DNS trust reasoning, Wi-Fi environment (3 total)",
             output,
         )
-        self.assertLess(output.find("- Gateway exposure"), output.find("- Overall trust explanation"))
-        self.assertLess(output.find("- Overall trust explanation"), output.find("- DNS trust reasoning"))
+        self.assertNotIn("- Overall trust explanation", output)
+        self.assertLess(output.find("- Gateway exposure"), output.find("- DNS trust reasoning"))
 
     def test_print_focus_health_report_truncates_extra_notices(self):
         buffer = StringIO()
@@ -3441,13 +3461,13 @@ Wi-Fi:
             network_health_check.print_focus_health_report(checks, summary, scan_context={"network_profile": "travel"})
 
         output = buffer.getvalue()
-        self.assertIn("Overall trust explanation", output)
+        self.assertNotIn("Overall trust explanation", output)
         self.assertIn("Gateway exposure", output)
         self.assertIn("DNS trust reasoning", output)
         self.assertIn("Captive portal reasoning", output)
-        self.assertNotIn("HTTPS risk", output)
+        self.assertIn("HTTPS risk", output)
         self.assertNotIn("Wi-Fi risk", output)
-        self.assertIn("... 2 more notice(s); use --output full for complete detail", output)
+        self.assertIn("... 1 more notice(s); use --output full for complete detail", output)
 
     def test_print_health_report_renders_active_path_check(self):
         buffer = StringIO()

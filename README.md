@@ -605,6 +605,8 @@ Notice-only output is sorted by operational priority so local exposure and path 
 This mode keeps the trust assessment and important context while suppressing routine OK details.
 When many notices are present, focus mode shows the highest-priority notices first and points to `--output full` for complete detail.
 
+Summary reason lists show primary observations only. Derived checks such as `Overall trust explanation` and `Client isolation hint` remain visible in the full report and JSON, but do not repeat their source observations as additional primary reasons. Peer samples are shown once under `Local peer visibility` instead of being duplicated under client isolation.
+
 **To run short Wi-Fi stability diagnostics for mesh or roaming problems:**
 
 ```bash
