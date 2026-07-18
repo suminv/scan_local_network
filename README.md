@@ -528,7 +528,7 @@ Use this when you want the report wording to reflect different expectations. For
 
 The detailed checks expose the normalized profile posture, whether isolation is expected or merely desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice on `guest`, `travel`, and `public` profiles.
 
-Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, router entries are excluded from the peer count, and abbreviated macOS MAC octets are normalized to the standard two-digit form.
+Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, router entries and the current host's own interface identities are excluded from the peer count, and abbreviated macOS MAC octets are normalized to the standard two-digit form.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
@@ -549,7 +549,7 @@ The Wi-Fi section now also raises risk signals for:
 - duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
 - very weak nearby signal levels that can correlate with unstable or suspicious guest-network behavior
 
-On macOS, the report also identifies cases where an active Wi-Fi interface is present but the system default route uses another interface such as Ethernet. Direct current-interface evidence is treated more strongly than the lower-confidence `system_profiler` fallback, so ordinary Ethernet + Wi-Fi dual connectivity is not automatically promoted to a hard alert.
+On macOS, the report also identifies cases where an active Wi-Fi interface is present but the system default route uses another interface such as Ethernet. A lower-confidence `system_profiler` observation is reported as healthy Ethernet-first connectivity; only direct current-interface evidence can promote a conflicting route to an alert.
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
 Gateway web/admin surfaces are treated as expected for an explicit `home` profile, reviewable on `guest`, and sensitive on `travel` or `public`. The service marker follows the same context (`expected`, `review`, `sensitive`, or `alert`) instead of labeling every private router page as an alert.

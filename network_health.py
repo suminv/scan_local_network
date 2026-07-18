@@ -651,6 +651,32 @@ def collect_passive_neighbor_entries():
     }
 
 
+def collect_local_interface_identities():
+    """Collect this host's IP and MAC identities across every local interface."""
+    local_ips = set()
+    local_macs = set()
+    try:
+        interfaces = netifaces.interfaces()
+    except (OSError, ValueError):
+        interfaces = []
+
+    for interface in interfaces:
+        try:
+            addresses = netifaces.ifaddresses(interface)
+        except (OSError, ValueError):
+            continue
+        for family in (netifaces.AF_INET, netifaces.AF_INET6):
+            for entry in addresses.get(family, []):
+                address = normalize_ip_for_compare(entry.get("addr"))
+                if address:
+                    local_ips.add(address)
+        for entry in addresses.get(netifaces.AF_LINK, []):
+            mac = normalize_mac_address(entry.get("addr"))
+            if mac:
+                local_macs.add(mac)
+    return {"ips": local_ips, "macs": local_macs}
+
+
 def collect_local_peer_visibility():
     """Collect passive local-peer observations from OS neighbor caches."""
     gateway_ip, interface = get_default_gateway()
@@ -668,6 +694,8 @@ def collect_local_peer_visibility():
 
     visible_peers = []
     peers_by_mac = {}
+    local_identities = collect_local_interface_identities()
+    excluded_local_entries = 0
     for entry in neighbor_observation["entries"]:
         if entry["interface"] != interface:
             continue
@@ -685,6 +713,9 @@ def collect_local_peer_visibility():
             continue
 
         normalized_mac = normalize_mac_address(entry["mac"])
+        if entry["ip"] in local_identities["ips"] or normalized_mac in local_identities["macs"]:
+            excluded_local_entries += 1
+            continue
         identity = normalized_mac
         existing = peers_by_mac.get(identity)
         if existing is None:
@@ -706,6 +737,7 @@ def collect_local_peer_visibility():
         "gateway_ip": gateway_ip,
         "is_private_gateway": is_private_gateway,
         "evidence_sources": neighbor_observation["sources"],
+        "excluded_local_entries": excluded_local_entries,
         "visible_peers": visible_peers,
     }
 
@@ -1856,7 +1888,7 @@ def analyze_active_path(observation):
             not observation.get("current_details_available", False)
             or observation.get("current_details_source") == "system_profiler"
         )
-        status = "notice" if inventory_only else "alert"
+        status = "ok" if inventory_only else "alert"
         evidence = "system_profiler inventory only" if inventory_only else "current Wi-Fi details"
         return {
             "name": "active_path",

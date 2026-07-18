@@ -572,6 +572,31 @@ fe80::33%en0 11:22:33:44:55:66 en0 20m S
         self.assertEqual(ipv6_only_peer["ip"], "fe80::33")
         self.assertEqual(ipv6_only_peer["address_family"], "ipv6")
 
+    def test_collect_local_peer_visibility_excludes_this_hosts_other_interface(self):
+        neighbor_observation = {
+            "available": True,
+            "sources": ["arp", "ndp"],
+            "entries": [
+                {"ip": "192.168.2.45", "mac": "90:09:d0:83:de:d5", "interface": "en6"},
+                {"ip": "fe80::49a:d12e:1584:3865", "mac": "fc:b2:14:50:7d:79", "interface": "en6", "address_family": "ipv6"},
+            ],
+        }
+        with mock.patch(
+            "network_health.get_default_gateway",
+            return_value=("192.168.2.254", "en6"),
+        ), mock.patch(
+            "network_health.collect_passive_neighbor_entries",
+            return_value=neighbor_observation,
+        ), mock.patch(
+            "network_health.collect_local_interface_identities",
+            return_value={"ips": {"192.168.2.67"}, "macs": {"fc:b2:14:50:7d:79"}},
+        ):
+            observation = network_health.collect_local_peer_visibility()
+
+        self.assertEqual(len(observation["visible_peers"]), 1)
+        self.assertEqual(observation["visible_peers"][0]["ip"], "192.168.2.45")
+        self.assertEqual(observation["excluded_local_entries"], 1)
+
     def test_analyze_local_peer_visibility_is_profile_aware(self):
         observation = {
             "available": True,
@@ -1411,7 +1436,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
 
         self.assertEqual(high_confidence["status"], "alert")
         self.assertEqual(high_confidence["details"]["confidence"], "high")
-        self.assertEqual(low_confidence["status"], "notice")
+        self.assertEqual(low_confidence["status"], "ok")
         self.assertEqual(low_confidence["details"]["confidence"], "low")
         self.assertIn("Ethernet is preferred", low_confidence["summary"])
         self.assertEqual(
@@ -1429,7 +1454,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
                     }
                 )
         self.assertEqual(result["details"]["wifi_interface"], "en0")
-        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(result["details"]["confidence"], "low")
         self.assertTrue(result["details"]["possible_dual_connectivity"])
 
@@ -1444,7 +1469,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
                         "interfaces": {"en0": {"ssid": "<redacted>", "channel": "44 (5GHz, 80MHz)"}},
                     },
                 })
-        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["status"], "ok")
         self.assertEqual(result["details"]["confidence"], "low")
 
     def test_build_active_path_check_marks_active_wifi_route_ok_when_aligned(self):
