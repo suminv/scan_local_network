@@ -229,6 +229,7 @@ Completed:
 - Health output now clears stale progress-line tails, ignores incomplete CoreWLAN placeholders during risk analysis, humanizes current Wi-Fi security labels, normalizes abbreviated MAC octets, and describes low-confidence Ethernet-first dual connectivity as an expected route preference.
 - Passive peer inventory now excludes the host's own IP and MAC identities across all interfaces, while low-confidence Ethernet-first macOS routing is classified as healthy rather than generating duplicate trust notices.
 - Full health reports now preserve nested indentation for service metadata, peer lists, resolver risks, and other structured detail instead of flattening every line to one level.
+- Health report labels now use consistent operator-facing network terminology (`Wi-Fi`, `MAC`, `URL`, `RSSI`, and readable multiword fields) while exported JSON keys remain stable.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
 - Baseline `unittest` suite added for CLI/network resolution helpers and SQLite persistence behavior.
 

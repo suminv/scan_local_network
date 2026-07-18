@@ -2929,12 +2929,12 @@ Wi-Fi:
         self.assertIn("Gateway exposure", output)
         self.assertIn("context: often expected on a private/home LAN", output)
         self.assertIn("443/tcp HTTPS admin/web [alert]", output)
-        self.assertIn("url: https://192.168.2.1:443/", output)
-        self.assertIn("content_type: text/html", output)
+        self.assertIn("URL: https://192.168.2.1:443/", output)
+        self.assertIn("content type: text/html", output)
         self.assertIn("server: lighttpd", output)
         self.assertIn("location: /login", output)
         self.assertIn("title: Router Login", output)
-        self.assertIn("page_hint: html document", output)
+        self.assertIn("page hint: html document", output)
         self.assertIn("Notices: 1", output)
 
     def test_health_detail_indentation_preserves_nested_service_metadata(self):
@@ -2947,8 +2947,8 @@ Wi-Fi:
             "      - 80/tcp HTTP admin/web",
         )
         self.assertEqual(
-            network_health_check.indent_detail_line("      url: http://192.168.2.254/"),
-            "        url: http://192.168.2.254/",
+            network_health_check.indent_detail_line("      URL: http://192.168.2.254/"),
+            "        URL: http://192.168.2.254/",
         )
 
     def test_print_health_report_renders_local_peer_visibility_check(self):
@@ -3407,7 +3407,7 @@ Wi-Fi:
         output = buffer.getvalue()
         self.assertIn("Active path", output)
         self.assertIn("default interface: en0", output)
-        self.assertIn("active wifi interface: en1", output)
+        self.assertIn("active Wi-Fi interface: en1", output)
 
     def test_build_wifi_debug_summary_detects_likely_os_restriction(self):
         checks = [
@@ -3578,7 +3578,7 @@ Wi-Fi:
 
         output = buffer.getvalue()
         self.assertIn("Wi-Fi stability", output)
-        self.assertIn("avg gateway latency", output)
+        self.assertIn("average gateway latency", output)
         self.assertIn("max gateway latency", output)
         self.assertIn("confidence: high", output)
         self.assertIn("coverage: Wi-Fi 3/3 · ping 3/3", output)

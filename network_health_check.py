@@ -115,7 +115,7 @@ def format_gateway_identity_details(details):
 
 def format_gateway_fingerprint_details(details):
     return [
-        f"  mac: {details.get('gateway_mac') or 'unavailable'}",
+        f"  MAC: {details.get('gateway_mac') or 'unavailable'}",
         f"  vendor: {details.get('vendor', 'Unknown')}",
         f"  interface: {details.get('interface')}",
     ]
@@ -150,11 +150,11 @@ def format_gateway_exposure_details(details):
         lines.append(f"    - {service['port']}/tcp {service['label']}{risk_marker}")
         http_probe = service.get("http_probe") or {}
         if http_probe.get("url"):
-            lines.append(f"      url: {http_probe['url']}")
+            lines.append(f"      URL: {http_probe['url']}")
         if http_probe.get("status_code") is not None:
             lines.append(f"      status: {http_probe['status_code']}")
         if http_probe.get("content_type"):
-            lines.append(f"      content_type: {http_probe['content_type']}")
+            lines.append(f"      content type: {http_probe['content_type']}")
         if http_probe.get("server"):
             lines.append(f"      server: {http_probe['server']}")
         if http_probe.get("location"):
@@ -162,9 +162,9 @@ def format_gateway_exposure_details(details):
         if http_probe.get("title"):
             lines.append(f"      title: {http_probe['title']}")
         if http_probe.get("page_hint"):
-            lines.append(f"      page_hint: {http_probe['page_hint']}")
+            lines.append(f"      page hint: {http_probe['page_hint']}")
         if http_probe.get("error"):
-            lines.append(f"      probe_error: {http_probe['error']}")
+            lines.append(f"      probe error: {http_probe['error']}")
     return lines
 
 
@@ -182,7 +182,7 @@ def format_gateway_reachability_details(details):
     if ping.get("loss_percent") is not None:
         lines.append(f"  packet loss: {ping['loss_percent']:.0f}%")
     if ping.get("avg_ms") is not None:
-        lines.append(f"  avg latency: {ping['avg_ms']:.1f} ms")
+        lines.append(f"  average latency: {ping['avg_ms']:.1f} ms")
     return lines
 
 
@@ -255,9 +255,9 @@ def format_active_path_details(details):
         f"  gateway: {details.get('gateway_ip')}",
     ]
     if details.get("wifi_active"):
-        lines.append(f"  active wifi interface: {details.get('wifi_interface')}")
+        lines.append(f"  active Wi-Fi interface: {details.get('wifi_interface')}")
     else:
-        lines.append("  active wifi interface: none detected")
+        lines.append("  active Wi-Fi interface: none detected")
     if details.get("interpretation"):
         lines.append(f"  interpretation: {details['interpretation']}")
     if details.get("confidence"):
@@ -451,7 +451,7 @@ def format_domain_resolution_details(details):
 
 
 def format_http_probe_details(details):
-    lines = [f"  status_code: {details.get('status_code')}"]
+    lines = [f"  status code: {details.get('status_code')}"]
     if details.get("location"):
         lines.append(f"  location: {details['location']}")
     return lines
@@ -471,9 +471,9 @@ def format_wifi_stability_details(details):
             f" · ping {details.get('ping_sample_count', 0)}/{details.get('sample_count', 0)}"
         )
     if details.get("avg_rssi") is not None:
-        lines.append(f"  avg rssi: {details['avg_rssi']:.0f} dBm")
+        lines.append(f"  average RSSI: {details['avg_rssi']:.0f} dBm")
     if details.get("avg_latency_ms") is not None:
-        lines.append(f"  avg gateway latency: {details['avg_latency_ms']:.1f} ms")
+        lines.append(f"  average gateway latency: {details['avg_latency_ms']:.1f} ms")
     if details.get("max_latency_ms") is not None:
         lines.append(f"  max gateway latency: {details['max_latency_ms']:.1f} ms")
     if details.get("max_loss_percent") is not None:
