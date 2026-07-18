@@ -744,7 +744,10 @@ def build_trust_assessment(summary, scan_context=None):
 
 
 def indent_detail_line(line):
-    return f"    {line.lstrip()}"
+    """Indent check details while preserving formatter-defined nesting."""
+    if line.startswith("  "):
+        return f"    {line[2:]}"
+    return f"    {line}"
 
 
 def format_network_profile_label(scan_context):

@@ -119,6 +119,8 @@ Status  : [~] review detected changes
 
 `scan-health` uses the same block for interface, network profile, check counts, and the final trust status. A target-only port scan does not show historical changes unless `--show-changes` was requested.
 
+In the full health report, list items and their metadata retain nested indentation. For example, a gateway service's URL, HTTP status, and page hints appear beneath that service instead of looking like unrelated check-level fields.
+
 The output modes follow the same scope rules:
 
 | Command or mode | What is shown |

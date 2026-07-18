@@ -2937,6 +2937,20 @@ Wi-Fi:
         self.assertIn("page_hint: html document", output)
         self.assertIn("Notices: 1", output)
 
+    def test_health_detail_indentation_preserves_nested_service_metadata(self):
+        self.assertEqual(
+            network_health_check.indent_detail_line("  reachable local services:"),
+            "    reachable local services:",
+        )
+        self.assertEqual(
+            network_health_check.indent_detail_line("    - 80/tcp HTTP admin/web"),
+            "      - 80/tcp HTTP admin/web",
+        )
+        self.assertEqual(
+            network_health_check.indent_detail_line("      url: http://192.168.2.254/"),
+            "        url: http://192.168.2.254/",
+        )
+
     def test_print_health_report_renders_local_peer_visibility_check(self):
         buffer = StringIO()
         checks = [
