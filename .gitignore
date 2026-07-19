@@ -16,6 +16,7 @@ __pycache__/
 *.msg
 
 *.db
+*.db.backup-*
 *.sqlite
 mac_vendor_update
 

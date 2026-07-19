@@ -283,7 +283,8 @@ def save_port_scan_results(
         payload["device_profiles"] = profiles
     if policy_findings is not None:
         payload["policy_findings"] = policy_findings
-    save_json_report(json_output_file, payload, label="Port scan results")
+    if json_output_file:
+        save_json_report(json_output_file, payload, label="Port scan results")
     if csv_output_file:
         save_csv_report(
             csv_output_file,

@@ -34,8 +34,8 @@ from reporting import (
 JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
-FOCUS_BASELINE_CHECKS = {"overall_trust_explanation", "gateway_identity"}
-DERIVED_FINDING_NAMES = {"overall_trust_explanation", "client_isolation_hint"}
+FOCUS_BASELINE_CHECKS = {"access_state", "overall_trust_explanation", "gateway_identity"}
+DERIVED_FINDING_NAMES = {"access_state", "overall_trust_explanation", "client_isolation_hint"}
 
 
 def parse_network_profile(value):
@@ -56,6 +56,8 @@ NOTICE_REPORT_LIMIT = 3
 FOCUS_NOTICE_LIMIT = 4
 FINDING_PRIORITY = {
     "active_path": 10,
+    "access_state": 5,
+    "vpn_path": 15,
     "gateway_reachability": 20,
     "gateway_exposure": 30,
     "local_peer_visibility": 40,
@@ -70,8 +72,8 @@ FINDING_PRIORITY = {
     "gateway_fingerprint": 110,
 }
 CHECK_GROUPS = [
-    ("Summary", ["overall_trust_explanation"]),
-    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "gateway_reachability", "local_peer_visibility", "client_isolation_hint", "active_path"]),
+    ("Summary", ["access_state", "overall_trust_explanation"]),
+    ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "gateway_reachability", "local_peer_visibility", "client_isolation_hint", "active_path", "vpn_path"]),
     ("DNS", ["dns_environment", "dns_trust_reasoning", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
     ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_"]),
@@ -85,6 +87,8 @@ CHECK_LABELS = {
     "local_peer_visibility": "Local peer visibility",
     "client_isolation_hint": "Client isolation hint",
     "active_path": "Active path",
+    "vpn_path": "VPN path",
+    "access_state": "Access state",
     "dns_environment": "DNS servers",
     "dns_trust_reasoning": "DNS trust reasoning",
     "wifi_environment": "Wi-Fi environment",
@@ -142,6 +146,8 @@ def format_gateway_exposure_details(details):
         lines.append(f"  context: {details['context_note']}")
     if details.get("exposure_assessment"):
         lines.append(f"  assessment: {details['exposure_assessment']}")
+    if details.get("portal_correlation"):
+        lines.append(f"  portal correlation: {details['portal_correlation']}")
     reachable = details.get("reachable_services", [])
     if not reachable:
         lines.append("  reachable local services: none detected")
@@ -155,8 +161,10 @@ def format_gateway_exposure_details(details):
             risk_marker = " [expected]"
         elif assessment == "observed_unknown_profile":
             risk_marker = " [review]"
-        elif assessment == "untrusted_network_admin_surface":
+        elif assessment in {"untrusted_network_admin_surface", "mixed_gateway_and_portal_surface"}:
             risk_marker = " [sensitive]"
+        elif service.get("role") == "captive_portal":
+            risk_marker = " [portal]"
         else:
             risk_marker = " [alert]"
         lines.append(f"    - {service['port']}/tcp {service['label']}{risk_marker}")
@@ -195,6 +203,12 @@ def format_gateway_reachability_details(details):
         lines.append(f"  packet loss: {ping['loss_percent']:.0f}%")
     if ping.get("avg_ms") is not None:
         lines.append(f"  average latency: {ping['avg_ms']:.1f} ms")
+    if details.get("icmp_filtered_likely"):
+        lines.append("  ICMP filtering likely: yes")
+    if details.get("indirect_evidence"):
+        lines.append("  indirect evidence:")
+        for evidence in details["indirect_evidence"]:
+            lines.append(f"    - {evidence}")
     return lines
 
 
@@ -271,6 +285,33 @@ def format_active_path_details(details):
         lines.append(f"  confidence: {details['confidence']}")
     if details.get("evidence"):
         lines.append(f"  evidence: {details['evidence']}")
+    return lines
+
+
+def format_vpn_path_details(details):
+    lines = [
+        f"  VPN likely active: {'yes' if details.get('vpn_likely_active') else 'no'}",
+        f"  tunnel interface: {details.get('tunnel_interface') or 'none detected'}",
+        f"  underlying interface: {details.get('underlying_interface') or 'unknown'}",
+        f"  DNS path: {details.get('dns_path') or 'unknown'}",
+    ]
+    if details.get("resolver_interfaces"):
+        lines.append(f"  resolver interfaces: {', '.join(details['resolver_interfaces'])}")
+    if details.get("interpretation"):
+        lines.append(f"  interpretation: {details['interpretation']}")
+    return lines
+
+
+def format_access_state_details(details):
+    lines = [f"  state: {details.get('state', 'unknown')}"]
+    if details.get("recommended_action"):
+        lines.append(f"  action: {details['recommended_action']}")
+    if details.get("dns_path"):
+        lines.append(f"  DNS path: {details['dns_path']}")
+    if details.get("captive_path"):
+        lines.append(f"  captive path: {details['captive_path']}")
+    if details.get("https_path"):
+        lines.append(f"  HTTPS path: {details['https_path']}")
     return lines
 
 
@@ -354,6 +395,10 @@ def format_overall_trust_explanation_details(details):
         lines.append(f"  active path: {details['active_path']}")
     if details.get("gateway_reachability"):
         lines.append(f"  gateway reachability: {details['gateway_reachability']}")
+    if details.get("access_state"):
+        lines.append(f"  access state: {details['access_state']}")
+    if details.get("vpn_active") is not None:
+        lines.append(f"  VPN active: {'yes' if details['vpn_active'] else 'no'}")
     if details.get("affected_components"):
         lines.append(f"  affected components: {', '.join(details['affected_components'])}")
     return lines
@@ -507,6 +552,9 @@ def humanize_risk_type(risk_type):
         "weak_security": "weak security",
         "very_low_signal": "very low signal",
         "mixed_security_duplicate_ssid": "mixed-security duplicate SSID",
+        "current_open_network": "open current network",
+        "current_weak_security": "weak current security",
+        "current_weak_signal": "weak current signal",
     }.get(risk_type, risk_type.replace("_", " "))
 
 
@@ -527,6 +575,10 @@ def format_check_details(check):
         return format_client_isolation_hint_details(details)
     if name == "active_path":
         return format_active_path_details(details)
+    if name == "vpn_path":
+        return format_vpn_path_details(details)
+    if name == "access_state":
+        return format_access_state_details(details)
     if name == "dns_environment":
         return format_dns_environment_details(details)
     if name == "dns_trust_reasoning":
@@ -597,7 +649,7 @@ def format_check_label(check_name):
 
 
 def format_top_alert_summary(summary):
-    alerts = prioritize_findings(summary.get("alerts", []))
+    alerts = prioritize_findings(select_primary_findings(summary.get("alerts", [])))
     notices = prioritize_findings(summary.get("notices", []))
     if not alerts:
         if notices:
@@ -686,7 +738,9 @@ def prioritize_findings(checks):
 
 def select_focus_checks(checks):
     """Return the compact operator-facing subset in a stable risk-first order."""
-    alerts = prioritize_findings([check for check in checks if check["status"] == "alert"])
+    alerts = prioritize_findings(
+        select_primary_findings([check for check in checks if check["status"] == "alert"])
+    )
     notices = prioritize_findings(
         select_primary_findings(
             [check for check in checks if check["status"] == "notice"]
@@ -696,6 +750,13 @@ def select_focus_checks(checks):
         check
         for check in checks
         if check["status"] == "ok" and check["name"] in FOCUS_BASELINE_CHECKS
+    ]
+    access_state = [check for check in checks if check["name"] == "access_state"]
+    vpn_context = [
+        check
+        for check in checks
+        if check["name"] == "vpn_path"
+        and check.get("details", {}).get("vpn_likely_active")
     ]
     context = [
         check
@@ -707,7 +768,7 @@ def select_focus_checks(checks):
             and check["status"] != "ok"
         )
     ]
-    selected = alerts + notices[:FOCUS_NOTICE_LIMIT] + baseline + context
+    selected = access_state + vpn_context + alerts + notices[:FOCUS_NOTICE_LIMIT] + baseline + context
     deduped = []
     seen = set()
     for check in selected:
@@ -726,6 +787,26 @@ def build_trust_assessment(summary, scan_context=None):
     notice_names = {check["name"] for check in summary.get("notices", [])}
     if alert_count == 0:
         if network_profile == "untrusted":
+            wifi_notice = next(
+                (
+                    check
+                    for check in summary.get("notices", [])
+                    if check.get("name") == "wifi_environment"
+                ),
+                None,
+            )
+            current_wifi_open = any(
+                risk.get("type") == "current_open_network"
+                for risk in (wifi_notice or {}).get("details", {}).get("analysis", {}).get("risks", [])
+            )
+            if current_wifi_open:
+                return {
+                    "level": "suspicious",
+                    "summary": (
+                        "No hard alerts are active, but the current untrusted Wi-Fi connection is open; "
+                        "use a trusted VPN and keep local sharing disabled."
+                    ),
+                }
             local_segment_notice_count = len(
                 notice_names.intersection(
                     {

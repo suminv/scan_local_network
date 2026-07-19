@@ -9,10 +9,16 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlparse
 
 import netifaces
 
-from arp_scanner import LocalMacVendorLookup, get_vendor
+from arp_scanner import (
+    LocalMacVendorLookup,
+    get_effective_default_route,
+    get_local_ipv4_gateway,
+    get_vendor,
+)
 
 
 DEFAULT_DNS_DOMAINS = ["example.com", "openai.com"]
@@ -87,6 +93,7 @@ DEFAULT_GATEWAY_EXPOSURE_PROBES = [
 ]
 MACOS_AIRPORT_SCAN_PATH = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
 AUXILIARY_WIFI_INTERFACES = {"awdl0", "llw0", "p2p0"}
+TUNNEL_INTERFACE_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec")
 ACTIVE_WIFI_STATUSES = {
     "spairport_status_active",
     "spairport_status_connected",
@@ -105,6 +112,11 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def is_macos():
     return platform.system() == "Darwin"
+
+
+def is_tunnel_interface(interface):
+    """Return whether an interface name conventionally represents a VPN tunnel."""
+    return bool(interface) and interface.lower().startswith(TUNNEL_INTERFACE_PREFIXES)
 
 
 def run_command(command):
@@ -271,10 +283,8 @@ def build_probe_trust_reasoning_check(
 
 
 def get_default_gateway():
-    gateways = netifaces.gateways()
-    default_gateway = gateways["default"][netifaces.AF_INET]
-    gateway_ip, interface = default_gateway[0], default_gateway[1]
-    return gateway_ip, interface
+    """Return the local IPv4 gateway rather than a VPN tunnel endpoint."""
+    return get_local_ipv4_gateway()
 
 
 def resolve_gateway_identity():
@@ -482,6 +492,92 @@ def analyze_gateway_exposure(observation, network_profile=DEFAULT_NETWORK_PROFIL
     }
 
 
+def correlate_gateway_exposure_with_captive_portal(
+    gateway_exposure_check,
+    captive_checks,
+    access_state_check,
+):
+    """Relabel a gateway web surface only when portal evidence points at that gateway."""
+    details = dict(gateway_exposure_check.get("details", {}))
+    gateway_ip = details.get("gateway_ip")
+    if (
+        not gateway_ip
+        or access_state_check.get("details", {}).get("state")
+        != "captive_portal_sign_in_required"
+    ):
+        return gateway_exposure_check
+
+    matching_locations = []
+    matching_ports = set()
+    for check in captive_checks:
+        check_details = check.get("details", {})
+        location = check_details.get("location")
+        body_preview = check_details.get("body_preview") or ""
+        parsed_location = urlparse(location) if location else None
+        if parsed_location and parsed_location.hostname == gateway_ip:
+            matching_locations.append(location)
+            matching_ports.add(
+                parsed_location.port
+                or (443 if parsed_location.scheme == "https" else 80)
+            )
+        for body_url in re.findall(
+            rf"https?://{re.escape(gateway_ip)}(?::\d+)?[^\s\"'<>]*",
+            body_preview,
+            flags=re.IGNORECASE,
+        ):
+            parsed_body_url = urlparse(body_url)
+            matching_locations.append(body_url)
+            matching_ports.add(
+                parsed_body_url.port
+                or (443 if parsed_body_url.scheme == "https" else 80)
+            )
+
+    if not matching_locations:
+        return gateway_exposure_check
+
+    reachable_services = []
+    risky_services = []
+    for original in details.get("reachable_services", []):
+        service = dict(original)
+        if service.get("risk") and service.get("port") in matching_ports:
+            service["role"] = "captive_portal"
+            service["label"] = service["label"].replace("admin/web", "captive portal")
+        if service.get("risk"):
+            risky_services.append(service)
+        reachable_services.append(service)
+
+    remaining_admin_surfaces = [
+        service
+        for service in risky_services
+        if service.get("role") != "captive_portal"
+    ]
+
+    details.update(
+        {
+            "reachable_services": reachable_services,
+            "risky_services": risky_services,
+            "exposure_assessment": (
+                "mixed_gateway_and_portal_surface"
+                if remaining_admin_surfaces
+                else "captive_portal_surface"
+            ),
+            "portal_correlation": "redirect_or_page_points_to_gateway",
+            "portal_evidence": matching_locations,
+            "context_note": "the connectivity probes point to this gateway, so the web surface is likely the network sign-in portal rather than an admin page",
+        }
+    )
+    return build_check(
+        "gateway_exposure",
+        "notice",
+        (
+            f"Gateway web service on {gateway_ip} appears to host the captive portal; {len(remaining_admin_surfaces)} other web surface(s) still require review"
+            if remaining_admin_surfaces
+            else f"Gateway web service on {gateway_ip} appears to host the captive portal; complete only the expected network sign-in"
+        ),
+        details,
+    )
+
+
 def build_gateway_exposure_check(timeout=2, probes=None, network_profile=DEFAULT_NETWORK_PROFILE):
     """Collect and interpret a bounded set of default-gateway services."""
     observation = collect_gateway_exposure(timeout=timeout, probes=probes)
@@ -657,6 +753,11 @@ def collect_local_peer_visibility():
     visible_peers = []
     peers_by_mac = {}
     local_identities = collect_local_interface_identities()
+    interface_broadcasts = {
+        network.broadcast_address
+        for network in get_interface_networks(interface)
+        if network.version == 4
+    }
     excluded_local_entries = 0
     for entry in neighbor_observation["entries"]:
         if entry["interface"] != interface:
@@ -669,12 +770,15 @@ def collect_local_peer_visibility():
             continue
         if ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_unspecified:
             continue
+        normalized_mac = normalize_mac_address(entry["mac"])
+        if normalized_mac == "ff:ff:ff:ff:ff:ff" or ip_obj in interface_broadcasts:
+            excluded_local_entries += 1
+            continue
         if entry.get("is_router"):
             continue
         if ip_obj.version == 4 and (ip_obj.is_link_local or not ip_obj.is_private):
             continue
 
-        normalized_mac = normalize_mac_address(entry["mac"])
         if entry["ip"] in local_identities["ips"] or normalized_mac in local_identities["macs"]:
             excluded_local_entries += 1
             continue
@@ -1325,7 +1429,8 @@ def analyze_dns_servers(
 def collect_dns_environment_observation():
     """Collect resolver configuration and the active route context."""
     dns_config = collect_dns_configuration()
-    gateway_ip, default_interface = get_default_gateway()
+    gateway_ip, _ = get_default_gateway()
+    _, default_interface = get_effective_default_route()
     return {
         "configuration": dns_config,
         "gateway_ip": gateway_ip,
@@ -1842,7 +1947,7 @@ def build_current_wifi_snapshot(inventory, current_details):
 
 def collect_active_path_observation(wifi_environment=None):
     """Collect default-route and active Wi-Fi interface state."""
-    gateway_ip, default_interface = get_default_gateway()
+    gateway_ip, default_interface = get_effective_default_route()
     macos = is_macos()
     if macos and wifi_environment is None:
         wifi_environment = collect_wifi_environment()
@@ -1867,6 +1972,31 @@ def analyze_active_path(observation):
     gateway_ip = observation["gateway_ip"]
     default_interface = observation["default_interface"]
     active_wifi_interface = observation.get("active_wifi_interface")
+    if is_tunnel_interface(default_interface):
+        return {
+            "name": "active_path",
+            "status": "ok",
+            "summary": f"Default route uses tunnel interface {default_interface}; a VPN is likely active",
+            "details": {
+                "gateway_ip": gateway_ip,
+                "default_interface": default_interface,
+                "wifi_interface": active_wifi_interface,
+                "wifi_active": bool(active_wifi_interface),
+                "route_mismatch": bool(
+                    active_wifi_interface and active_wifi_interface != default_interface
+                ),
+                "possible_dual_connectivity": False,
+                "vpn_likely_active": True,
+                "tunnel_interface": default_interface,
+                "route_assessment": "vpn_tunnel_default_route",
+                "interpretation": (
+                    f"Traffic uses VPN tunnel {default_interface} over the underlying Wi-Fi connection {active_wifi_interface}"
+                    if active_wifi_interface
+                    else f"Traffic uses VPN tunnel {default_interface}; no underlying active Wi-Fi interface was identified"
+                ),
+            },
+        }
+
     if observation.get("platform") != "macos":
         return {
             "name": "active_path",
@@ -1955,6 +2085,91 @@ def build_active_path_check(wifi_environment=None):
     """Collect and interpret the active network path."""
     observation = collect_active_path_observation(wifi_environment)
     return analyze_active_path(observation)
+
+
+def get_dns_resolver_interfaces(dns_environment_check):
+    """Extract interface names attached to macOS resolver records."""
+    interfaces = []
+    for resolver in dns_environment_check.get("details", {}).get("resolvers", []):
+        parsed = parse_interface_index(resolver.get("if_index"))
+        interface = parsed.get("interface") if parsed else None
+        if interface and interface not in interfaces:
+            interfaces.append(interface)
+    return interfaces
+
+
+def build_vpn_path_check(active_path_check, dns_environment_check):
+    """Explain whether the default route and resolver metadata indicate a VPN."""
+    active_details = active_path_check.get("details", {})
+    default_interface = active_details.get("default_interface")
+    tunnel_interface = (
+        default_interface if is_tunnel_interface(default_interface) else None
+    )
+    resolver_interfaces = get_dns_resolver_interfaces(dns_environment_check)
+    resolver_tunnels = [
+        interface for interface in resolver_interfaces if is_tunnel_interface(interface)
+    ]
+
+    if tunnel_interface:
+        dns_state = (
+            "through_tunnel"
+            if tunnel_interface in resolver_tunnels
+            else "different_tunnel"
+            if resolver_tunnels
+            else "not_confirmed"
+        )
+        return build_check(
+            "vpn_path",
+            "notice" if dns_state == "different_tunnel" else "ok",
+            (
+                f"VPN likely active on {tunnel_interface}; DNS is associated with {', '.join(resolver_tunnels)} and should be verified"
+                if dns_state == "different_tunnel"
+                else f"VPN likely active on {tunnel_interface}; default traffic uses the tunnel"
+            ),
+            {
+                "vpn_likely_active": True,
+                "tunnel_interface": tunnel_interface,
+                "underlying_interface": active_details.get("wifi_interface"),
+                "dns_path": dns_state,
+                "resolver_interfaces": resolver_interfaces,
+                "interpretation": (
+                    "Default traffic and resolver metadata use the same VPN tunnel"
+                    if dns_state == "through_tunnel"
+                    else "Default traffic uses a VPN tunnel, but resolver interface metadata is unavailable"
+                    if dns_state == "not_confirmed"
+                    else "Default traffic and resolver metadata refer to different tunnel interfaces"
+                ),
+            },
+        )
+
+    if resolver_tunnels:
+        return build_check(
+            "vpn_path",
+            "notice",
+            f"DNS resolver metadata uses tunnel interface {', '.join(resolver_tunnels)}, but the default route does not",
+            {
+                "vpn_likely_active": True,
+                "tunnel_interface": None,
+                "underlying_interface": default_interface,
+                "dns_path": "split_dns_or_partial_tunnel",
+                "resolver_interfaces": resolver_interfaces,
+                "interpretation": "This can be intentional split DNS or a partial VPN configuration; verify that the tunnel is expected",
+            },
+        )
+
+    return build_check(
+        "vpn_path",
+        "ok",
+        "No active VPN tunnel is evident from the default route or DNS metadata",
+        {
+            "vpn_likely_active": False,
+            "tunnel_interface": None,
+            "underlying_interface": default_interface,
+            "dns_path": "system_default",
+            "resolver_interfaces": resolver_interfaces,
+            "interpretation": "Traffic appears to use the underlying network directly",
+        },
+    )
 
 
 def parse_ping_summary(raw_text):
@@ -2058,6 +2273,56 @@ def build_gateway_reachability_check(ping_count=3):
     """Collect and interpret default-gateway reachability."""
     observation = collect_gateway_reachability(ping_count=ping_count)
     return analyze_gateway_reachability(observation)
+
+
+def contextualize_gateway_reachability(
+    gateway_reachability_check,
+    gateway_exposure_check,
+    access_state_check,
+):
+    """Recognize ICMP filtering when independent evidence proves the gateway works."""
+    if gateway_reachability_check.get("status") != "alert":
+        return gateway_reachability_check
+
+    details = dict(gateway_reachability_check.get("details", {}))
+    ping = details.get("ping", {})
+    received = ping.get("received")
+    transmitted = ping.get("transmitted")
+    is_no_reply = received == 0 or transmitted is None or received is None
+    if not is_no_reply:
+        return gateway_reachability_check
+
+    access_online = access_state_check.get("details", {}).get("state") == "online"
+    reachable_services = gateway_exposure_check.get("details", {}).get(
+        "reachable_services", []
+    )
+    if not access_online and not reachable_services:
+        return gateway_reachability_check
+
+    evidence = []
+    if access_online:
+        evidence.append("online Internet and certificate-validated HTTPS path")
+    if reachable_services:
+        evidence.append(
+            "reachable gateway service(s): "
+            + ", ".join(
+                f"{service.get('port')}/tcp {service.get('label')}"
+                for service in reachable_services
+            )
+        )
+    details.update(
+        {
+            "level": "reachable_indirectly_icmp_filtered",
+            "icmp_filtered_likely": True,
+            "indirect_evidence": evidence,
+        }
+    )
+    return build_check(
+        "gateway_reachability",
+        "ok",
+        f"Gateway {details.get('gateway_ip')} is working, but does not answer ICMP ping; filtering is likely",
+        details,
+    )
 
 
 def summarize_wifi_stability(samples, gateway_ip):
@@ -2562,6 +2827,56 @@ def analyze_nearby_wifi_networks(networks, current_network=None):
     }
 
 
+def analyze_current_wifi_connection(current_network):
+    """Return security and radio-quality notices for the connected Wi-Fi network."""
+    if not current_network:
+        return []
+    risks = []
+    ssid = current_network.get("ssid") or "<redacted>"
+    security = current_network.get("security")
+    security_class = classify_wifi_security(security)
+    if security_class == "open":
+        risks.append(
+            {
+                "type": "current_open_network",
+                "severity": "notice",
+                "ssid": ssid,
+                "reason": "current Wi-Fi connection is open and does not provide link-layer encryption",
+            }
+        )
+    elif security_class == "weak_legacy":
+        risks.append(
+            {
+                "type": "current_weak_security",
+                "severity": "alert",
+                "ssid": ssid,
+                "reason": f"current Wi-Fi connection uses legacy security: {security}",
+            }
+        )
+
+    rssi = parse_wifi_number(current_network.get("rssi"))
+    noise = parse_wifi_number(current_network.get("noise"))
+    snr = rssi - noise if rssi is not None and noise is not None else None
+    if (rssi is not None and rssi <= WIFI_WEAK_RSSI_DBM) or (
+        snr is not None and snr < 20
+    ):
+        metrics = []
+        if rssi is not None:
+            metrics.append(f"RSSI {rssi:.0f} dBm")
+        if snr is not None:
+            metrics.append(f"SNR {snr:.0f} dB")
+        risks.append(
+            {
+                "type": "current_weak_signal",
+                "severity": "notice",
+                "ssid": ssid,
+                "reason": "current connection has weak or noisy radio conditions"
+                + (f" ({', '.join(metrics)})" if metrics else ""),
+            }
+        )
+    return risks
+
+
 def build_wifi_environment_analysis(wifi_environment):
     """Attach a nearby-network analysis block to the collected Wi-Fi state."""
     nearby_networks = wifi_environment["nearby"]["networks"]
@@ -2581,6 +2896,9 @@ def build_wifi_environment_analysis(wifi_environment):
             "risks": [],
         }
     )
+    current_risks = analyze_current_wifi_connection(current_network)
+    analysis["current_connection_risks"] = current_risks
+    analysis["risks"] = [*current_risks, *analysis["risks"]]
     enriched = dict(wifi_environment)
     enriched["analysis"] = analysis
     return enriched
@@ -2595,17 +2913,27 @@ def summarize_wifi_environment(wifi_environment):
 
     if not interfaces:
         return "alert", "No Wi-Fi interfaces detected on macOS"
+    if analysis["risks"]:
+        alert_risks = [
+            risk
+            for risk in analysis["risks"]
+            if risk.get("severity", "alert") == "alert"
+        ]
+        current_risks = analysis.get("current_connection_risks", [])
+        return (
+            "alert" if alert_risks else "notice",
+            (
+                f"Current Wi-Fi connection has {len(current_risks)} security or signal finding(s)"
+                if current_risks
+                else f"Wi-Fi environment shows {len(analysis['risks'])} risk signal(s) across "
+                f"{analysis['visible_network_count']} visible network(s)"
+            ),
+        )
     if analysis["limited_scan"]:
         return (
             "ok",
             f"Wi-Fi inventory collected, but nearby scan looks restricted by macOS "
             f"({analysis['visible_network_count']} incomplete object(s))",
-        )
-    if analysis["risks"]:
-        return (
-            "alert",
-            f"Wi-Fi environment shows {len(analysis['risks'])} risk signal(s) across "
-            f"{analysis['visible_network_count']} visible network(s)",
         )
     if not nearby["available"]:
         return "ok", "Wi-Fi interfaces detected; nearby SSID inventory is unavailable on this macOS setup"
@@ -2672,14 +3000,14 @@ def analyze_https_tls_observation(observation):
             f"https_{probe['name']}",
             "alert",
             f"TLS verification failed for {probe['url']}",
-            {"url": probe["url"], "error": observation["error"]},
+            {"url": probe["url"], "error": observation["error"], "finding_kind": "tls_failure"},
         )
     if error_kind == "transport":
         return build_check(
             f"https_{probe['name']}",
             "alert",
             f"HTTPS probe failed for {probe['url']}",
-            {"url": probe["url"], "error": observation["error"]},
+            {"url": probe["url"], "error": observation["error"], "finding_kind": "transport_failure"},
         )
 
     response = observation["response"]
@@ -2692,8 +3020,55 @@ def analyze_https_tls_observation(observation):
             if suspicious
             else f"HTTPS probe succeeded for {probe['url']}"
         ),
-        {"url": probe["url"], "status_code": response["status_code"]},
+        {
+            "url": probe["url"],
+            "status_code": response["status_code"],
+            "finding_kind": "unexpected_response" if suspicious else "expected_response",
+        },
     )
+
+
+def contextualize_https_checks_for_captive_portal(
+    https_checks,
+    captive_trust_reasoning_check,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
+    """Treat non-TLS HTTPS unavailability as pre-login context on a detected portal."""
+    network_profile = normalize_network_profile(network_profile)
+    captive_hint = captive_trust_reasoning_check.get("details", {}).get("hint_level")
+    if (
+        network_profile != "untrusted"
+        or captive_hint != "likely_captive_portal"
+        or captive_trust_reasoning_check.get("status") != "notice"
+    ):
+        return https_checks
+
+    contextualized = []
+    for check in https_checks:
+        details = dict(check.get("details", {}))
+        finding_kind = details.get("finding_kind")
+        if check.get("status") == "alert" and finding_kind in {
+            "transport_failure",
+            "unexpected_response",
+        }:
+            details.update(
+                {
+                    "pre_login_context": True,
+                    "original_status": "alert",
+                    "context_note": "HTTPS may remain unavailable until the detected captive portal sign-in is completed; rerun afterward",
+                }
+            )
+            contextualized.append(
+                build_check(
+                    check["name"],
+                    "notice",
+                    f"HTTPS is not yet available while captive portal sign-in appears pending for {details.get('url')}",
+                    details,
+                )
+            )
+        else:
+            contextualized.append(check)
+    return contextualized
 
 
 def run_https_tls_checks(probes=None, timeout=5):
@@ -2710,6 +3085,7 @@ def run_https_tls_checks(probes=None, timeout=5):
 def build_https_trust_reasoning_check(https_checks):
     """Summarize HTTPS/TLS probe results into one trust interpretation."""
     alerts = get_alert_checks(https_checks)
+    notices = [check for check in https_checks if check.get("status") == "notice"]
     alert_count = len(alerts)
 
     alert_names = [check["name"].replace("https_", "") for check in alerts]
@@ -2733,6 +3109,22 @@ def build_https_trust_reasoning_check(https_checks):
             ),
         }
 
+    if notices and not alerts:
+        return build_check(
+            "https_trust_reasoning",
+            "notice",
+            "HTTPS availability cannot be confirmed until the detected captive portal sign-in is completed",
+            build_probe_reasoning_details(
+                "https_pending_captive_sign_in",
+                len(https_checks),
+                alert_probe_count=len(notices),
+                affected_probes=[
+                    check["name"].replace("https_", "") for check in notices
+                ],
+                context_note="this pre-login state is expected on some managed networks; certificate validation must succeed after sign-in",
+            ),
+        )
+
     return build_probe_trust_reasoning_check(
         name="https_trust_reasoning",
         checks=https_checks,
@@ -2753,6 +3145,117 @@ def build_https_trust_reasoning_check(https_checks):
     )
 
 
+def build_access_state_check(
+    dns_trust_reasoning_check,
+    captive_trust_reasoning_check,
+    https_trust_reasoning_check,
+    network_profile=DEFAULT_NETWORK_PROFILE,
+):
+    """Derive the current online/pre-login/degraded state from trust-path checks."""
+    network_profile = normalize_network_profile(network_profile)
+    dns_hint = dns_trust_reasoning_check.get("details", {}).get("hint_level")
+    captive_hint = captive_trust_reasoning_check.get("details", {}).get("hint_level")
+    https_hint = https_trust_reasoning_check.get("details", {}).get("hint_level")
+    base_details = {
+        "network_profile": network_profile,
+        "dns_path": dns_hint,
+        "captive_path": captive_hint,
+        "https_path": https_hint,
+    }
+
+    if https_hint == "certificate_validation_failure":
+        return build_check(
+            "access_state",
+            "alert",
+            "Secure access is unsafe: HTTPS certificate validation failed",
+            {
+                **base_details,
+                "state": "tls_validation_failure",
+                "recommended_action": "Do not enter sensitive credentials; disconnect or use a trusted cellular connection",
+            },
+        )
+
+    if dns_trust_reasoning_check.get("status") == "alert":
+        return build_check(
+            "access_state",
+            "alert",
+            "Network access is degraded because public DNS resolution did not behave normally",
+            {
+                **base_details,
+                "state": "dns_access_degraded",
+                "recommended_action": "Do not use the connection for sensitive activity until DNS succeeds normally",
+            },
+        )
+
+    if (
+        captive_hint == "likely_captive_portal"
+        and captive_trust_reasoning_check.get("status") == "notice"
+        and network_profile == "untrusted"
+    ):
+        return build_check(
+            "access_state",
+            "notice",
+            "Captive portal sign-in is required before this network can be assessed as online",
+            {
+                **base_details,
+                "state": "captive_portal_sign_in_required",
+                "recommended_action": "Complete only the expected hotel/network sign-in, then rerun this check",
+            },
+        )
+
+    if captive_hint in {"likely_captive_portal", "partial_http_interception"}:
+        return build_check(
+            "access_state",
+            (
+                "alert"
+                if captive_trust_reasoning_check.get("status") == "alert"
+                or network_profile == "home"
+                else "notice"
+            ),
+            "HTTP interception or an incomplete captive portal path requires review",
+            {
+                **base_details,
+                "state": "http_interception_requires_review",
+                "recommended_action": "Verify the network and rerun after any expected sign-in",
+            },
+        )
+
+    if https_trust_reasoning_check.get("status") == "alert":
+        return build_check(
+            "access_state",
+            "alert",
+            "Secure Internet access is degraded after connectivity checks",
+            {
+                **base_details,
+                "state": "secure_access_degraded",
+                "recommended_action": "Rerun after expected portal sign-in; if this persists, disconnect or use cellular data",
+            },
+        )
+
+    if captive_hint == "normal_internet_path" and https_hint == "normal_https_path":
+        return build_check(
+            "access_state",
+            "ok",
+            "Internet access is online and certificate-validated HTTPS probes succeeded",
+            {
+                **base_details,
+                "state": "online",
+                "recommended_action": "Continue to treat the local segment according to the selected network profile",
+            },
+        )
+
+    return build_check(
+        "access_state",
+        "notice",
+        "Internet access state is inconclusive",
+        {
+            **base_details,
+            "state": "inconclusive",
+            "recommended_action": "Review DNS, captive portal, and HTTPS findings, then rerun the check",
+        },
+    )
+
+
 def collect_overall_trust_signals(
     client_isolation_hint_check,
     dns_trust_reasoning_check,
@@ -2760,6 +3263,8 @@ def collect_overall_trust_signals(
     https_trust_reasoning_check,
     active_path_check=None,
     gateway_reachability_check=None,
+    access_state_check=None,
+    vpn_path_check=None,
     network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Extract the normalized signal set used by the overall trust explanation."""
@@ -2777,6 +3282,7 @@ def collect_overall_trust_signals(
         ("HTTPS", https_trust_reasoning_check),
         ("Active path", active_path_check),
         ("Gateway reachability", gateway_reachability_check),
+        ("VPN path", vpn_path_check),
     ]
     for label, check in component_checks:
         if check and check.get("status") in {"notice", "alert"}:
@@ -2800,6 +3306,9 @@ def collect_overall_trust_signals(
         ),
         "affected_components": affected_components,
         "component_findings": component_findings,
+        "access_state": access_state_check.get("details", {}).get("state") if access_state_check else None,
+        "access_state_status": access_state_check.get("status") if access_state_check else None,
+        "vpn_state": vpn_path_check.get("details", {}).get("vpn_likely_active") if vpn_path_check else None,
     }
 
 
@@ -2810,6 +3319,13 @@ def classify_overall_trust_signals(signals):
     network_profile = signals["network_profile"]
     risky_gateway_service_count = signals["risky_gateway_service_count"]
     is_private_gateway = signals["is_private_gateway"]
+
+    if signals.get("access_state") == "captive_portal_sign_in_required":
+        return {
+            "status": "notice",
+            "summary": "This network is waiting for captive portal sign-in; complete the expected login and rerun the assessment",
+            "context_note": "pre-login transport restrictions can be normal, but TLS certificate failures are never treated as expected",
+        }
 
     if affected_components:
         alert_components = [
@@ -2892,6 +3408,8 @@ def build_overall_trust_details(signals, decision):
         "gateway_reachability": signals["gateway_reachability_status"],
         "affected_components": signals["affected_components"],
         "component_findings": signals.get("component_findings", []),
+        "access_state": signals.get("access_state"),
+        "vpn_active": signals.get("vpn_state"),
         "context_note": decision["context_note"],
     }
 
@@ -2903,6 +3421,8 @@ def build_overall_trust_explanation_check(
     https_trust_reasoning_check,
     active_path_check=None,
     gateway_reachability_check=None,
+    access_state_check=None,
+    vpn_path_check=None,
     network_profile=DEFAULT_NETWORK_PROFILE,
 ):
     """Build one short human-oriented explanation across local, DNS, captive, and HTTPS trust layers."""
@@ -2913,6 +3433,8 @@ def build_overall_trust_explanation_check(
         https_trust_reasoning_check,
         active_path_check=active_path_check,
         gateway_reachability_check=gateway_reachability_check,
+        access_state_check=access_state_check,
+        vpn_path_check=vpn_path_check,
         network_profile=network_profile,
     )
     decision = classify_overall_trust_signals(signals)
@@ -2973,7 +3495,18 @@ def collect_internet_path_checks(
         network_profile=network_profile,
     )
     https_checks = run_https_tls_checks(timeout=timeout)
+    https_checks = contextualize_https_checks_for_captive_portal(
+        https_checks,
+        captive_trust_reasoning_check,
+        network_profile=network_profile,
+    )
     https_trust_reasoning_check = build_https_trust_reasoning_check(https_checks)
+    access_state_check = build_access_state_check(
+        dns_trust_reasoning_check,
+        captive_trust_reasoning_check,
+        https_trust_reasoning_check,
+        network_profile=network_profile,
+    )
     return {
         "dns_environment": dns_environment_check,
         "dns_resolution_checks": dns_resolution_checks,
@@ -2982,6 +3515,7 @@ def collect_internet_path_checks(
         "captive_trust_reasoning": captive_trust_reasoning_check,
         "https_checks": https_checks,
         "https_trust_reasoning": https_trust_reasoning_check,
+        "access_state": access_state_check,
     }
 
 
@@ -3006,6 +3540,26 @@ def compose_network_health_checks(
 ):
     """Compose collected check bundles into the stable report order."""
     active_path_check = wifi_path["active_path"]
+    access_state_check = internet_path.get("access_state") or build_access_state_check(
+        internet_path["dns_trust_reasoning"],
+        internet_path["captive_trust_reasoning"],
+        internet_path["https_trust_reasoning"],
+        network_profile=network_profile,
+    )
+    vpn_path_check = build_vpn_path_check(
+        active_path_check,
+        internet_path["dns_environment"],
+    )
+    gateway_exposure_check = correlate_gateway_exposure_with_captive_portal(
+        local_segment["gateway_exposure"],
+        internet_path["captive_checks"],
+        access_state_check,
+    )
+    gateway_reachability_check = contextualize_gateway_reachability(
+        gateway_reachability_check,
+        gateway_exposure_check,
+        access_state_check,
+    )
     overall_trust_check = build_overall_trust_explanation_check(
         local_segment["client_isolation_hint"],
         internet_path["dns_trust_reasoning"],
@@ -3013,12 +3567,14 @@ def compose_network_health_checks(
         internet_path["https_trust_reasoning"],
         active_path_check=active_path_check,
         gateway_reachability_check=gateway_reachability_check,
+        access_state_check=access_state_check,
+        vpn_path_check=vpn_path_check,
         network_profile=network_profile,
     )
     checks = [
         local_segment["gateway_identity"],
         local_segment["gateway_fingerprint"],
-        local_segment["gateway_exposure"],
+        gateway_exposure_check,
         gateway_reachability_check,
         local_segment["local_peer_visibility"],
         local_segment["client_isolation_hint"],
@@ -3026,11 +3582,13 @@ def compose_network_health_checks(
         internet_path["dns_trust_reasoning"],
         wifi_path["wifi_environment"],
         active_path_check,
+        vpn_path_check,
         *internet_path["dns_resolution_checks"],
         *internet_path["captive_checks"],
         internet_path["captive_trust_reasoning"],
         *internet_path["https_checks"],
         internet_path["https_trust_reasoning"],
+        access_state_check,
         overall_trust_check,
     ]
     if wifi_stability_check is not None:

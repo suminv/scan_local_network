@@ -37,10 +37,97 @@ DB_FILE = "arp_scan_v1.db"
 JSON_OUTPUT_FILE = "arp_scan_result.json"
 CSV_OUTPUT_FILE = None
 MARKDOWN_OUTPUT_FILE = None
+NETWORK_PROFILES = ("home", "untrusted")
+DEFAULT_NETWORK_PROFILE = "untrusted"
 SCAN_TYPE_ARP = "arp"
 SCAN_TYPE_PORT = "port"
 MISSING_DEVICE_CONFIRMATION_SCANS = 3
 VENDOR_DB_CACHE_DAYS = 7
+TUNNEL_INTERFACE_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec")
+
+
+def is_tunnel_interface(interface):
+    return bool(interface) and interface.lower().startswith(TUNNEL_INTERFACE_PREFIXES)
+
+
+def interface_has_usable_ipv4(interface):
+    """Return whether an interface has a non-loopback, non-link-local IPv4 address."""
+    try:
+        entries = netifaces.ifaddresses(interface).get(netifaces.AF_INET, [])
+    except (ValueError, OSError):
+        return False
+    for entry in entries:
+        try:
+            address = ipaddress.ip_address(entry.get("addr"))
+        except ValueError:
+            continue
+        if not address.is_loopback and not address.is_link_local and not address.is_unspecified:
+            return True
+    return False
+
+
+def get_local_ipv4_gateway(gateways=None):
+    """Return the physical/local IPv4 gateway even when a VPN owns the default route."""
+    gateways = gateways if gateways is not None else netifaces.gateways()
+    default_ipv4 = gateways.get("default", {}).get(netifaces.AF_INET)
+    candidates = []
+    if default_ipv4:
+        candidates.append(default_ipv4)
+    candidates.extend(gateways.get(netifaces.AF_INET, []))
+
+    seen = set()
+    for candidate in candidates:
+        if len(candidate) < 2:
+            continue
+        gateway_ip, interface = candidate[0], candidate[1]
+        identity = (gateway_ip, interface)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if is_tunnel_interface(interface) or not interface_has_usable_ipv4(interface):
+            continue
+        try:
+            if ipaddress.ip_address(gateway_ip).version != 4:
+                continue
+        except ValueError:
+            continue
+        return gateway_ip, interface
+    raise RuntimeError("No usable local IPv4 gateway was found")
+
+
+def get_effective_default_route(gateways=None):
+    """Return the effective default route, including AF_LINK VPN defaults on macOS."""
+    gateways = gateways if gateways is not None else netifaces.gateways()
+    defaults = gateways.get("default", {})
+    default_ipv4 = defaults.get(netifaces.AF_INET)
+    if default_ipv4:
+        return default_ipv4[0], default_ipv4[1]
+
+    default_routes = [route for route in defaults.values() if len(route) >= 2]
+    tunnel_route = next(
+        (route for route in default_routes if is_tunnel_interface(route[1])),
+        None,
+    )
+    if tunnel_route:
+        return tunnel_route[0], tunnel_route[1]
+    if default_routes:
+        return default_routes[0][0], default_routes[0][1]
+    return get_local_ipv4_gateway(gateways)
+
+
+def get_local_ipv4_interface():
+    """Choose a physical interface with usable IPv4 when no gateway entry exists."""
+    candidates = [
+        interface
+        for interface in netifaces.interfaces()
+        if not is_tunnel_interface(interface) and interface_has_usable_ipv4(interface)
+    ]
+    preferred = next((interface for interface in candidates if interface.startswith("en")), None)
+    if preferred:
+        return preferred
+    if candidates:
+        return candidates[0]
+    raise RuntimeError("No usable local IPv4 interface was found")
 
 class LocalMacVendorLookup:
     """Offline fallback that resolves MAC prefixes using Scapy's bundled manuf data."""
@@ -222,11 +309,13 @@ def get_ip_range_for_interface(interface):
         raise RuntimeError(f"Failed to detect IP range for interface '{interface}': {e}") from e
 
 def get_default_interface_and_ip_range():
-    """Automatically detect the default network interface and IPv4 range."""
+    """Detect the local IPv4 interface/range, including beneath a VPN tunnel."""
     try:
         gateways = netifaces.gateways()
-        default_gateway = gateways["default"][netifaces.AF_INET]
-        interface = default_gateway[1]
+        try:
+            _, interface = get_local_ipv4_gateway(gateways)
+        except RuntimeError:
+            interface = get_local_ipv4_interface()
         return interface, get_ip_range_for_interface(interface)
     except Exception as e:
         raise RuntimeError(f"Failed to detect interface or IP range: {e}") from e
@@ -270,13 +359,20 @@ def arp_scan(ip_range, interface):
         arp_request = ARP(pdst=ip_range)
         broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
         packet = broadcast / arp_request
-        answered, _ = srp(packet, iface=interface, timeout=2, verbose=False)
+        answered, _ = srp(
+            packet,
+            iface=interface,
+            timeout=2,
+            verbose=False,
+            promisc=False,
+        )
         devices = [{"ip": received.psrc, "mac": received.hwsrc} for _, received in answered]
         print(f"ARP scan completed. Found {len(devices)} devices.")
         return devices
-    except Exception as e:
-        print(f"Error during ARP scan: {e}", file=sys.stderr)
-        return []
+    except Exception as exc:
+        raise RuntimeError(
+            f"ARP discovery failed on {interface}: {exc}"
+        ) from exc
 
 def column_exists(conn, table_name, column_name):
     """Check whether a column exists in a SQLite table."""
@@ -1074,7 +1170,7 @@ def update_existing_device(conn, mac, ip, vendor, seen_at):
     )
     conn.commit()
 
-def process_scan_results(devices, mac_lookup, known_macs, conn, resolve_hostnames=False):
+def process_scan_results(devices, mac_lookup, known_macs, conn=None, resolve_hostnames=False):
     """Processes scan results, identifies new devices, and updates existing ones.\n\n    Args:\n        devices (list): A list of discovered device dictionaries.\n        mac_lookup (MacLookup): An instance of the MacLookup class.\n        known_macs (set): A set of known MAC addresses from the database.\n        conn (sqlite3.Connection): The database connection object.\n\n    Returns:\n        tuple: A tuple containing table_data, json_output, and a list of new_devices.\n    """
     print_section_heading("Result Processing")
     print("Looking up vendor information...")
@@ -1097,7 +1193,7 @@ def process_scan_results(devices, mac_lookup, known_macs, conn, resolve_hostname
             device_info["first_seen"] = scan_time
             device_info["last_seen"] = scan_time
             new_devices.append(device_info)
-        else:
+        elif conn is not None:
             update_existing_device(conn, mac, ip, vendor, scan_time)
     print("Processing complete.")
     return table_data, json_output, new_devices
@@ -1243,12 +1339,16 @@ def save_and_report_results(
     profiles=None,
     csv_output_file=None,
     markdown_output_file=None,
+    json_output_file="__default__",
 ):
     """Save the ARP snapshot, diff summary, and any newly discovered devices."""
     payload = build_report_payload("devices", json_output, "arp_diff_summary", diff_summary)
     if profiles is not None:
         payload["device_profiles"] = profiles
-    save_json_report(JSON_OUTPUT_FILE, payload, label="Results")
+    if json_output_file == "__default__":
+        json_output_file = JSON_OUTPUT_FILE
+    if json_output_file:
+        save_json_report(json_output_file, payload, label="Results")
     if csv_output_file:
         save_csv_report(
             csv_output_file,
@@ -1262,7 +1362,7 @@ def save_and_report_results(
             build_arp_markdown_report(json_output, diff_summary),
             label="ARP Markdown report",
         )
-    if new_devices:
+    if new_devices and conn is not None:
         save_new_devices(conn, new_devices)
         print(f"Saved {len(new_devices)} new device(s) to the database.")
 
@@ -1619,6 +1719,15 @@ def parse_args():
         help="SQLite database path. Defaults to arp_scan_v1.db in the working directory.",
     )
     parser.add_argument(
+        "--network-profile",
+        choices=NETWORK_PROFILES,
+        default=DEFAULT_NETWORK_PROFILE,
+        help=(
+            "Storage policy: 'home' records device history in SQLite; "
+            "'untrusted' keeps the scan ephemeral. Defaults to untrusted."
+        ),
+    )
+    parser.add_argument(
         "--json-out",
         type=str,
         help="JSON report output path. Defaults to arp_scan_result.json in the working directory.",
@@ -1666,6 +1775,21 @@ def main():
     global DB_FILE, JSON_OUTPUT_FILE, CSV_OUTPUT_FILE, MARKDOWN_OUTPUT_FILE
     exit_code = 0
     args = parse_args()
+    home_only_options = []
+    if args.db_file:
+        home_only_options.append("--db-file")
+    if args.webhook_url:
+        home_only_options.append("--webhook-url")
+    selected_profile = getattr(args, "network_profile", "home")
+    if selected_profile not in NETWORK_PROFILES:
+        selected_profile = "home"
+    if selected_profile != "home" and home_only_options:
+        print(
+            f"Error: {', '.join(home_only_options)} require --network-profile home "
+            "because they use stored home history.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if os.geteuid() != 0:
         print("Error: This script requires root/administrator privileges to send ARP packets.", file=sys.stderr)
         print("Please run with 'sudo'.", file=sys.stderr)
@@ -1689,22 +1813,31 @@ def main():
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
-        db_conn = init_db()
-    scan_run_id = create_scan_run(
-        db_conn,
-        interface,
-        ip_range,
-        resolve_hostnames=args.resolve_hostnames,
-    )
+    persistent = selected_profile == "home"
+    db_conn = None
+    scan_run_id = None
+    if persistent:
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            db_conn = init_db()
+        scan_run_id = create_scan_run(
+            db_conn,
+            interface,
+            ip_range,
+            resolve_hostnames=args.resolve_hostnames,
+        )
     reports_saved = False
     try:
-        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
-            known_macs = load_known_devices(db_conn)
-        previous_devices = load_previous_scan_devices(db_conn, scan_run_id)
-        previous_collected_hostnames = previous_scan_collected_hostnames(
-            db_conn, scan_run_id
-        )
+        if persistent:
+            with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+                known_macs = load_known_devices(db_conn)
+            previous_devices = load_previous_scan_devices(db_conn, scan_run_id)
+            previous_collected_hostnames = previous_scan_collected_hostnames(
+                db_conn, scan_run_id
+            )
+        else:
+            known_macs = set()
+            previous_devices = []
+            previous_collected_hostnames = False
         print(f"Scanning {ip_range}")
         progress = ProgressIndicator("ARP scan", 3, unit="steps")
         progress.update(0, "discovering devices", force=True)
@@ -1718,31 +1851,41 @@ def main():
                     scanned_devices, mac_lookup, known_macs, db_conn, resolve_hostnames=args.resolve_hostnames
                 )
             progress.update(2, "preparing results", force=True)
-            save_scan_run_devices(db_conn, scan_run_id, json_output)
-            profiles = upsert_device_profiles(db_conn, json_output, scan_run_id)
-            diff_summary = build_scan_diff(
-                previous_devices,
-                json_output,
-                known_macs,
-                compare_hostnames=(
-                    args.resolve_hostnames and previous_collected_hostnames
-                ),
-            )
-            diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
-            save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
+            profiles = []
+            diff_summary = None
+            if persistent:
+                save_scan_run_devices(db_conn, scan_run_id, json_output)
+                profiles = upsert_device_profiles(db_conn, json_output, scan_run_id)
+                diff_summary = build_scan_diff(
+                    previous_devices,
+                    json_output,
+                    known_macs,
+                    compare_hostnames=(
+                        args.resolve_hostnames and previous_collected_hostnames
+                    ),
+                )
+                diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
+                save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
             duration_seconds = time.monotonic() - started_at
             progress.finish(f"completed in {duration_seconds:.1f}s")
-            with redirect_stdout(StringIO()):
-                save_and_report_results(
-                    db_conn,
-                    json_output,
-                new_devices,
-                diff_summary,
-                profiles=profiles,
-                    csv_output_file=CSV_OUTPUT_FILE,
-                    markdown_output_file=MARKDOWN_OUTPUT_FILE,
-                )
-            reports_saved = True
+            should_save_reports = persistent or any(
+                [args.json_out, args.csv_out, args.md_out]
+            )
+            if should_save_reports:
+                with redirect_stdout(StringIO()):
+                    save_and_report_results(
+                        db_conn,
+                        json_output,
+                        new_devices if persistent else [],
+                        diff_summary,
+                        profiles=profiles if persistent else None,
+                        csv_output_file=CSV_OUTPUT_FILE,
+                        markdown_output_file=MARKDOWN_OUTPUT_FILE,
+                        json_output_file=(
+                            JSON_OUTPUT_FILE if persistent or args.json_out else None
+                        ),
+                    )
+                reports_saved = True
             if args.alerts_only:
                 print_arp_scan_summary(
                     table_data,
@@ -1761,31 +1904,34 @@ def main():
                     target=ip_range,
                     duration_seconds=duration_seconds,
                 )
-            maybe_send_arp_webhook(
-                args.webhook_url,
-                args.webhook_timeout,
-                interface,
-                ip_range,
-                diff_summary,
-            )
-            finalize_scan_run(
-                db_conn,
-                scan_run_id,
-                status="success",
-                device_count=len(table_data),
-                new_device_count=len(new_devices),
-            )
+            if persistent:
+                maybe_send_arp_webhook(
+                    args.webhook_url,
+                    args.webhook_timeout,
+                    interface,
+                    ip_range,
+                    diff_summary,
+                )
+                finalize_scan_run(
+                    db_conn,
+                    scan_run_id,
+                    status="success",
+                    device_count=len(table_data),
+                    new_device_count=len(new_devices),
+                )
         else:
-            diff_summary = build_scan_diff(
-                previous_devices,
-                [],
-                known_macs,
-                compare_hostnames=(
-                    args.resolve_hostnames and previous_collected_hostnames
-                ),
-            )
-            diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
-            save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
+            diff_summary = None
+            if persistent:
+                diff_summary = build_scan_diff(
+                    previous_devices,
+                    [],
+                    known_macs,
+                    compare_hostnames=(
+                        args.resolve_hostnames and previous_collected_hostnames
+                    ),
+                )
+                diff_summary = confirm_missing_devices(db_conn, scan_run_id, diff_summary)
+                save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_ARP)
             duration_seconds = time.monotonic() - started_at
             progress.finish(f"completed in {duration_seconds:.1f}s")
             if args.alerts_only:
@@ -1806,31 +1952,37 @@ def main():
                     target=ip_range,
                     duration_seconds=duration_seconds,
                 )
-            maybe_send_arp_webhook(
-                args.webhook_url,
-                args.webhook_timeout,
-                interface,
-                ip_range,
-                diff_summary,
-            )
-            finalize_scan_run(db_conn, scan_run_id, status="success")
-    except Exception:
+            if persistent:
+                maybe_send_arp_webhook(
+                    args.webhook_url,
+                    args.webhook_timeout,
+                    interface,
+                    ip_range,
+                    diff_summary,
+                )
+                finalize_scan_run(db_conn, scan_run_id, status="success")
+    except Exception as exc:
         if "progress" in locals() and not progress.finished:
-            progress.fail()
-        finalize_scan_run(db_conn, scan_run_id, status="failed")
-        raise
+            progress.fail("scan failed")
+        if persistent:
+            finalize_scan_run(db_conn, scan_run_id, status="failed")
+        print(f"Error: {exc}", file=sys.stderr)
+        exit_code = 1
     finally:
-        db_conn.close()
+        if db_conn is not None:
+            db_conn.close()
     if args.verbose:
         print_output_files(
             [
-                ("Database", DB_FILE),
+                ("Database", DB_FILE if persistent else None),
                 ("JSON", JSON_OUTPUT_FILE if reports_saved else None),
                 ("CSV", CSV_OUTPUT_FILE if reports_saved else None),
                 ("Markdown", MARKDOWN_OUTPUT_FILE if reports_saved else None),
             ]
         )
-        print(f"Scan run: {scan_run_id}")
+        print(f"Storage: {'home history' if persistent else 'ephemeral'}")
+        if scan_run_id is not None:
+            print(f"Scan run: {scan_run_id}")
     sys.exit(exit_code)
 
 if __name__ == "__main__":

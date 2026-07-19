@@ -153,17 +153,46 @@ Color is semantic and optional. Ordinary IP, MAC, vendor, table, and open-port t
 NO_COLOR=1 ./scan-health --network-profile untrusted
 ```
 
+### Device-history storage policy
+
+`scan-arp` and `scan-ports` default to `--network-profile untrusted`. In this
+mode they print the current result but do not open or modify SQLite, create scan
+runs, update device/IP history, calculate changes against the home baseline, or
+write the default JSON report. Explicit `--json-out`, `--csv-out`, and
+`--md-out` exports are still allowed.
+
+Use the persistent profile only on a network whose devices belong in your
+inventory:
+
+```bash
+./scan-arp --network-profile home
+./scan-ports --network-profile home
+```
+
+The history-dependent options `--db-file`, `--show-changes`, `--profile`,
+`--config`, `--write-baseline`, and scan-alert webhooks require
+`--network-profile home`. This prevents hotel, guest, and public-network
+devices from contaminating the home database. The similarly named
+`scan-health --network-profile` option controls trust interpretation; health
+checks do not add peer devices to the inventory database.
+
 ### 1. ARP Scanner (`scan-arp`)
 
-This tool discovers all devices on your local network, identifies their MAC address and vendor, stores scan history in SQLite, and reports device-level changes between runs.
+This tool discovers all devices on your local network and identifies their MAC
+address and vendor. With `--network-profile home`, it also stores scan history
+in SQLite and reports device-level changes between runs.
 
 Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`.
 
 **To run a scan:**
 
 ```bash
-./scan-arp
+./scan-arp --network-profile home
 ```
+
+The `scan-arp` wrapper already starts the virtual-environment interpreter through `sudo`; an additional outer `sudo` is unnecessary. On macOS, active ARP discovery opens the BPF layer with promiscuous mode disabled because managed Wi-Fi interfaces may reject `BIOCPROMISC`, while ARP request/reply discovery does not require it. If the raw socket cannot be opened, the run is recorded as failed, the progress indicator ends with `scan failed`, no empty snapshot/diff is produced, and the command exits with code `1`.
+
+Full-LAN `scan-ports` discovery uses the same shared ARP implementation and failure contract. A discovery error therefore cannot be reported as a successful `0 devices` port scan or compared against scan history. Target-only `scan-ports -t IP` does not need ARP subnet discovery.
 
 **To force a specific interface or subnet:**
 
@@ -178,7 +207,7 @@ Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`
 **To store the database and JSON report in explicit paths:**
 
 ```bash
-./scan-arp --db-file data/arp_scan.db --json-out data/reports/arp_scan_result.json
+./scan-arp --network-profile home --db-file data/arp_scan.db --json-out data/reports/arp_scan_result.json
 ```
 
 **To also export the ARP snapshot as CSV:**
@@ -202,7 +231,7 @@ Optional reverse-DNS hostname enrichment is available with `--resolve-hostnames`
 **To print only actionable ARP alerts for cron or systemd runs:**
 
 ```bash
-./scan-arp --alerts-only
+./scan-arp --network-profile home --alerts-only
 ```
 
 With `--alerts-only`, the process exits with:
@@ -213,7 +242,7 @@ With `--alerts-only`, the process exits with:
 **To send actionable ARP alerts to a webhook:**
 
 ```bash
-./scan-arp --alerts-only --webhook-url https://example.test/webhook
+./scan-arp --network-profile home --alerts-only --webhook-url https://example.test/webhook
 ```
 
 Webhook delivery is attempted only when actionable ARP changes exist. Use `--webhook-timeout` to override the default 10-second timeout.
@@ -221,7 +250,7 @@ Webhook delivery is attempted only when actionable ARP changes exist. Use `--web
 **Recommended Synology NAS run:**
 
 ```bash
-sudo ./venv/bin/python arp_scanner.py --iface ovs_eth0 --cidr 192.168.2.0/24 --db-file data/arp_scan.db --json-out data/reports/arp_scan_result.json
+sudo ./venv/bin/python arp_scanner.py --network-profile home --iface ovs_eth0 --cidr 192.168.2.0/24 --db-file data/arp_scan.db --json-out data/reports/arp_scan_result.json
 ```
 
 **What gets stored after each ARP run:**
@@ -276,7 +305,7 @@ This tool discovers devices and then scans them for open TCP ports and running s
 **To run a scan with default ports (22, 80, 443, 3000, 5000, 8000, 8080, 8443):**
 
 ```bash
-./scan-ports
+./scan-ports --network-profile home
 ```
 
 **To force a specific interface or subnet during discovery:**
@@ -292,7 +321,7 @@ This tool discovers devices and then scans them for open TCP ports and running s
 **Recommended Synology NAS run:**
 
 ```bash
-sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24 --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
+sudo ./venv/bin/python port_scan.py --network-profile home --iface ovs_eth0 --cidr 192.168.2.0/24 --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
 ```
 
 **To save a machine-readable port scan report:**
@@ -304,7 +333,7 @@ sudo ./venv/bin/python port_scan.py --iface ovs_eth0 --cidr 192.168.2.0/24 --db-
 **To store port-scan history in an explicit SQLite database path:**
 
 ```bash
-./scan-ports --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
+./scan-ports --network-profile home --db-file data/arp_scan.db --json-out data/reports/port_scan_result.json
 ```
 
 **To also export the port snapshot as CSV:**
@@ -336,7 +365,7 @@ target with a previous scan of the same IP and the same port set, add
 `--show-changes`:
 
 ```bash
-./scan-ports -t 192.168.1.101 -p 22,80 --show-changes
+./scan-ports --network-profile home -t 192.168.1.101 -p 22,80 --show-changes
 ```
 
 For an open HTTP/HTTPS port, the scanner performs one bounded, unauthenticated
@@ -348,7 +377,7 @@ To inspect one device using the stored profile (MAC/vendor, hostname, IP
 history, observed services, and confidence evidence):
 
 ```bash
-./scan-ports -t 192.168.1.101 --profile
+./scan-ports --network-profile home -t 192.168.1.101 --profile
 ```
 
 The profile view is observation-only: it does not authenticate to SSH or HTTP.
@@ -356,13 +385,13 @@ The profile view is observation-only: it does not authenticate to SSH or HTTP.
 For a first policy baseline, create a JSON file from a full LAN scan:
 
 ```bash
-./scan-ports --write-baseline data/network_policy.json
+./scan-ports --network-profile home --write-baseline data/network_policy.json
 ```
 
 Review the generated file, then use it on later scans:
 
 ```bash
-./scan-ports --config data/network_policy.json --alerts-only
+./scan-ports --network-profile home --config data/network_policy.json --alerts-only
 ```
 
 The policy file may contain known device names, expected ports, expected SSH
@@ -428,7 +457,7 @@ an expired TLS certificate or a policy violation, remain actionable normally.
 **To send actionable port alerts to a webhook:**
 
 ```bash
-./scan-ports --alerts-only --webhook-url https://example.test/webhook
+./scan-ports --network-profile home --alerts-only --webhook-url https://example.test/webhook
 ```
 
 Webhook delivery is attempted only when actionable port findings exist. Use `--webhook-timeout` to override the default 10-second timeout.
@@ -494,6 +523,8 @@ It currently checks:
 - DNS resolution sanity for public domains plus an aggregated DNS trust interpretation
 - captive portal behavior through common connectivity-check endpoints plus an aggregated captive/interception interpretation
 - HTTPS/TLS sanity through certificate-validated probes plus an aggregated HTTPS trust interpretation
+- a derived access state that distinguishes online, captive-portal sign-in, degraded DNS/HTTPS, and certificate-validation failure
+- a VPN path explanation based on the default route and DNS resolver interface metadata
 - an overall trust explanation that summarizes the current local-segment posture and internet trust path in one short human-readable block
 
 **To run a health check:**
@@ -537,6 +568,8 @@ The compact debug view prioritizes the current connection and suppresses raw bac
 
 The Wi-Fi section now also raises risk signals for:
 
+- an open or legacy-secured current Wi-Fi connection
+- weak/noisy current radio conditions at or below `-75 dBm` RSSI or below `20 dB` SNR
 - open or unencrypted visible networks
 - weak legacy security such as WEP
 - duplicate SSIDs advertised by multiple BSSIDs with mixed security profiles
@@ -546,8 +579,13 @@ On macOS, the report also identifies cases where an active Wi-Fi interface is pr
 
 The gateway exposure check only inspects the current default gateway and only for a short fixed set of ports such as `53`, `80`, `443`, `8080`, and `8443`. It does not do broad host discovery or sweep the local subnet.
 Gateway web/admin surfaces are treated as expected for an explicit `home` profile and sensitive under `untrusted`. The service marker follows that context (`expected`, `sensitive`, or `alert`) instead of labeling every private router page as an alert.
+When captive-portal evidence directly redirects to the gateway address or references it in the returned page, the same web service is labeled as a `captive portal` surface. Without that direct correlation it remains an unknown gateway admin/web surface; the tool does not guess that every gateway page is a portal.
 
 The standard health check now also pings the default gateway briefly. This catches local Wi-Fi or router-link failures where the client is still associated to Wi-Fi but cannot reliably reach the gateway. Intermittent mesh/roaming issues can still be missed by a one-shot run, so use the stability window when the problem comes and goes.
+
+Some managed hotel and enterprise gateways intentionally block ICMP ping. A complete ping failure is therefore reclassified as healthy-but-filtered only when independent evidence proves the gateway path works, such as a reachable gateway TCP service or an online certificate-validated Internet path. Partial packet loss remains an alert because it is measurable degradation rather than simple ICMP filtering.
+
+Passive peer visibility excludes the local IPv4 broadcast address and `ff:ff:ff:ff:ff:ff`; broadcast cache entries are never counted as devices.
 
 DNS diagnostics compare resolver interface metadata with the current default-route interface. A reachable resolver on another interface is reported as a notice rather than a hard alert because VPN and split-DNS configurations can legitimately produce this layout. Direct public upstream DNS and failed name resolution retain stronger alert semantics.
 
@@ -557,25 +595,52 @@ The overall trust explanation includes both alerts and notices from DNS, captive
 
 Use `untrusted` for every network that you do not personally administer, including guest Wi-Fi, hotels, cafes, airports, trains, and temporary accommodation.
 
-Run the full check immediately after connecting:
+Use the following three-stage sequence in a hotel or another managed guest network.
+
+**1. Before signing in to the captive portal**
+
+Confirm the official SSID with the hotel and check the macOS Wi-Fi menu for the expected security mode and BSSID when available. Then run:
+
+```bash
+./scan-health --network-profile untrusted --output focus --debug-wifi
+```
+
+When HTTP connectivity probes consistently identify a sign-in portal, `Access state` reports `captive_portal_sign_in_required`. HTTPS transport failures or unexpected status responses are then presented as pre-login notices because many portals block secure Internet access until sign-in. TLS or certificate-validation failures are never softened and remain alerts.
+
+Complete only the expected hotel sign-in, terms, room-number, surname, or voucher flow. Do not enter unrelated Apple ID, email, banking, or device-management credentials.
+
+**2. After portal sign-in**
+
+Run the complete report again:
 
 ```bash
 ./scan-health --network-profile untrusted --output full --debug-wifi
 ```
 
-If the network opens a sign-in or terms page, complete that process without entering unrelated credentials, then run the same command again. The first result may legitimately report captive-portal behavior; the second result should show a normal Internet and HTTPS path.
+`Access state` should now be `online`, captive probes should look normal, and certificate-validated HTTPS probes should succeed. A portal that remains active, persistent HTTPS transport failure, any TLS validation failure, or public domains resolving only to private addresses requires investigation.
+
+**3. After connecting a trusted VPN**
+
+```bash
+./scan-health --network-profile untrusted --output focus
+```
+
+`VPN path` reports `VPN likely active` when the default route uses a recognized tunnel such as `utun`, `tun`, `tap`, `wg`, `ppp`, or `ipsec`. It separately reports whether DNS resolver metadata uses the same tunnel, another tunnel, or exposes insufficient interface metadata to confirm the DNS path. A different DNS tunnel is a notice for manual verification, not an automatic attack finding.
+
+On macOS, a full VPN can replace the IPv4 default gateway with an `AF_LINK` tunnel route. The health check keeps these contexts separate: the physical interface and local CIDR still come from the underlying Wi-Fi/Ethernet gateway, while `Active path` and `VPN path` use the effective tunnel route. This prevents VPN-enabled runs from failing when no classic default IPv4 gateway entry exists.
 
 Review these parts of the report:
 
-- **Overall trust explanation**: start here for the combined local-network and Internet-path assessment. Treat `suspicious` or `untrusted` as a reason to inspect the detailed findings before using the connection.
+- **Access state**: start here. It distinguishes a network waiting for portal sign-in from normal online access, DNS degradation, HTTPS degradation, and certificate-validation failure.
+- **Overall trust explanation**: use this for the combined local-network and Internet-path assessment. Treat `suspicious` or `untrusted` as a reason to inspect the detailed findings before using the connection.
 - **Wi-Fi environment**: confirm the expected SSID, security mode, signal quality, BSSID, and channel when macOS exposes them. An open network, WEP, or the same SSID advertised with inconsistent security deserves attention. An SSID alone does not prove that an access point is genuine.
-- **Gateway and Active path**: confirm that the default route uses the interface you expect. Unexpected Ethernet, VPN, or tunnel routing can change which network is actually carrying traffic.
+- **Gateway, Active path, and VPN path**: confirm that the default route uses the interface you expect. A gateway page is called a captive portal only when the portal evidence points to it directly. A recognized tunnel route is explained as likely VPN traffic instead of a generic Wi-Fi route mismatch.
 - **Local peer visibility and Client isolation hint**: visible unrelated peers deserve review under `untrusted`. Visibility does not by itself prove an attack, but it means the network is not fully isolating clients.
 - **DNS servers and DNS trust reasoning**: check the listed nameservers, resolver profile, and resolution issues. Gateway DNS is common on untrusted Wi-Fi. Direct public DNS is a reviewable notice rather than a hard alert because it may be an intentional public resolver, VPN, or encrypted-DNS client. `dns_route_mismatch` can be normal with a VPN or split DNS, but the other interface should be one you recognize. Failed lookups or public domains resolving only to private addresses remain alerts and require investigation.
 - **Captive portal reasoning**: under `untrusted`, a detected sign-in portal is a notice rather than a hard alert. Complete only the expected network sign-in, then run the check again. The same interception at home is an alert, and repeated interception after sign-in is not expected.
 - **HTTPS trust reasoning**: certificate-validated HTTPS probes should succeed after portal sign-in. DNS that looks normal does not compensate for TLS or certificate failures.
 
-A reassuring post-login result normally has successful HTTPS probes, normal public-domain resolution, no unexplained route/interface change, and no hard alerts. Transport failures and HTTPS/TLS failures remain alerts even under `untrusted`; only a recognizable HTTP sign-in response is downgraded to a pre-login notice. Other notices can still be expected—for example, a VPN resolver on a tunnel interface or visible peers on a poorly isolated hotspot—but they should have an explanation that matches your setup.
+A reassuring post-login result has `Access state: online`, successful HTTPS probes, normal public-domain resolution, no unexplained route/interface change, and no hard alerts. Before sign-in, only non-TLS HTTPS failures correlated with a clearly detected portal become contextual notices. TLS/certificate failures remain alerts at every stage. Other notices can still be expected—for example, visible peers on a poorly isolated hotspot—but they should have an explanation that matches your setup.
 
 If the report shows unexplained HTTPS failures, public domains resolving to private addresses, an unknown DNS/tunnel interface, or persistent captive interception, avoid sensitive activity on that network. Disconnect or use a trusted cellular connection. If you intentionally use a VPN, connect it and run the check again to confirm that the route and DNS findings changed as expected.
 
@@ -671,6 +736,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`VENDOR_DB_CACHE_DAYS`**: `7` - The number of days before the MAC vendor database is automatically updated.
 -   **`arp_scanner.py --csv-out`**: Optional CSV snapshot export path.
 -   **`arp_scanner.py --md-out`**: Optional Markdown snapshot and diff export path.
+-   **`arp_scanner.py --network-profile`**: `untrusted` (default) keeps the scan ephemeral; `home` enables SQLite history, changes, and inventory updates.
 -   **`arp_scanner.py --alerts-only`**: Alert-only console output with exit code `2` when actionable device-level changes are detected.
 -   **`arp_scanner.py --webhook-url`**: Optional webhook URL for actionable ARP alerts.
 -   **`arp_scanner.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
@@ -685,6 +751,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`port_scan.py --db-file`**: Optional SQLite database path for shared scan history.
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --md-out`**: Optional Markdown snapshot and diff export path.
+-   **`port_scan.py --network-profile`**: `untrusted` (default) keeps the scan ephemeral; `home` enables SQLite history, device profiles, policy baselines, and historical changes.
 -   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
 -   **`port_scan.py --webhook-url`**: Optional webhook URL for actionable port alerts.
 -   **`port_scan.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.

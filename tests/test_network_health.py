@@ -530,6 +530,7 @@ fe80::44 dev eth0 FAILED
         arp_output = (
             "? (192.168.2.1) at 40:3f:8c:c6:39:37 on en0 ifscope [ethernet]\n"
             "? (192.168.2.22) at aa:bb:cc:dd:ee:ff on en0 ifscope [ethernet]\n"
+            "? (192.168.2.255) at ff:ff:ff:ff:ff:ff on en0 ifscope [ethernet]\n"
             "? (169.254.1.2) at aa:bb:cc:dd:ee:01 on en0 ifscope [ethernet]\n"
             "? (10.0.0.8) at 11:22:33:44:55:66 on en1 ifscope [ethernet]\n"
         )
@@ -936,12 +937,16 @@ nameserver 1.1.1.1
                 return_value=("192.168.2.254", "en6"),
             ):
                 with mock.patch(
-                    "network_health.get_interface_networks",
-                    return_value=networks,
+                    "network_health.get_effective_default_route",
+                    return_value=("192.168.2.254", "en6"),
                 ):
-                    observation = (
-                        network_health.collect_dns_environment_observation()
-                    )
+                    with mock.patch(
+                        "network_health.get_interface_networks",
+                        return_value=networks,
+                    ):
+                        observation = (
+                            network_health.collect_dns_environment_observation()
+                        )
 
         self.assertEqual(observation["configuration"], configuration)
         self.assertEqual(observation["gateway_ip"], "192.168.2.254")
@@ -1075,13 +1080,17 @@ nameserver 1.1.1.1
         ):
             with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en0")):
                 with mock.patch(
-                    "network_health.get_interface_networks",
-                    return_value=[
-                        ipaddress.ip_network("192.168.2.0/24"),
-                        ipaddress.ip_network("2a02:a469:abc1:0::/64"),
-                    ],
+                    "network_health.get_effective_default_route",
+                    return_value=("192.168.2.254", "en0"),
                 ):
-                    result = network_health.build_dns_environment_check()
+                    with mock.patch(
+                        "network_health.get_interface_networks",
+                        return_value=[
+                            ipaddress.ip_network("192.168.2.0/24"),
+                            ipaddress.ip_network("2a02:a469:abc1:0::/64"),
+                        ],
+                    ):
+                        result = network_health.build_dns_environment_check()
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("Detected 2 DNS server", result["summary"])
@@ -1239,6 +1248,58 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(result["status"], "notice")
         self.assertEqual(result["details"]["level"], "slow")
 
+    def test_gateway_ping_block_is_ok_when_online_path_proves_reachability(self):
+        ping_alert = network_health.analyze_gateway_reachability(
+            {
+                "gateway_ip": "192.168.231.1",
+                "interface": "en0",
+                "ping": {
+                    "transmitted": 3,
+                    "received": 0,
+                    "loss_percent": 100.0,
+                },
+            }
+        )
+        result = network_health.contextualize_gateway_reachability(
+            ping_alert,
+            {
+                "details": {
+                    "reachable_services": [
+                        {"port": 53, "label": "DNS", "risk": False}
+                    ]
+                }
+            },
+            {"details": {"state": "online"}},
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["details"]["level"],
+            "reachable_indirectly_icmp_filtered",
+        )
+        self.assertTrue(result["details"]["icmp_filtered_likely"])
+
+    def test_gateway_partial_ping_loss_remains_alert_when_internet_is_online(self):
+        ping_alert = network_health.analyze_gateway_reachability(
+            {
+                "gateway_ip": "192.168.231.1",
+                "interface": "en0",
+                "ping": {
+                    "transmitted": 3,
+                    "received": 2,
+                    "loss_percent": 33.0,
+                },
+            }
+        )
+        result = network_health.contextualize_gateway_reachability(
+            ping_alert,
+            {"details": {"reachable_services": []}},
+            {"details": {"state": "online"}},
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["level"], "lossy")
+
     def test_build_gateway_reachability_check_marks_gateway_reachable_as_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch(
@@ -1373,7 +1434,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(interface_name, "en1")
 
     def test_build_active_path_check_alerts_on_dual_connected_macos_mismatch(self):
-        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en0")):
+        with mock.patch("network_health.get_effective_default_route", return_value=("192.168.2.254", "en0")):
             with mock.patch("network_health.is_macos", return_value=True):
                 result = network_health.build_active_path_check(
                     {
@@ -1412,7 +1473,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
             },
         }
         with mock.patch(
-            "network_health.get_default_gateway",
+            "network_health.get_effective_default_route",
             return_value=("192.168.2.254", "en6"),
         ):
             with mock.patch("network_health.is_macos", return_value=True):
@@ -1461,7 +1522,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         )
 
     def test_build_active_path_check_uses_system_profiler_connected_status(self):
-        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
+        with mock.patch("network_health.get_effective_default_route", return_value=("192.168.2.254", "en6")):
             with mock.patch("network_health.is_macos", return_value=True):
                 result = network_health.build_active_path_check(
                     {
@@ -1475,7 +1536,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertTrue(result["details"]["possible_dual_connectivity"])
 
     def test_build_active_path_check_treats_system_profiler_fallback_as_low_confidence(self):
-        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en6")):
+        with mock.patch("network_health.get_effective_default_route", return_value=("192.168.2.254", "en6")):
             with mock.patch("network_health.is_macos", return_value=True):
                 result = network_health.build_active_path_check({
                     "inventory": {"interfaces": [{"name": "en0", "status": "spairport_status_connected"}]},
@@ -1489,7 +1550,7 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
         self.assertEqual(result["details"]["confidence"], "low")
 
     def test_build_active_path_check_marks_active_wifi_route_ok_when_aligned(self):
-        with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.254", "en1")):
+        with mock.patch("network_health.get_effective_default_route", return_value=("192.168.2.254", "en1")):
             with mock.patch("network_health.is_macos", return_value=True):
                 result = network_health.build_active_path_check(
                     {
@@ -1509,6 +1570,44 @@ round-trip min/avg/max/stddev = 4.123/6.789/9.456/1.111 ms
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("Default route uses active Wi-Fi interface en1", result["summary"])
+
+    def test_analyze_active_path_recognizes_vpn_tunnel_over_wifi(self):
+        result = network_health.analyze_active_path(
+            {
+                "platform": "macos",
+                "gateway_ip": "10.8.0.1",
+                "default_interface": "utun4",
+                "active_wifi_interface": "en0",
+                "current_details_available": True,
+                "current_details_source": "wdutil",
+            }
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(result["details"]["vpn_likely_active"])
+        self.assertEqual(result["details"]["tunnel_interface"], "utun4")
+        self.assertIn("VPN is likely active", result["summary"])
+
+    def test_build_vpn_path_check_confirms_route_and_dns_tunnel(self):
+        result = network_health.build_vpn_path_check(
+            {
+                "name": "active_path",
+                "status": "ok",
+                "details": {
+                    "default_interface": "utun4",
+                    "wifi_interface": "en0",
+                },
+            },
+            {
+                "name": "dns_environment",
+                "status": "ok",
+                "details": {"resolvers": [{"if_index": "19 (utun4)"}]},
+            },
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["details"]["dns_path"], "through_tunnel")
+        self.assertEqual(result["details"]["underlying_interface"], "en0")
 
     def test_maybe_send_health_webhook_skips_when_no_alerts(self):
         sent = network_health_check.maybe_send_health_webhook(
@@ -1836,6 +1935,47 @@ Wi-Fi:
             result["details"]["analysis"]["risks"][0]["type"],
             "open_network",
         )
+
+    def test_current_open_weak_wifi_is_notice_even_when_nearby_scan_is_restricted(self):
+        result = network_health.analyze_wifi_environment(
+            {
+                "inventory": {"interfaces": [{"name": "en0"}]},
+                "current": {
+                    "available": True,
+                    "interfaces": {
+                        "en0": {
+                            "ssid": "<redacted>",
+                            "security": "None",
+                            "rssi": "-76 dBm",
+                            "noise": "-91 dBm",
+                            "channel": "1 (2GHz, 20MHz)",
+                        }
+                    },
+                },
+                "nearby": {
+                    "available": True,
+                    "networks": [
+                        {
+                            "ssid": "<hidden>",
+                            "bssid": None,
+                            "security": None,
+                            "rssi": "-80",
+                        }
+                    ],
+                },
+            },
+            platform_name="Darwin",
+        )
+
+        risk_types = {
+            risk["type"] for risk in result["details"]["analysis"]["risks"]
+        }
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(
+            risk_types,
+            {"current_open_network", "current_weak_signal"},
+        )
+        self.assertTrue(result["details"]["analysis"]["limited_scan"])
 
     def test_analyze_wifi_environment_handles_unsupported_platform_snapshot(self):
         result = network_health.analyze_wifi_environment(
@@ -2182,6 +2322,119 @@ Wi-Fi:
         self.assertEqual(result["status"], "alert")
         self.assertEqual(result["details"]["hint_level"], "partial_http_interception")
 
+    def test_captive_portal_context_downgrades_transport_but_not_tls_failure(self):
+        captive = {
+            "name": "captive_trust_reasoning",
+            "status": "notice",
+            "details": {"hint_level": "likely_captive_portal"},
+        }
+        results = network_health.contextualize_https_checks_for_captive_portal(
+            [
+                {
+                    "name": "https_transport",
+                    "status": "alert",
+                    "summary": "failed",
+                    "details": {"url": "https://example.com", "finding_kind": "transport_failure"},
+                },
+                {
+                    "name": "https_tls",
+                    "status": "alert",
+                    "summary": "TLS verification failed",
+                    "details": {"url": "https://secure.test", "finding_kind": "tls_failure"},
+                },
+            ],
+            captive,
+            network_profile="untrusted",
+        )
+
+        self.assertEqual(results[0]["status"], "notice")
+        self.assertTrue(results[0]["details"]["pre_login_context"])
+        self.assertEqual(results[1]["status"], "alert")
+
+    def test_captive_transport_failure_does_not_soften_https_failure(self):
+        captive = {
+            "name": "captive_trust_reasoning",
+            "status": "alert",
+            "details": {"hint_level": "likely_captive_portal"},
+        }
+        original = [{
+            "name": "https_transport",
+            "status": "alert",
+            "summary": "failed",
+            "details": {"url": "https://example.com", "finding_kind": "transport_failure"},
+        }]
+
+        self.assertEqual(
+            network_health.contextualize_https_checks_for_captive_portal(
+                original,
+                captive,
+                network_profile="untrusted",
+            ),
+            original,
+        )
+
+    def test_build_access_state_marks_untrusted_portal_as_sign_in_required(self):
+        result = network_health.build_access_state_check(
+            {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
+            {"name": "captive_trust_reasoning", "status": "notice", "details": {"hint_level": "likely_captive_portal"}},
+            {"name": "https_trust_reasoning", "status": "notice", "details": {"hint_level": "https_pending_captive_sign_in"}},
+            network_profile="untrusted",
+        )
+
+        self.assertEqual(result["status"], "notice")
+        self.assertEqual(result["details"]["state"], "captive_portal_sign_in_required")
+        self.assertIn("rerun", result["details"]["recommended_action"])
+
+    def test_build_access_state_never_softens_certificate_failure(self):
+        result = network_health.build_access_state_check(
+            {"name": "dns_trust_reasoning", "status": "ok", "details": {"hint_level": "gateway_dns_expected"}},
+            {"name": "captive_trust_reasoning", "status": "notice", "details": {"hint_level": "likely_captive_portal"}},
+            {"name": "https_trust_reasoning", "status": "alert", "details": {"hint_level": "certificate_validation_failure"}},
+            network_profile="untrusted",
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["state"], "tls_validation_failure")
+
+    def test_build_access_state_keeps_dns_failure_alert_during_portal(self):
+        result = network_health.build_access_state_check(
+            {"name": "dns_trust_reasoning", "status": "alert", "details": {"hint_level": "resolution_failure"}},
+            {"name": "captive_trust_reasoning", "status": "notice", "details": {"hint_level": "likely_captive_portal"}},
+            {"name": "https_trust_reasoning", "status": "notice", "details": {"hint_level": "https_pending_captive_sign_in"}},
+            network_profile="untrusted",
+        )
+
+        self.assertEqual(result["status"], "alert")
+        self.assertEqual(result["details"]["state"], "dns_access_degraded")
+
+    def test_gateway_surface_is_relabeled_only_when_portal_points_to_gateway(self):
+        gateway = {
+            "name": "gateway_exposure",
+            "status": "notice",
+            "summary": "admin surface",
+            "details": {
+                "gateway_ip": "10.0.0.1",
+                "reachable_services": [{"port": 80, "label": "HTTP admin/web", "risk": True}],
+                "risky_services": [{"port": 80, "label": "HTTP admin/web", "risk": True}],
+            },
+        }
+        access = {"details": {"state": "captive_portal_sign_in_required"}}
+        result = network_health.correlate_gateway_exposure_with_captive_portal(
+            gateway,
+            [{"details": {"location": "http://10.0.0.1/login", "body_preview": ""}}],
+            access,
+        )
+
+        self.assertEqual(result["details"]["exposure_assessment"], "captive_portal_surface")
+        self.assertEqual(result["details"]["reachable_services"][0]["label"], "HTTP captive portal")
+
+        unrelated = network_health.correlate_gateway_exposure_with_captive_portal(
+            gateway,
+            [{"details": {"location": "https://login.hotel.example/", "body_preview": ""}}],
+            access,
+        )
+        self.assertEqual(unrelated, gateway)
+
     def test_run_https_tls_checks_flags_ssl_failures(self):
         with mock.patch("network_health.probe_https_endpoint", side_effect=ssl.SSLError("verify failed")):
             results = network_health.run_https_tls_checks(
@@ -2472,6 +2725,7 @@ Wi-Fi:
                                     )
 
         self.assertEqual(sorted(checks.keys()), [
+            "access_state",
             "captive_checks",
             "captive_trust_reasoning",
             "dns_environment",
@@ -2575,11 +2829,13 @@ Wi-Fi:
                 "dns_trust_reasoning",
                 "wifi_environment",
                 "active_path",
+                "vpn_path",
                 "dns_example.com",
                 "captive_gstatic",
                 "captive_trust_reasoning",
                 "https_example",
                 "https_trust_reasoning",
+                "access_state",
                 "overall_trust_explanation",
                 "wifi_stability",
             ],
@@ -2874,6 +3130,28 @@ Wi-Fi:
         self.assertEqual(assessment["level"], "suspicious")
         self.assertIn("untrusted network", assessment["summary"])
         self.assertIn("Primary reasons: Gateway exposure, Local peer visibility", assessment["summary"])
+
+    def test_build_trust_assessment_marks_current_open_untrusted_wifi_suspicious(self):
+        assessment = network_health_check.build_trust_assessment(
+            {
+                "alert_checks": 0,
+                "notice_checks": 1,
+                "notices": [
+                    {
+                        "name": "wifi_environment",
+                        "details": {
+                            "analysis": {
+                                "risks": [{"type": "current_open_network"}]
+                            }
+                        },
+                    }
+                ],
+            },
+            scan_context={"network_profile": "untrusted"},
+        )
+
+        self.assertEqual(assessment["level"], "suspicious")
+        self.assertIn("Wi-Fi connection is open", assessment["summary"])
 
     def test_format_notice_reason_labels_returns_human_readable_summary(self):
         labels = network_health_check.format_notice_reason_labels(
@@ -3493,6 +3771,70 @@ Wi-Fi:
         self.assertIn("Active path", output)
         self.assertIn("default interface: en0", output)
         self.assertIn("active Wi-Fi interface: en1", output)
+
+    def test_print_health_report_renders_access_and_vpn_path(self):
+        checks = [
+            {
+                "name": "access_state",
+                "status": "notice",
+                "summary": "Captive portal sign-in is required",
+                "details": {
+                    "state": "captive_portal_sign_in_required",
+                    "recommended_action": "Sign in and rerun",
+                    "dns_path": "gateway_dns_expected",
+                    "captive_path": "likely_captive_portal",
+                    "https_path": "https_pending_captive_sign_in",
+                },
+            },
+            {
+                "name": "vpn_path",
+                "status": "ok",
+                "summary": "VPN likely active on utun4",
+                "details": {
+                    "vpn_likely_active": True,
+                    "tunnel_interface": "utun4",
+                    "underlying_interface": "en0",
+                    "dns_path": "through_tunnel",
+                    "resolver_interfaces": ["utun4"],
+                },
+            },
+        ]
+        buffer = StringIO()
+        with redirect_stdout(buffer):
+            network_health_check.print_health_report(
+                checks,
+                network_health.build_health_summary(checks),
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Access state", output)
+        self.assertIn("state: captive_portal_sign_in_required", output)
+        self.assertIn("VPN path", output)
+        self.assertIn("tunnel interface: utun4", output)
+
+    def test_focus_output_keeps_confirmed_vpn_path(self):
+        checks = [
+            {
+                "name": "access_state",
+                "status": "ok",
+                "summary": "online",
+                "details": {"state": "online"},
+            },
+            {
+                "name": "vpn_path",
+                "status": "ok",
+                "summary": "VPN likely active",
+                "details": {
+                    "vpn_likely_active": True,
+                    "tunnel_interface": "utun4",
+                },
+            },
+        ]
+
+        selected, hidden = network_health_check.select_focus_checks(checks)
+
+        self.assertEqual([check["name"] for check in selected], ["access_state", "vpn_path"])
+        self.assertEqual(hidden, 0)
 
     def test_build_wifi_debug_summary_detects_likely_os_restriction(self):
         checks = [

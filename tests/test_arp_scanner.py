@@ -4,13 +4,164 @@ import tempfile
 import unittest
 from unittest import mock
 import json
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 
 import arp_scanner
 
 
 class ArpScannerTests(unittest.TestCase):
+    def test_parser_defaults_to_ephemeral_untrusted_profile(self):
+        with mock.patch("sys.argv", ["arp_scanner.py"]):
+            args = arp_scanner.parse_args()
+
+        self.assertEqual(args.network_profile, "untrusted")
+
+    def test_process_scan_results_can_run_without_database(self):
+        lookup = mock.Mock()
+        with mock.patch("arp_scanner.get_vendor", return_value="Example Vendor"):
+            table, payload, new_devices = arp_scanner.process_scan_results(
+                [{"ip": "192.168.231.7", "mac": "aa:bb:cc:dd:ee:ff"}],
+                lookup,
+                set(),
+                conn=None,
+            )
+
+        self.assertEqual(table[0][0], "192.168.231.7")
+        self.assertEqual(payload[0]["vendor"], "Example Vendor")
+        self.assertEqual(len(new_devices), 1)
+
+    def test_untrusted_main_does_not_open_database(self):
+        args = mock.Mock(
+            network_profile="untrusted",
+            db_file=None,
+            json_out=None,
+            csv_out=None,
+            md_out=None,
+            verbose=False,
+            iface="en0",
+            cidr=None,
+            resolve_hostnames=False,
+            alerts_only=False,
+            webhook_url=None,
+            webhook_timeout=10,
+        )
+        with mock.patch("arp_scanner.os.geteuid", return_value=0), \
+             mock.patch("arp_scanner.parse_args", return_value=args), \
+             mock.patch("arp_scanner.update_vendor_database", return_value=mock.Mock()), \
+             mock.patch("arp_scanner.resolve_scan_target", return_value=("en0", "192.168.231.0/24")), \
+             mock.patch("arp_scanner.arp_scan", return_value=[]), \
+             mock.patch("arp_scanner.init_db") as init_db, \
+             redirect_stdout(StringIO()):
+            with self.assertRaises(SystemExit) as exit_context:
+                arp_scanner.main()
+
+        self.assertEqual(exit_context.exception.code, 0)
+        init_db.assert_not_called()
+
+    def test_arp_scan_disables_promiscuous_mode(self):
+        received = mock.Mock(psrc="192.168.2.10", hwsrc="aa:bb:cc:dd:ee:ff")
+        with mock.patch(
+            "arp_scanner.srp",
+            return_value=([(mock.Mock(), received)], []),
+        ) as srp:
+            devices = arp_scanner.arp_scan("192.168.2.0/24", "en0")
+
+        self.assertEqual(
+            devices,
+            [{"ip": "192.168.2.10", "mac": "aa:bb:cc:dd:ee:ff"}],
+        )
+        self.assertFalse(srp.call_args.kwargs["promisc"])
+
+    def test_arp_scan_propagates_discovery_failure(self):
+        with mock.patch(
+            "arp_scanner.srp",
+            side_effect=OSError("Cannot open BPF device"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "ARP discovery failed on en0",
+            ):
+                arp_scanner.arp_scan("192.168.2.0/24", "en0")
+
+    def test_main_records_failed_arp_discovery_without_empty_success_report(self):
+        args = mock.Mock(
+            db_file=None,
+            json_out=None,
+            csv_out=None,
+            md_out=None,
+            verbose=False,
+            iface="en0",
+            cidr=None,
+            resolve_hostnames=False,
+        )
+        db_conn = mock.Mock()
+        stdout = StringIO()
+        stderr = StringIO()
+        with mock.patch("arp_scanner.os.geteuid", return_value=0), \
+             mock.patch("arp_scanner.parse_args", return_value=args), \
+             mock.patch("arp_scanner.update_vendor_database", return_value=mock.Mock()), \
+             mock.patch("arp_scanner.resolve_scan_target", return_value=("en0", "192.168.2.0/24")), \
+             mock.patch("arp_scanner.init_db", return_value=db_conn), \
+             mock.patch("arp_scanner.create_scan_run", return_value=42), \
+             mock.patch("arp_scanner.load_known_devices", return_value={}), \
+             mock.patch("arp_scanner.load_previous_scan_devices", return_value=[]), \
+             mock.patch("arp_scanner.previous_scan_collected_hostnames", return_value=False), \
+             mock.patch("arp_scanner.arp_scan", side_effect=RuntimeError("BPF unavailable")), \
+             mock.patch("arp_scanner.finalize_scan_run") as finalize, \
+             redirect_stdout(stdout), redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as exit_context:
+                arp_scanner.main()
+
+        self.assertEqual(exit_context.exception.code, 1)
+        finalize.assert_called_once_with(db_conn, 42, status="failed")
+        db_conn.close.assert_called_once()
+        self.assertIn("scan failed", stderr.getvalue())
+        self.assertIn("BPF unavailable", stderr.getvalue())
+        self.assertNotIn("Scan Summary", stdout.getvalue())
+        self.assertNotIn("No devices found", stdout.getvalue())
+
+    def test_vpn_default_route_keeps_local_ipv4_gateway_and_interface(self):
+        gateways = {
+            "default": {
+                arp_scanner.netifaces.AF_LINK: ("link#21", "utun4"),
+            },
+            arp_scanner.netifaces.AF_LINK: [("link#21", "utun4", True)],
+            arp_scanner.netifaces.AF_INET: [("192.168.231.1", "en0", False)],
+        }
+
+        def addresses(interface):
+            if interface == "en0":
+                return {
+                    arp_scanner.netifaces.AF_INET: [{
+                        "addr": "192.168.231.251",
+                        "netmask": "255.255.255.0",
+                    }]
+                }
+            if interface == "utun4":
+                return {
+                    arp_scanner.netifaces.AF_INET: [{
+                        "addr": "172.19.0.1",
+                        "netmask": "255.255.255.252",
+                    }]
+                }
+            return {}
+
+        with mock.patch("arp_scanner.netifaces.gateways", return_value=gateways), \
+             mock.patch("arp_scanner.netifaces.ifaddresses", side_effect=addresses):
+            self.assertEqual(
+                arp_scanner.get_local_ipv4_gateway(),
+                ("192.168.231.1", "en0"),
+            )
+            self.assertEqual(
+                arp_scanner.get_effective_default_route(),
+                ("link#21", "utun4"),
+            )
+            self.assertEqual(
+                arp_scanner.get_default_interface_and_ip_range(),
+                ("en0", "192.168.231.0/24"),
+            )
+
     def test_parse_args_supports_webhook_flags(self):
         with mock.patch(
             "sys.argv",

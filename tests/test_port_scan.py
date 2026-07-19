@@ -16,6 +16,61 @@ import service_detection
 
 
 class PortScanTests(unittest.TestCase):
+    def test_parser_defaults_to_ephemeral_untrusted_profile(self):
+        args = port_scan.build_parser().parse_args([])
+
+        self.assertEqual(args.network_profile, "untrusted")
+
+    def test_parser_accepts_home_storage_profile(self):
+        args = port_scan.build_parser().parse_args(
+            ["--network-profile", "home"]
+        )
+
+        self.assertEqual(args.network_profile, "home")
+
+    def test_untrusted_main_does_not_open_database(self):
+        args = port_scan.build_parser().parse_args([])
+        context = {"interface": "en0", "cidr": "192.168.231.0/24"}
+        with mock.patch("port_scan.os.geteuid", return_value=0), \
+             mock.patch("port_scan.parse_args", return_value=args), \
+             mock.patch("port_scan.update_vendor_database", return_value=mock.Mock()), \
+             mock.patch("port_scan.discover_devices_to_scan", return_value=([], context)), \
+             mock.patch("port_scan.init_db") as init_db, \
+             redirect_stdout(StringIO()):
+            with self.assertRaises(SystemExit) as exit_context:
+                port_scan.main()
+
+        self.assertEqual(exit_context.exception.code, 0)
+        init_db.assert_not_called()
+
+    def test_arp_discovery_uses_shared_non_promiscuous_implementation(self):
+        devices = [{"ip": "192.168.2.10", "mac": "aa:bb:cc:dd:ee:ff"}]
+        with mock.patch(
+            "port_scan.arp_scanner.arp_scan",
+            return_value=devices,
+        ) as shared_scan:
+            result = port_scan.arp_scan("192.168.2.0/24", "en0")
+
+        self.assertEqual(result, devices)
+        shared_scan.assert_called_once_with("192.168.2.0/24", "en0")
+
+    def test_discover_devices_propagates_arp_failure_instead_of_empty_success(self):
+        args = SimpleNamespace(
+            target=None,
+            iface="en0",
+            cidr=None,
+            resolve_hostnames=False,
+        )
+        with mock.patch(
+            "port_scan.resolve_scan_target",
+            return_value=("en0", "192.168.2.0/24"),
+        ), mock.patch(
+            "port_scan.arp_scan",
+            side_effect=RuntimeError("ARP discovery failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "ARP discovery failed"):
+                port_scan.discover_devices_to_scan(args, mac_lookup=None)
+
     def test_scapy_progress_noise_filter_hides_only_missing_mac_warning(self):
         noise_filter = port_scan.ScapyProgressNoiseFilter()
         missing_mac_record = logging.LogRecord(

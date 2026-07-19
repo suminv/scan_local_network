@@ -20,12 +20,13 @@ from policy_config import (
     save_policy_config,
 )
 from reporting import print_output_files, print_section_heading, should_use_color
-from scapy.layers.l2 import ARP, Ether
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
-from scapy.sendrecv import sr1, srp
+from scapy.sendrecv import sr1
 
 from arp_scanner import (
+    DEFAULT_NETWORK_PROFILE,
+    NETWORK_PROFILES,
     create_scan_run,
     finalize_scan_run,
     build_port_scan_diff,
@@ -108,16 +109,8 @@ def suppress_scapy_progress_noise():
 
 
 def arp_scan(ip_range, interface):
-    """Performs an ARP scan to discover devices on the network."""
-    try:
-        arp_request = ARP(pdst=ip_range)
-        broadcast = Ether(dst="ff:ff:ff:ff:ff:ff")
-        packet = broadcast / arp_request
-        answered, _ = srp(packet, timeout=2, verbose=False, iface=interface)
-        return [{"ip": rcv.psrc, "mac": rcv.hwsrc} for _, rcv in answered]
-    except Exception as e:
-        print(f"{Fore.RED}Error during ARP scan: {e}{Style.RESET_ALL}", file=sys.stderr)
-        return []
+    """Use the shared ARP discovery implementation and failure semantics."""
+    return arp_scanner.arp_scan(ip_range, interface)
 
 def scan_single_port(ip, port):
     """Scans a single port on a given IP using a SYN scan.
@@ -373,6 +366,15 @@ def build_parser():
         help="SQLite database path. Defaults to arp_scan_v1.db in the working directory.",
     )
     parser.add_argument(
+        "--network-profile",
+        choices=NETWORK_PROFILES,
+        default=DEFAULT_NETWORK_PROFILE,
+        help=(
+            "Storage policy: 'home' records scan history and device profiles; "
+            "'untrusted' keeps the scan ephemeral. Defaults to untrusted."
+        ),
+    )
+    parser.add_argument(
         "--csv-out",
         type=str,
         help="CSV report output path. Disabled unless explicitly set.",
@@ -468,7 +470,9 @@ def render_port_scan_outcome(
     duration_seconds=None,
 ):
     """Render scan output and return the appropriate process exit code."""
-    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    show_changes = diff_summary is not None and (
+        not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    )
     visible_diff = diff_summary if show_changes else None
     if args.alerts_only:
         print_port_scan_summary(
@@ -513,7 +517,9 @@ def render_empty_scan_outcome(
     args, diff_summary, policy_findings=None, *, target=None
 ):
     """Render the empty-discovery case and return the appropriate process exit code."""
-    show_changes = not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    show_changes = diff_summary is not None and (
+        not getattr(args, "target", None) or getattr(args, "show_changes", False)
+    )
     visible_diff = diff_summary if show_changes else None
     if args.alerts_only:
         print_port_scan_summary(
@@ -647,6 +653,30 @@ def main():
     if getattr(args, "check_config", False):
         print("Policy config is valid.")
         sys.exit(0)
+    selected_profile = getattr(args, "network_profile", "home")
+    if selected_profile not in NETWORK_PROFILES:
+        selected_profile = "home"
+    persistent = selected_profile == "home"
+    home_only_options = []
+    if args.db_file:
+        home_only_options.append("--db-file")
+    if args.config:
+        home_only_options.append("--config")
+    if args.write_baseline:
+        home_only_options.append("--write-baseline")
+    if args.profile:
+        home_only_options.append("--profile")
+    if args.webhook_url:
+        home_only_options.append("--webhook-url")
+    if args.show_changes:
+        home_only_options.append("--show-changes")
+    if not persistent and home_only_options:
+        print(
+            f"{Fore.RED}Error: {', '.join(home_only_options)} require "
+            f"--network-profile home because they use stored home history.{Style.RESET_ALL}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if args.target and (args.iface or args.cidr):
         print(
             f"{Fore.RED}Error: --target cannot be combined with --iface or --cidr.{Style.RESET_ALL}",
@@ -684,8 +714,10 @@ def main():
     quiet_output = nullcontext() if args.verbose else redirect_stdout(StringIO())
     with quiet_output:
         mac_lookup = update_vendor_database()
-    with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
-        db_conn = init_db()
+    db_conn = None
+    if persistent:
+        with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
+            db_conn = init_db()
     try:
         try:
             with (nullcontext() if args.verbose else redirect_stdout(StringIO())):
@@ -694,27 +726,37 @@ def main():
             print(f"{Fore.RED}Error: {e}{Style.RESET_ALL}", file=sys.stderr)
             sys.exit(1)
 
-        scan_run_id = create_scan_run(
-            db_conn,
-            scan_context["interface"],
-            scan_context["cidr"],
-            scan_type=SCAN_TYPE_PORT,
-            target=args.target,
-            ports=ports_to_scan,
-            resolve_hostnames=args.resolve_hostnames,
-        )
-        previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
+        scan_run_id = None
+        previous_ports = []
+        if persistent:
+            scan_run_id = create_scan_run(
+                db_conn,
+                scan_context["interface"],
+                scan_context["cidr"],
+                scan_type=SCAN_TYPE_PORT,
+                target=args.target,
+                ports=ports_to_scan,
+                resolve_hostnames=args.resolve_hostnames,
+            )
+            previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
-            diff_summary = build_port_scan_diff(previous_ports, [], observed_macs=[])
+            diff_summary = (
+                build_port_scan_diff(previous_ports, [], observed_macs=[])
+                if persistent
+                else None
+            )
             exit_code = render_empty_scan_outcome(
                 args,
                 diff_summary,
                 target=args.target or scan_context["cidr"],
             )
-            finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
+            if persistent:
+                finalize_scan_run(db_conn, scan_run_id, status="success", device_count=0)
             if args.verbose:
-                print_output_files([("Database", arp_scanner.DB_FILE)])
-                print(f"Scan run: {scan_run_id}")
+                print_output_files([("Database", arp_scanner.DB_FILE if persistent else None)])
+                print(f"Storage: {'home history' if persistent else 'ephemeral'}")
+                if scan_run_id is not None:
+                    print(f"Scan run: {scan_run_id}")
             sys.exit(exit_code)
 
         target_label = args.target or scan_context["cidr"]
@@ -745,20 +787,24 @@ def main():
             raise
         elapsed = time.monotonic() - started_at
         progress.finish(f"completed in {elapsed:.1f}s")
-        save_scan_run_ports(db_conn, scan_run_id, results)
-        profiles = upsert_device_profiles(db_conn, results, scan_run_id)
+        profiles = []
+        if persistent:
+            save_scan_run_ports(db_conn, scan_run_id, results)
+            profiles = upsert_device_profiles(db_conn, results, scan_run_id)
         policy_findings = (
             evaluate_device_policies(results, policy_config) if args.config else []
         )
         if args.write_baseline:
             save_policy_config(args.write_baseline, build_baseline_config(results))
             print(f"Baseline saved to {args.write_baseline}")
-        diff_summary = build_port_scan_diff(
-            previous_ports,
-            flatten_port_results(results),
-            observed_macs=[device["mac"] for device in results],
-        )
-        save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
+        diff_summary = None
+        if persistent:
+            diff_summary = build_port_scan_diff(
+                previous_ports,
+                flatten_port_results(results),
+                observed_macs=[device["mac"] for device in results],
+            )
+            save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
         if args.profile:
             print_device_profile(
                 apply_profile_policy_name(
@@ -776,49 +822,57 @@ def main():
                 target=target_label,
                 duration_seconds=elapsed,
             )
-        with redirect_stdout(StringIO()):
-            save_port_scan_results(
+        should_save_reports = persistent or any(
+            [args.json_out, args.csv_out, args.md_out]
+        )
+        if should_save_reports:
+            with redirect_stdout(StringIO()):
+                save_port_scan_results(
+                    results,
+                    diff_summary,
+                    output_paths["json"] if persistent or args.json_out else None,
+                    csv_output_file=CSV_OUTPUT_FILE,
+                    markdown_output_file=MARKDOWN_OUTPUT_FILE,
+                    profiles=profiles if persistent else None,
+                    policy_findings=policy_findings,
+                )
+        if persistent:
+            maybe_send_port_webhook(
+                args.webhook_url,
+                args.webhook_timeout,
+                scan_context,
                 results,
                 diff_summary,
-                output_paths["json"],
-                csv_output_file=CSV_OUTPUT_FILE,
-                markdown_output_file=MARKDOWN_OUTPUT_FILE,
-                profiles=profiles,
-                policy_findings=policy_findings,
+                policy_findings,
             )
-        maybe_send_port_webhook(
-            args.webhook_url,
-            args.webhook_timeout,
-            scan_context,
-            results,
-            diff_summary,
-            policy_findings,
-        )
-        finalize_scan_run(
-            db_conn,
-            scan_run_id,
-            status="success",
-            device_count=len(devices_to_scan),
-        )
+            finalize_scan_run(
+                db_conn,
+                scan_run_id,
+                status="success",
+                device_count=len(devices_to_scan),
+            )
     except Exception:
         if "progress" in locals() and not progress.finished:
             progress.fail()
-        if "scan_run_id" in locals():
+        if persistent and "scan_run_id" in locals() and scan_run_id is not None:
             finalize_scan_run(db_conn, scan_run_id, status="failed")
         raise
     finally:
-        db_conn.close()
+        if db_conn is not None:
+            db_conn.close()
     if args.verbose:
         print_output_files(
             [
-                ("Database", arp_scanner.DB_FILE),
-                ("JSON", output_paths["json"]),
+                ("Database", arp_scanner.DB_FILE if persistent else None),
+                ("JSON", output_paths["json"] if persistent or args.json_out else None),
                 ("CSV", CSV_OUTPUT_FILE),
                 ("Markdown", MARKDOWN_OUTPUT_FILE),
                 ("Baseline", args.write_baseline),
             ]
         )
-        print(f"Scan run: {scan_run_id}")
+        print(f"Storage: {'home history' if persistent else 'ephemeral'}")
+        if scan_run_id is not None:
+            print(f"Scan run: {scan_run_id}")
     sys.exit(exit_code)
 
 

@@ -156,6 +156,8 @@ Focus:
 
 Completed:
 
+- `scan-arp` and `scan-ports` now separate home inventory from untrusted-network observations: persistence is explicit with `--network-profile home`, while the safe `untrusted` default is ephemeral and does not contaminate device history.
+
 - All three CLI tools now use one shared progress renderer with consistent bars, percentages, counters, terminal-safe in-place updates, and clean redirected output.
 - Final CLI reports now share compact section headings and consistent `[OK]`, `[~]`, and `[!]` status markers without decorative closing borders.
 - ARP, port, and network-health reports now start with one aligned scan summary containing only relevant target, duration, count, change, and status fields.
@@ -206,7 +208,7 @@ Completed:
 - `network-health-check` now includes an `overall_trust_explanation` check that summarizes the current local-segment posture and the internet trust path in one human-readable block.
 - `network-health-check` originally introduced multiple environment labels and now exposes the simpler `home` and `untrusted` model.
 - `network-health-check` carries separate expectations for trusted home and untrusted networks into local exposure, client isolation, and overall trust details.
-- `network-health-check` now supports a separate `public` profile and applies profile-aware interpretation to peer visibility, client isolation, and gateway exposure.
+- Former public/travel/guest labels now normalize to the single safer `untrusted` profile, while `home` remains explicit.
 - `network-health-check` now reports current macOS Wi-Fi signal, noise, SNR quality, channel width, security, and PHY details when the platform exposes them, with a compact diagnostic view for incomplete CoreWLAN results.
 - DNS diagnostics now compare resolver interface metadata with the default-route interface and distinguish likely VPN or split-DNS routing from hard resolution failures.
 - README includes an operator checklist for non-home networks under the unified `untrusted` profile.
@@ -231,7 +233,16 @@ Completed:
 - Full health reports now preserve nested indentation for service metadata, peer lists, resolver risks, and other structured detail instead of flattening every line to one level.
 - Health report labels now use consistent operator-facing network terminology (`Wi-Fi`, `MAC`, `URL`, `RSSI`, and readable multiword fields) while exported JSON keys remain stable.
 - Network trust selection is now reduced to two supported profiles: trusted `home` and default `untrusted`; former `auto`, `guest`, `travel`, and `public` inputs normalize to `untrusted` as compatibility aliases.
-- Captive-portal HTTP responses are now profile-aware: sign-in behavior is a repeat-after-login notice on `untrusted`, remains an alert on `home`, and never weakens transport or HTTPS/TLS failures.
+- Captive-portal HTTP responses are profile-aware: a clearly detected sign-in flow becomes a repeat-after-login notice on `untrusted`, remains an alert on `home`, and can contextualize only non-TLS HTTPS failures before login. TLS/certificate failures are never weakened.
+- Network health reports now expose a derived access state for pre-login captive portal, online, DNS-degraded, HTTPS-degraded, and certificate-validation-failure scenarios.
+- Gateway web services are labeled as captive-portal surfaces only when redirect or page evidence points directly to the current gateway.
+- Active route and DNS metadata now produce a dedicated VPN-path explanation for recognized tunnel interfaces and split-DNS edge cases.
+- VPN-enabled macOS runs now separate the underlying local IPv4 gateway/CIDR from an effective `AF_LINK` tunnel default, avoiding missing-default-gateway failures.
+- Gateway reachability now recognizes ICMP-only filtering when TCP or online-path evidence proves the gateway works, while retaining alerts for measurable partial loss.
+- Passive peer inventory now excludes IPv4/MAC broadcast entries, and current Wi-Fi security/RSSI/SNR findings remain visible even when nearby CoreWLAN inventory is restricted.
+- macOS ARP discovery now disables unnecessary promiscuous mode for managed Wi-Fi interfaces and propagates raw-socket failures as failed scan runs instead of successful empty snapshots.
+- Full-LAN port scanning now reuses the shared non-promiscuous ARP discovery path, eliminating a duplicate macOS BPF failure path and false empty-success reports.
+- README now includes a three-stage hotel workflow: before portal sign-in, after sign-in, and after enabling a trusted VPN.
 - Direct public DNS is now a reviewable resolver-path notice instead of a hard alert; lookup failures and public domains resolving only to private addresses retain alert severity.
 - Untrusted-network summaries now distinguish primary observations from derived trust/isolation checks, avoid duplicate peer samples, and suppress identical context/profile-expectation lines.
 - README updated with scan history behavior, Synology examples, and suggested data layout.
