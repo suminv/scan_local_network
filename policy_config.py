@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 
 DEFAULT_CONFIG = {
@@ -10,8 +11,34 @@ DEFAULT_CONFIG = {
         "alert_on_unknown_device": True,
         "alert_on_unexpected_port": True,
         "alert_on_ssh_key_change": True,
+        "alert_on_http_identity_change": True,
+        "alert_on_tls_expiry": True,
     },
 }
+FORBIDDEN_CREDENTIAL_KEYS = {
+    "api_key",
+    "apikey",
+    "credential",
+    "credentials",
+    "password",
+    "private_key",
+    "secret",
+    "token",
+}
+SUPPORTED_POLICIES = set(DEFAULT_CONFIG["policies"])
+MAC_ADDRESS_PATTERN = re.compile(r"^(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$")
+
+
+def reject_credentials(value):
+    """Reject credential-like keys at any depth in a policy document."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if str(key).lower() in FORBIDDEN_CREDENTIAL_KEYS:
+                raise ValueError("Policy config must not contain credentials.")
+            reject_credentials(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            reject_credentials(nested)
 
 
 def load_policy_config(path):
@@ -33,20 +60,23 @@ def validate_policy_config(config):
     """Validate the small JSON schema and reject credential-like fields."""
     if not isinstance(config, dict):
         raise ValueError("Policy config must be a JSON object.")
-    if any(key in config for key in ("password", "private_key", "token")):
-        raise ValueError("Policy config must not contain credentials.")
+    reject_credentials(config)
     known_devices = config.get("known_devices", {})
     if not isinstance(known_devices, dict):
         raise ValueError("known_devices must be an object keyed by MAC address.")
     for mac, device in known_devices.items():
-        if not isinstance(mac, str) or len(mac.split(":")) != 6:
+        if not isinstance(mac, str) or not MAC_ADDRESS_PATTERN.fullmatch(mac):
             raise ValueError(f"Invalid MAC address in known_devices: {mac}")
         if not isinstance(device, dict):
             raise ValueError(f"Known device {mac} must be an object.")
-        if any(key in device for key in ("password", "private_key", "token")):
-            raise ValueError("Policy config must not contain credentials.")
+        name = device.get("name")
+        if name is not None and not isinstance(name, str):
+            raise ValueError(f"name for {mac} must be a string.")
         ports = device.get("expected_ports", [])
-        if not isinstance(ports, list) or any(not isinstance(port, int) for port in ports):
+        if not isinstance(ports, list) or any(
+            not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535
+            for port in ports
+        ):
             raise ValueError(f"expected_ports for {mac} must be a list of integers.")
         fingerprint = device.get("expected_ssh_fingerprint")
         if fingerprint is not None and not isinstance(fingerprint, str):
@@ -54,6 +84,28 @@ def validate_policy_config(config):
         expected_http = device.get("expected_http", {})
         if not isinstance(expected_http, dict):
             raise ValueError(f"expected_http for {mac} must be an object keyed by port.")
+        for port, identity in expected_http.items():
+            try:
+                port_number = int(port)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"expected_http for {mac} contains an invalid port: {port}"
+                ) from exc
+            if not 1 <= port_number <= 65535 or not isinstance(identity, dict):
+                raise ValueError(
+                    f"expected_http for {mac} must map valid ports to objects."
+                )
+    policies = config.get("policies", {})
+    if not isinstance(policies, dict):
+        raise ValueError("policies must be an object.")
+    unsupported = set(policies) - SUPPORTED_POLICIES
+    if unsupported:
+        raise ValueError(
+            f"Unsupported policy option(s): {', '.join(sorted(unsupported))}"
+        )
+    if any(not isinstance(value, bool) for value in policies.values()):
+        raise ValueError("Policy options must be true or false.")
+    return config
 
 
 def evaluate_device_policies(devices, config):
@@ -70,7 +122,21 @@ def evaluate_device_policies(devices, config):
         known = known_devices.get(mac)
         if known is None:
             if policies.get("alert_on_unknown_device", True):
-                findings.append({"type": "unknown_device", "ip": device["ip"], "mac": mac})
+                observed_ports = [
+                    {
+                        "port": port_info["port"],
+                        "service": port_info.get("service", "Unknown"),
+                    }
+                    for port_info in device.get("open_ports", [])
+                ]
+                findings.append(
+                    {
+                        "type": "unknown_device",
+                        "ip": device["ip"],
+                        "mac": mac,
+                        "observed_ports": observed_ports,
+                    }
+                )
             continue
         expected_ports = set(known.get("expected_ports", []))
         if policies.get("alert_on_unexpected_port", True):
@@ -88,7 +154,12 @@ def evaluate_device_policies(devices, config):
         expected_fingerprint = known.get("expected_ssh_fingerprint")
         for port_info in device.get("open_ports", []):
             fingerprint = (port_info.get("ssh") or {}).get("fingerprint_sha256")
-            if expected_fingerprint and fingerprint and fingerprint != expected_fingerprint:
+            if (
+                policies.get("alert_on_ssh_key_change", True)
+                and expected_fingerprint
+                and fingerprint
+                and fingerprint != expected_fingerprint
+            ):
                 findings.append(
                     {
                         "type": "ssh_key_changed",
@@ -100,7 +171,10 @@ def evaluate_device_policies(devices, config):
                 )
             expected_http = known.get("expected_http", {}).get(str(port_info["port"]))
             observed_http = port_info.get("http") or {}
-            if expected_http and observed_http:
+            if (
+                policies.get("alert_on_http_identity_change", True)
+                and expected_http
+            ):
                 mismatch = any(
                     observed_http.get(key) != value
                     for key, value in expected_http.items()
@@ -115,6 +189,23 @@ def evaluate_device_policies(devices, config):
                             "port": port_info["port"],
                         }
                     )
+            tls = port_info.get("tls") or {}
+            certificate_status = tls.get("certificate_status")
+            if (
+                policies.get("alert_on_tls_expiry", True)
+                and certificate_status in {"expired", "expiring_soon"}
+            ):
+                findings.append(
+                    {
+                        "type": "tls_expiry",
+                        "ip": device["ip"],
+                        "mac": mac,
+                        "name": known.get("name"),
+                        "port": port_info["port"],
+                        "certificate_status": certificate_status,
+                        "not_after": tls.get("not_after"),
+                    }
+                )
     return findings
 
 

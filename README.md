@@ -374,13 +374,32 @@ title when available. For SSH it records the pre-authentication banner and a
 host-key SHA-256 fingerprint. It never attempts passwords or logins.
 
 To inspect one device using the stored profile (MAC/vendor, hostname, IP
-history, observed services, and confidence evidence):
+history, first/last seen, observed services, and confidence evidence):
 
 ```bash
 ./scan-ports --network-profile home -t 192.168.1.101 --profile
 ```
 
 The profile view is observation-only: it does not authenticate to SSH or HTTP.
+Its compact service section includes SSH key fingerprints, HTTP
+status/redirect/title/server fields, and TLS identity/expiry metadata when
+observed. With `--config`, the card ends with explicit compliant/review policy
+status and active findings; review findings produce exit code `2`.
+Home-profile JSON reports include the same coherent `device_profiles` records,
+including user name, MAC/vendor, hostname, IP history, service observations,
+conservative hint evidence, and recent event history. Each event identifies its
+source scan, timestamp, network scope, and before/after values. A target first
+seen without a MAC receives a temporary IP identity; when a later scan learns
+its MAC, the stored name, history, events, and service evidence are merged into
+the MAC profile. Ports from a new scan scope are recorded as first observations
+instead of confirmed `port_opened` changes.
+
+Missing devices are reported only after three consecutive missed home ARP
+scans in the same interface/CIDR scope. Adjust that threshold when needed:
+
+```bash
+sudo ./scan-arp --network-profile home --missing-device-scans 5
+```
 
 For a first policy baseline, create a JSON file from a full LAN scan:
 
@@ -394,9 +413,20 @@ Review the generated file, then use it on later scans:
 ./scan-ports --network-profile home --config data/network_policy.json --alerts-only
 ```
 
+Validate a hand-edited policy without scanning:
+
+```bash
+./scan-ports --config data/network_policy.json --check-config
+```
+
 The policy file may contain known device names, expected ports, expected SSH
-host-key fingerprints, and selected HTTP identity fields. Credentials and
-passwords are rejected by validation and are never stored or tested.
+host-key fingerprints, and selected HTTP identity fields. Policy switches cover
+unknown devices, unexpected ports, SSH host-key changes, HTTP identity changes,
+and expired or soon-expiring TLS certificates. Findings retain service context,
+so an unknown host with port 22 is reported as unknown-device SSH evidence
+instead of only a bare open port. Credentials, passwords, tokens, private keys,
+and nested secret fields are rejected by validation and are never stored or
+tested. Configured names are copied into matching stored device profiles.
 
 **To specify custom ports or ranges, use the `-p` or `--ports` flag:**
 
@@ -526,11 +556,105 @@ It currently checks:
 - a derived access state that distinguishes online, captive-portal sign-in, degraded DNS/HTTPS, and certificate-validation failure
 - a VPN path explanation based on the default route and DNS resolver interface metadata
 - an overall trust explanation that summarizes the current local-segment posture and internet trust path in one short human-readable block
+- Internet latency, jitter, download, and upload measurements
+- public IP and approximate IP-based location lookup
+- active Tailscale exit-node diagnostics when Tailscale is available
 
 **To run a health check:**
 
 ```bash
 ./scan-health
+```
+
+With no check selector, `scan-health` runs the complete suite: local network,
+gateway, DNS, HTTPS, Wi-Fi, public IP, Tailscale, and speedtest. The complete
+run is data-consuming: with default settings the speedtest downloads about
+10 MB and uploads about 2 MB. Use the lightweight complete mode to omit only
+that transfer:
+
+```bash
+./scan-health --no-speedtest
+```
+
+Check selectors follow one rule: if one or more selectors are present, only
+their union runs. Output and tuning options such as `--output`, `--json-out`,
+`--md-out`, `--timeout`, `--verbose`, and `--network-profile` do not narrow the
+suite. For example, `./scan-health --output focus` still runs every complete
+suite check.
+
+**To run only an Internet speed test:**
+
+```bash
+./scan-health --speedtest
+```
+
+By default the speedtest downloads 10 MB, uploads 2 MB, and makes five small
+latency requests over HTTPS to Cloudflare's measurement endpoints. The result
+includes latency, jitter, download speed, upload speed, and the Cloudflare
+location code when available. These are application-level measurements and can
+vary with Wi-Fi conditions, VPN use, server routing, and other traffic.
+
+The transfer sizes and per-request timeout can be adjusted:
+
+```bash
+./scan-health --speedtest \
+  --speedtest-download-mb 25 \
+  --speedtest-upload-mb 5 \
+  --speedtest-timeout 30
+```
+
+If the requested download does not complete before the per-request timeout,
+the test automatically retries with progressively smaller payloads. A recovered
+result is marked as a notice because a short sample can understate sustained or
+peak throughput. If every payload times out, the report keeps the successful
+latency/upload measurements and shows the download error.
+
+For download measurements, `scan-health` uses the system `curl` executable when
+available because its HTTP/TLS stack behaves more reliably across VPN and
+Tailscale exit-node routes. Systems without `curl` automatically use the
+dependency-free Python implementation and its reduced-payload timeout recovery.
+
+Cloudflare may collect measurement metadata when its speed-test service is
+used. Use `--no-speedtest` when the complete diagnostic run must not send
+speed-test traffic.
+
+**To show the public IP and its approximate location:**
+
+```bash
+./scan-health --public-ip
+```
+
+This selector runs only the public-IP lookup. It shows the public IPv4 or IPv6
+address used by the current route, plus the approximate city, region, country,
+timezone, ISP, and ASN when the provider returns them. It uses one HTTPS
+request to `ipwho.is`; no API key is required. IP-based location is not
+GPS-accurate and may identify the ISP, mobile gateway, corporate proxy, or VPN
+exit instead of the device's physical location.
+
+Multiple selectors run exactly their union:
+
+```bash
+./scan-health --public-ip --speedtest
+```
+
+**To diagnose the active Tailscale exit-node path:**
+
+```bash
+./scan-health --tailscale-diagnostics
+```
+
+This reads the local `tailscale status --json`, finds the active exit node, and
+runs five Tailscale DISCO pings to it. The report identifies a `direct`,
+`peer-relay`, or `DERP` path and shows minimum, average, median, and maximum
+latency. Relayed paths are notices because they remain encrypted but commonly
+add latency and reduce throughput. The sample count can be changed with
+`--tailscale-ping-count`. Gateway, DNS, Wi-Fi, captive-portal, and HTTPS checks
+are not run in this selected-only mode.
+
+Combine selectors to run only those checks:
+
+```bash
+./scan-health --tailscale-diagnostics --public-ip --speedtest
 ```
 
 **Select one of two network profiles:**
@@ -552,7 +676,12 @@ For compatibility, the former `auto`, `guest`, `travel`, and `public` values are
 
 The detailed checks expose the normalized profile posture, whether isolation is desired, and a profile-specific recommended action. Passive evidence is reported as one of three states: peers observed, no peers observed with an inconclusive inference, or observation unavailable. An empty or unavailable neighbor cache is never presented as proof that isolation exists; unavailable evidence becomes a notice under the `untrusted` profile.
 
-Peer visibility reads the operating system's existing IPv4 ARP and IPv6 neighbor tables (`ndp` on macOS or `ip -6 neigh` on Linux/Synology). It sends no discovery traffic. IPv4 and IPv6 addresses with the same MAC are counted as one device, router entries and the current host's own interface identities are excluded from the peer count, and abbreviated macOS MAC octets are normalized to the standard two-digit form.
+Peer visibility reads the operating system's existing neighbor tables: IPv4
+ARP plus `ndp` on macOS, or the combined IPv4/IPv6 `ip neigh` cache on
+Linux/Synology. It sends no discovery traffic. IPv4 and IPv6 addresses with the
+same MAC are counted as one device, router entries and the current host's own
+interface identities are excluded from the peer count, and abbreviated macOS
+MAC octets are normalized to the standard two-digit form.
 
 On macOS, the report includes a Wi-Fi environment section with interface details such as supported PHY modes, channels, and country code. Current-network details are collected from `wdutil` when possible, with a `system_profiler` fallback. The report shows channel/band width, RSSI, noise, security, PHY mode, and an SNR-based quality assessment when macOS exposes those fields.
 
@@ -647,7 +776,7 @@ If the report shows unexplained HTTPS failures, public domains resolving to priv
 For intermittent signal, roaming, or packet-loss problems, add a short stability observation:
 
 ```bash
-sudo ./scan-health --network-profile untrusted --output full --wifi-stability-seconds 20
+sudo ./scan-health --network-profile untrusted --output full --no-speedtest --wifi-stability-seconds 20
 ```
 
 This health check is diagnostic evidence, not proof that a public network is safe. It does not inspect all traffic or authenticate the operator of the access point.
@@ -678,7 +807,15 @@ Summary reason lists show primary observations only. Derived checks such as `Ove
 sudo ./scan-health --wifi-stability-seconds 20
 ```
 
-This adds a short observation window with repeated gateway latency checks and current Wi-Fi sampling, looking for:
+Used alone, this selects only a short observation window with repeated gateway
+latency checks and current Wi-Fi sampling. To add it to the lightweight
+complete suite, combine it with `--no-speedtest`:
+
+```bash
+sudo ./scan-health --no-speedtest --wifi-stability-seconds 20
+```
+
+The stability check looks for:
 
 - BSSID changes
 - weak signal

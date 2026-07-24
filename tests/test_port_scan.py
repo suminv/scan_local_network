@@ -4,6 +4,7 @@ import tempfile
 import json
 import logging
 import os
+import sqlite3
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
@@ -27,6 +28,23 @@ class PortScanTests(unittest.TestCase):
         )
 
         self.assertEqual(args.network_profile, "home")
+
+    def test_check_config_validates_and_exits_without_root_or_scanning(self):
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=".json",
+            encoding="utf-8",
+        ) as handle:
+            json.dump({"known_devices": {}, "policies": {}}, handle)
+            handle.flush()
+            args = SimpleNamespace(config=handle.name, check_config=True)
+            output = StringIO()
+            with mock.patch("port_scan.parse_args", return_value=args):
+                with redirect_stdout(output), self.assertRaises(SystemExit) as exit_ctx:
+                    port_scan.main()
+
+        self.assertEqual(exit_ctx.exception.code, 0)
+        self.assertIn("Policy config is valid.", output.getvalue())
 
     def test_untrusted_main_does_not_open_database(self):
         args = port_scan.build_parser().parse_args([])
@@ -991,6 +1009,171 @@ class PortScanTests(unittest.TestCase):
         self.assertLess(output.find("--- Scan Summary ---"), output.find("--- Port Changes Since Last Scan ---"))
         self.assertLess(output.find("--- Port Changes Since Last Scan ---"), output.find("--- Policy Findings ---"))
         self.assertLess(output.find("--- Policy Findings ---"), output.find("--- Open Ports ---"))
+
+    def test_print_policy_findings_uses_specific_context(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            port_scan.print_policy_findings(
+                [
+                    {
+                        "type": "unknown_device",
+                        "ip": "192.168.2.20",
+                        "mac": "bb:bb:bb:bb:bb:bb",
+                        "observed_ports": [
+                            {"port": 22, "service": "OpenSSH"}
+                        ],
+                    },
+                    {
+                        "type": "ssh_key_changed",
+                        "ip": "192.168.2.10",
+                        "mac": "aa:aa:aa:aa:aa:aa",
+                        "name": "NAS",
+                        "port": 22,
+                    },
+                    {
+                        "type": "http_identity_changed",
+                        "ip": "192.168.2.10",
+                        "mac": "aa:aa:aa:aa:aa:aa",
+                        "name": "NAS",
+                        "port": 80,
+                    },
+                    {
+                        "type": "tls_expiry",
+                        "ip": "192.168.2.10",
+                        "mac": "aa:aa:aa:aa:aa:aa",
+                        "name": "NAS",
+                        "port": 443,
+                        "certificate_status": "expiring_soon",
+                    },
+                ]
+            )
+
+        rendered = output.getvalue()
+        self.assertIn("unknown device", rendered)
+        self.assertIn("22/tcp OpenSSH", rendered)
+        self.assertIn("SSH host key changed", rendered)
+        self.assertIn("HTTP identity changed", rendered)
+        self.assertIn("TLS certificate expiring_soon", rendered)
+        self.assertNotIn("unexpected port: NAS 192.168.2.10:22", rendered)
+
+    def test_sync_profile_policy_names_persists_user_name(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE device_profiles (
+                identity_key TEXT PRIMARY KEY,
+                user_name TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO device_profiles (identity_key) VALUES (?)",
+            ("mac:aa:aa:aa:aa:aa:aa",),
+        )
+
+        updated = port_scan.sync_profile_policy_names(
+            conn,
+            {
+                "known_devices": {
+                    "AA:AA:AA:AA:AA:AA": {"name": "NAS"}
+                }
+            },
+        )
+
+        self.assertEqual(updated, 1)
+        self.assertEqual(
+            conn.execute(
+                "SELECT user_name FROM device_profiles"
+            ).fetchone(),
+            ("NAS",),
+        )
+        conn.close()
+
+    def test_print_device_profile_renders_identity_services_and_policy(self):
+        profile = {
+            "ip": "192.168.2.10",
+            "mac": "aa:aa:aa:aa:aa:aa",
+            "vendor": "Example Vendor",
+            "hostname": "nas.local",
+            "user_name": "Storage",
+            "first_seen": "2026-07-01T10:00:00",
+            "last_seen": "2026-07-24T10:00:00",
+            "ip_history": ["192.168.2.10", "192.168.2.11"],
+            "device_hint": "Synology-like",
+            "hint_confidence": "medium",
+            "hint_evidence": ["DSM-style management port or banner"],
+            "services": [
+                {
+                    "port": 22,
+                    "service": "OpenSSH",
+                    "ssh": {
+                        "key_type": "ssh-ed25519",
+                        "fingerprint_sha256": "SHA256:abc",
+                    },
+                },
+                {
+                    "port": 443,
+                    "service": "HTTPS (302 Found)",
+                    "http": {
+                        "status": 302,
+                        "reason": "Found",
+                        "location": "/login",
+                        "title": "NAS Login",
+                        "server": "nginx",
+                    },
+                    "tls": {
+                        "protocol": "TLSv1.3",
+                        "common_name": "nas.local",
+                        "issuer": "Example CA",
+                        "certificate_status": "expiring_soon",
+                        "not_after": "Aug 01 00:00:00 2026 GMT",
+                    },
+                },
+            ],
+        }
+        output = StringIO()
+
+        with redirect_stdout(output):
+            port_scan.print_device_profile(
+                profile,
+                [
+                    {
+                        "type": "tls_expiry",
+                        "port": 443,
+                    }
+                ],
+            )
+
+        rendered = output.getvalue()
+        self.assertIn("Device Profile · Storage", rendered)
+        self.assertIn("First seen: 2026-07-01T10:00:00", rendered)
+        self.assertIn("IP history: 192.168.2.10, 192.168.2.11", rendered)
+        self.assertIn("Synology-like (medium confidence)", rendered)
+        self.assertIn("SSH: ssh-ed25519 · SHA256:abc", rendered)
+        self.assertIn("HTTP: 302 Found", rendered)
+        self.assertIn("Redirect: /login", rendered)
+        self.assertIn("Title: NAS Login", rendered)
+        self.assertIn("TLS: TLSv1.3 · CN=nas.local · issuer=Example CA", rendered)
+        self.assertIn("Certificate: expiring_soon", rendered)
+        self.assertIn("review · 1 active finding(s)", rendered)
+        self.assertIn("tls expiry on 443/tcp", rendered)
+
+    def test_print_device_profile_shows_policy_not_evaluated(self):
+        output = StringIO()
+        with redirect_stdout(output):
+            port_scan.print_device_profile(
+                {
+                    "ip": "192.168.2.10",
+                    "ip_history": [],
+                    "services": [],
+                    "device_hint": "unknown",
+                    "hint_confidence": "low",
+                },
+                None,
+            )
+
+        self.assertIn("none observed", output.getvalue())
+        self.assertIn("not evaluated (use --config)", output.getvalue())
 
     def test_render_empty_scan_outcome_uses_full_output_when_not_alerts_only(self):
         args = SimpleNamespace(alerts_only=False)

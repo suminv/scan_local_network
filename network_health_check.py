@@ -29,11 +29,30 @@ from reporting import (
     save_json_report,
     save_markdown_report,
 )
-
-
 JSON_OUTPUT_FILE = "network_health_check_result.json"
 MARKDOWN_OUTPUT_FILE = None
 DEFAULT_OUTPUT_FORMAT = "full"
+CORE_HEALTH_CHECK = "core"
+WIFI_STABILITY_CHECK = "wifi_stability"
+TAILSCALE_CHECK = "tailscale_exit_node"
+PUBLIC_IP_CHECK = "public_ip"
+SPEEDTEST_CHECK = "internet_speed"
+COMPLETE_CHECK_SELECTION = (
+    CORE_HEALTH_CHECK,
+    TAILSCALE_CHECK,
+    PUBLIC_IP_CHECK,
+    SPEEDTEST_CHECK,
+)
+COMPLETE_SCAN_CONTEXT_CHECKS = (
+    "network",
+    "gateway",
+    "dns",
+    "https",
+    "wifi",
+    PUBLIC_IP_CHECK,
+    TAILSCALE_CHECK,
+    SPEEDTEST_CHECK,
+)
 FOCUS_BASELINE_CHECKS = {"access_state", "overall_trust_explanation", "gateway_identity"}
 DERIVED_FINDING_NAMES = {"access_state", "overall_trust_explanation", "client_isolation_hint"}
 
@@ -43,6 +62,17 @@ def parse_network_profile(value):
     if value not in NETWORK_PROFILES and value not in NETWORK_PROFILE_ALIASES:
         raise argparse.ArgumentTypeError("network profile must be home or untrusted")
     return normalize_network_profile(value)
+
+
+def parse_positive_float(value):
+    """Parse a strictly positive CLI number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError("value must be a number") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("value must be greater than zero")
+    return number
 
 
 FOCUS_CONTEXT_CHECKS = {
@@ -69,6 +99,9 @@ FINDING_PRIORITY = {
     "https_trust_reasoning": 80,
     "wifi_stability": 90,
     "wifi_environment": 100,
+    "public_ip": 103,
+    "internet_speed": 105,
+    "tailscale_exit_node": 107,
     "gateway_fingerprint": 110,
 }
 CHECK_GROUPS = [
@@ -76,7 +109,8 @@ CHECK_GROUPS = [
     ("Network", ["gateway_identity", "gateway_fingerprint", "gateway_exposure", "gateway_reachability", "local_peer_visibility", "client_isolation_hint", "active_path", "vpn_path"]),
     ("DNS", ["dns_environment", "dns_trust_reasoning", "dns_"]),
     ("Wi-Fi", ["wifi_environment", "wifi_stability"]),
-    ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_"]),
+    ("Tailscale", ["tailscale_exit_node"]),
+    ("Internet", ["captive_trust_reasoning", "captive_", "https_trust_reasoning", "https_", "public_ip", "internet_speed"]),
 ]
 CHECK_LABELS = {
     "overall_trust_explanation": "Overall trust explanation",
@@ -99,6 +133,9 @@ CHECK_LABELS = {
     "https_trust_reasoning": "HTTPS trust reasoning",
     "https_example_https": "Example HTTPS",
     "https_google_204_https": "Google HTTPS 204",
+    "internet_speed": "Internet speed",
+    "public_ip": "Public IP",
+    "tailscale_exit_node": "Tailscale exit node",
 }
 DNS_CLASSIFICATION_LABELS = {
     "gateway_dns": "gateway DNS",
@@ -546,6 +583,110 @@ def format_wifi_stability_details(details):
     return lines
 
 
+def format_internet_speed_details(details):
+    lines = [f"  provider: {details.get('provider') or 'unknown'}"]
+    if details.get("server_location"):
+        lines.append(f"  server location: {details['server_location']}")
+    if details.get("latency_ms") is not None:
+        lines.append(f"  latency: {details['latency_ms']:.1f} ms")
+    if details.get("jitter_ms") is not None:
+        lines.append(f"  jitter: {details['jitter_ms']:.1f} ms")
+    if details.get("download_mbps") is not None:
+        lines.append(f"  download: {details['download_mbps']:.1f} Mbps")
+    if details.get("download_backend"):
+        lines.append(f"  download backend: {details['download_backend']}")
+    if details.get("upload_mbps") is not None:
+        lines.append(f"  upload: {details['upload_mbps']:.1f} Mbps")
+    if details.get("download_bytes") is not None:
+        lines.append(f"  downloaded: {details['download_bytes'] / 1_000_000:.1f} MB")
+    if details.get("download_fallback_used"):
+        requested = details.get("download_requested_bytes")
+        if requested is not None:
+            lines.append(
+                f"  download sample: reduced from {requested / 1_000_000:.1f} MB "
+                "after timeout"
+            )
+        lines.append("  accuracy: reduced download sample may understate peak speed")
+    if details.get("upload_bytes") is not None:
+        lines.append(f"  uploaded: {details['upload_bytes'] / 1_000_000:.1f} MB")
+    for stage, error in details.get("errors", {}).items():
+        lines.append(f"  {stage} error: {error}")
+    return lines
+
+
+def format_public_ip_details(details):
+    lines = [f"  provider: {details.get('provider') or 'unknown'}"]
+    if details.get("public_ip"):
+        lines.append(f"  IP: {details['public_ip']}")
+    if details.get("ip_version"):
+        lines.append(f"  version: IPv{details['ip_version']}")
+    location = details.get("location") or {}
+    location_parts = [
+        value
+        for value in (
+            location.get("city"),
+            location.get("region"),
+            location.get("country"),
+        )
+        if value
+    ]
+    if location_parts:
+        lines.append(f"  approximate location: {', '.join(location_parts)}")
+    if details.get("timezone"):
+        lines.append(f"  timezone: {details['timezone']}")
+    if details.get("isp"):
+        lines.append(f"  ISP: {details['isp']}")
+    if details.get("asn"):
+        lines.append(f"  ASN: {details['asn']}")
+    if details.get("approximate_location"):
+        lines.append("  accuracy: IP-based estimate; VPN/proxy exit may be shown")
+    if details.get("error"):
+        lines.append(f"  lookup error: {details['error']}")
+    return lines
+
+
+def format_tailscale_exit_node_details(details):
+    lines = []
+    if details.get("backend_state"):
+        lines.append(f"  backend state: {details['backend_state']}")
+    if details.get("exit_node_active") is not None:
+        lines.append(
+            f"  exit node active: {'yes' if details['exit_node_active'] else 'no'}"
+        )
+    exit_node = details.get("exit_node") or {}
+    if exit_node.get("hostname"):
+        lines.append(f"  exit node: {exit_node['hostname']}")
+    if exit_node.get("tailscale_ip"):
+        lines.append(f"  Tailscale IP: {exit_node['tailscale_ip']}")
+    if details.get("path"):
+        lines.append(f"  path: {details['path'].replace('_', '-')}")
+    if details.get("relays"):
+        lines.append(f"  relay: {', '.join(details['relays'])}")
+    if details.get("sample_count") is not None:
+        lines.append(
+            f"  samples: {details['sample_count']}/{details.get('requested_samples', 0)}"
+        )
+    if details.get("latency_avg_ms") is not None:
+        lines.append(f"  average latency: {details['latency_avg_ms']:.1f} ms")
+    if details.get("latency_median_ms") is not None:
+        lines.append(f"  median latency: {details['latency_median_ms']:.1f} ms")
+    if (
+        details.get("latency_min_ms") is not None
+        and details.get("latency_max_ms") is not None
+    ):
+        lines.append(
+            f"  latency range: {details['latency_min_ms']:.1f}–"
+            f"{details['latency_max_ms']:.1f} ms"
+        )
+    if details.get("direct_connection_not_established"):
+        lines.append("  direct connection established: no")
+    if details.get("reason"):
+        lines.append(f"  reason: {details['reason']}")
+    if details.get("error"):
+        lines.append(f"  diagnostic error: {details['error']}")
+    return lines
+
+
 def humanize_risk_type(risk_type):
     return {
         "open_network": "open network",
@@ -593,6 +734,12 @@ def format_check_details(check):
         return format_wifi_environment_details(details)
     if name == "wifi_stability":
         return format_wifi_stability_details(details)
+    if name == "internet_speed":
+        return format_internet_speed_details(details)
+    if name == "public_ip":
+        return format_public_ip_details(details)
+    if name == "tailscale_exit_node":
+        return format_tailscale_exit_node_details(details)
     if name.startswith("dns_"):
         return format_domain_resolution_details(details)
     if name.startswith("captive_") or name.startswith("https_"):
@@ -1205,10 +1352,21 @@ def build_health_markdown_report(scan_context, checks, summary):
         "## Scan Context",
         "",
         render_markdown_table(
-            ["Interface", "CIDR", "Trust", "Alerts", "Notices", "Total checks"],
+            [
+                "Interface",
+                "CIDR",
+                "Mode",
+                "Selected checks",
+                "Trust",
+                "Alerts",
+                "Notices",
+                "Total checks",
+            ],
             [[
                 scan_context.get("interface"),
                 scan_context.get("cidr"),
+                scan_context.get("mode"),
+                ", ".join(scan_context.get("selected_checks", [])),
                 assessment["level"],
                 summary["alert_checks"],
                 summary.get("notice_checks", 0),
@@ -1299,7 +1457,61 @@ def build_parser():
         "--wifi-stability-seconds",
         type=int,
         default=0,
-        help="Run short Wi-Fi stability diagnostics for the given number of seconds.",
+        help=(
+            "Select only Wi-Fi stability diagnostics for the given number of seconds. "
+            "With --no-speedtest, add it to the lightweight complete suite."
+        ),
+    )
+    speedtest_group = parser.add_mutually_exclusive_group()
+    speedtest_group.add_argument(
+        "--speedtest",
+        action="store_true",
+        help="Select only the Cloudflare Internet speed check (data-consuming).",
+    )
+    speedtest_group.add_argument(
+        "--no-speedtest",
+        action="store_true",
+        help="Run the complete health suite except the data-consuming speedtest.",
+    )
+    parser.add_argument(
+        "--public-ip",
+        action="store_true",
+        help="Select only public-IP and approximate geolocation checks.",
+    )
+    parser.add_argument(
+        "--tailscale-diagnostics",
+        action="store_true",
+        help="Select only active Tailscale exit-node diagnostics.",
+    )
+    parser.add_argument(
+        "--tailscale-ping-count",
+        type=int,
+        default=5,
+        help="Number of Tailscale exit-node ping attempts. Defaults to 5.",
+    )
+    parser.add_argument(
+        "--public-ip-timeout",
+        type=parse_positive_float,
+        default=10,
+        help="Timeout in seconds for the public-IP lookup. Defaults to 10.",
+    )
+    parser.add_argument(
+        "--speedtest-download-mb",
+        type=parse_positive_float,
+        default=10,
+        help="Download payload in decimal MB for --speedtest. Defaults to 10.",
+    )
+    parser.add_argument(
+        "--speedtest-upload-mb",
+        type=parse_positive_float,
+        default=2,
+        help="Upload payload in decimal MB for --speedtest. Defaults to 2.",
+    )
+    parser.add_argument(
+        "--speedtest-timeout",
+        type=parse_positive_float,
+        default=20,
+        help="Timeout in seconds for each speed-test request. Defaults to 20.",
     )
     parser.add_argument(
         "--webhook-url",
@@ -1335,19 +1547,109 @@ def normalize_wifi_stability_seconds(raw_value):
     return 0
 
 
+def select_health_checks(args):
+    """Return the predictable execution mode and stable top-level check selection."""
+    wifi_stability_seconds = normalize_wifi_stability_seconds(
+        getattr(args, "wifi_stability_seconds", 0)
+    )
+    selectors = []
+    if wifi_stability_seconds > 0:
+        selectors.append(WIFI_STABILITY_CHECK)
+    if getattr(args, "tailscale_diagnostics", False) is True:
+        selectors.append(TAILSCALE_CHECK)
+    if getattr(args, "public_ip", False) is True:
+        selectors.append(PUBLIC_IP_CHECK)
+    if getattr(args, "speedtest", False) is True:
+        selectors.append(SPEEDTEST_CHECK)
+
+    no_speedtest = getattr(args, "no_speedtest", False) is True
+    if selectors and not (selectors == [WIFI_STABILITY_CHECK] and no_speedtest):
+        return {"mode": "selected", "checks": tuple(selectors)}
+
+    checks = list(COMPLETE_CHECK_SELECTION)
+    if no_speedtest:
+        checks.remove(SPEEDTEST_CHECK)
+    if wifi_stability_seconds > 0:
+        checks.append(WIFI_STABILITY_CHECK)
+    return {"mode": "complete", "checks": tuple(checks)}
+
+
+def describe_health_check_selection(selection):
+    """Expand internal collection bundles into user-facing check names."""
+    checks = selection["checks"]
+    if CORE_HEALTH_CHECK not in checks:
+        return list(checks)
+    described = list(COMPLETE_SCAN_CONTEXT_CHECKS)
+    if SPEEDTEST_CHECK not in checks:
+        described.remove(SPEEDTEST_CHECK)
+    if WIFI_STABILITY_CHECK in checks:
+        described.append(WIFI_STABILITY_CHECK)
+    return described
+
+
+def is_tailscale_only_mode(args):
+    """Return whether Tailscale is the only selected top-level check."""
+    return select_health_checks(args) == {
+        "mode": "selected",
+        "checks": (TAILSCALE_CHECK,),
+    }
+
+
 def run_health_check_collection(args):
     """Collect scan context, run health checks, and build summary/payload data."""
     started_at = time.monotonic()
-    interface, cidr = resolve_scan_target(args.iface, args.cidr)
     network_profile = normalize_network_profile(args.network_profile)
+    selection = select_health_checks(args)
+    selected_checks = selection["checks"]
+    if CORE_HEALTH_CHECK in selected_checks:
+        interface, cidr = resolve_scan_target(args.iface, args.cidr)
+    else:
+        interface, cidr = None, None
     scan_context = build_scan_context(
         interface=interface,
         cidr=cidr,
         network_profile=network_profile,
     )
+    scan_context["mode"] = selection["mode"]
+    scan_context["selected_checks"] = describe_health_check_selection(selection)
     wifi_stability_seconds = normalize_wifi_stability_seconds(
         getattr(args, "wifi_stability_seconds", 0)
     )
+    speedtest_enabled = SPEEDTEST_CHECK in selected_checks
+    public_ip_enabled = PUBLIC_IP_CHECK in selected_checks
+    tailscale_diagnostics_enabled = TAILSCALE_CHECK in selected_checks
+    speedtest_download_mb = getattr(args, "speedtest_download_mb", 10)
+    speedtest_upload_mb = getattr(args, "speedtest_upload_mb", 2)
+    speedtest_timeout = getattr(args, "speedtest_timeout", 20)
+    public_ip_timeout = getattr(args, "public_ip_timeout", 10)
+    tailscale_ping_count = getattr(args, "tailscale_ping_count", 5)
+    speedtest_download_mb = (
+        speedtest_download_mb
+        if isinstance(speedtest_download_mb, (int, float))
+        else 10
+    )
+    speedtest_upload_mb = (
+        speedtest_upload_mb
+        if isinstance(speedtest_upload_mb, (int, float))
+        else 2
+    )
+    speedtest_timeout = (
+        speedtest_timeout if isinstance(speedtest_timeout, (int, float)) else 20
+    )
+    public_ip_timeout = (
+        public_ip_timeout if isinstance(public_ip_timeout, (int, float)) else 10
+    )
+    tailscale_ping_count = (
+        tailscale_ping_count if isinstance(tailscale_ping_count, int) else 5
+    )
+    if tailscale_diagnostics_enabled and tailscale_ping_count <= 0:
+        raise ValueError("Tailscale ping count must be greater than zero")
+    if speedtest_enabled and (
+        speedtest_download_mb <= 0
+        or speedtest_upload_mb <= 0
+        or speedtest_timeout <= 0
+    ):
+        raise ValueError("speed-test sizes and timeout must be greater than zero")
     checks = run_network_health_checks(
         dns_domains=args.dns_domains or DEFAULT_DNS_DOMAINS,
         timeout=args.timeout,
@@ -1357,6 +1659,15 @@ def run_health_check_collection(args):
             print_wifi_stability_progress if wifi_stability_seconds > 0 else None
         ),
         progress_callback=print_health_progress,
+        speedtest_enabled=speedtest_enabled,
+        speedtest_download_bytes=int(speedtest_download_mb * 1_000_000),
+        speedtest_upload_bytes=int(speedtest_upload_mb * 1_000_000),
+        speedtest_timeout=speedtest_timeout,
+        public_ip_enabled=public_ip_enabled,
+        public_ip_timeout=public_ip_timeout,
+        tailscale_diagnostics_enabled=tailscale_diagnostics_enabled,
+        tailscale_ping_count=tailscale_ping_count,
+        selected_checks=selected_checks,
     )
     scan_context["duration_seconds"] = time.monotonic() - started_at
     summary = build_health_summary(checks)

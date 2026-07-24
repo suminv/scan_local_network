@@ -32,6 +32,7 @@ from arp_scanner import (
     build_port_scan_diff,
     get_vendor,
     init_db,
+    find_previous_compatible_port_scan_id,
     load_previous_scan_ports,
     resolve_scan_target,
     save_scan_run_ports,
@@ -555,22 +556,90 @@ def print_device_profile(profile, policy_findings=None):
     if profile is None:
         print("No profile data available.")
         return
-    title = profile.get("user_name") or profile["ip"]
-    print(f"\n{title} · {profile['device_hint']} ({profile['hint_confidence']} confidence)")
-    print(f"  IP history: {', '.join(profile['ip_history']) or profile['ip']}")
+    title = profile.get("user_name") or profile.get("hostname") or profile["ip"]
+    print(f"\nDevice Profile · {title}")
+    print(f"  Current IP: {profile['ip']}")
     if profile.get("mac"):
         print(f"  MAC: {profile['mac']} · {profile.get('vendor') or 'Unknown vendor'}")
     if profile.get("hostname"):
         print(f"  Hostname: {profile['hostname']}")
-    if profile["hint_evidence"]:
+    print(f"  First seen: {profile.get('first_seen') or 'unknown'}")
+    print(f"  Last seen: {profile.get('last_seen') or 'unknown'}")
+    print(f"  IP history: {', '.join(profile.get('ip_history', [])) or profile['ip']}")
+    print(
+        f"  Device hint: {profile.get('device_hint', 'unknown')} "
+        f"({profile.get('hint_confidence', 'low')} confidence)"
+    )
+    if profile.get("hint_evidence"):
         print(f"  Evidence: {'; '.join(profile['hint_evidence'])}")
     print("  Services:")
-    for service in profile["services"]:
+    services = profile.get("services", [])
+    if not services:
+        print("    none observed")
+    for service in services:
         print(f"    {service['port']}/tcp  {service.get('service', 'Unknown')}")
-    if policy_findings:
-        print("  Policy:")
+        ssh = service.get("ssh") or {}
+        if ssh:
+            ssh_parts = [
+                value
+                for value in (
+                    ssh.get("key_type"),
+                    ssh.get("fingerprint_sha256"),
+                )
+                if value
+            ]
+            if ssh_parts:
+                print(f"      SSH: {' · '.join(ssh_parts)}")
+        http = service.get("http") or {}
+        if http:
+            status = http.get("status")
+            reason = http.get("reason")
+            status_text = " ".join(
+                str(value) for value in (status, reason) if value not in (None, "")
+            )
+            if status_text:
+                print(f"      HTTP: {status_text}")
+            if http.get("location"):
+                print(f"      Redirect: {http['location']}")
+            if http.get("title"):
+                print(f"      Title: {http['title']}")
+            if http.get("server"):
+                print(f"      Server: {http['server']}")
+        tls = service.get("tls") or {}
+        if tls:
+            tls_identity = [
+                value
+                for value in (
+                    tls.get("protocol"),
+                    f"CN={tls['common_name']}" if tls.get("common_name") else None,
+                    f"issuer={tls['issuer']}" if tls.get("issuer") else None,
+                )
+                if value
+            ]
+            if tls_identity:
+                print(f"      TLS: {' · '.join(tls_identity)}")
+            if tls.get("certificate_status") or tls.get("not_after"):
+                print(
+                    "      Certificate: "
+                    f"{tls.get('certificate_status', 'unknown')} · "
+                    f"expires {tls.get('not_after', 'unknown')}"
+                )
+            if tls.get("handshake_error"):
+                print(f"      TLS error: {tls['handshake_error']}")
+    print("  Policy:")
+    if policy_findings is None:
+        print("    not evaluated (use --config)")
+    elif not policy_findings:
+        print("    compliant · no active findings")
+    else:
+        print(f"    review · {len(policy_findings)} active finding(s)")
         for finding in policy_findings:
-            print(f"    {finding['type'].replace('_', ' ')}")
+            suffix = (
+                f" on {finding['port']}/tcp"
+                if finding.get("port") is not None
+                else ""
+            )
+            print(f"    - {finding['type'].replace('_', ' ')}{suffix}")
 
 
 def print_policy_findings(policy_findings):
@@ -580,10 +649,30 @@ def print_policy_findings(policy_findings):
     print_section_heading("Policy Findings", leading_blank=True)
     for finding in policy_findings:
         if finding["type"] == "unknown_device":
-            print(f"  unknown device: {finding['ip']} ({finding['mac']})")
-        else:
-            name = finding.get("name") or finding["mac"]
+            services = ", ".join(
+                f"{item['port']}/tcp {item.get('service', 'Unknown')}"
+                for item in finding.get("observed_ports", [])
+            )
+            context = f" · {services}" if services else ""
+            print(
+                f"  unknown device: {finding['ip']} ({finding['mac']}){context}"
+            )
+            continue
+        name = finding.get("name") or finding["mac"]
+        if finding["type"] == "unexpected_port":
             print(f"  unexpected port: {name} {finding['ip']}:{finding['port']}")
+        elif finding["type"] == "ssh_key_changed":
+            print(f"  SSH host key changed: {name} {finding['ip']}:{finding['port']}")
+        elif finding["type"] == "http_identity_changed":
+            print(f"  HTTP identity changed: {name} {finding['ip']}:{finding['port']}")
+        elif finding["type"] == "tls_expiry":
+            status = finding.get("certificate_status", "expiry warning")
+            print(
+                f"  TLS certificate {status}: "
+                f"{name} {finding['ip']}:{finding['port']}"
+            )
+        else:
+            print(f"  {finding['type'].replace('_', ' ')}: {name} {finding['ip']}")
 
 
 def apply_profile_policy_name(profile, policy_config):
@@ -596,6 +685,21 @@ def apply_profile_policy_name(profile, policy_config):
     named_profile = dict(profile)
     named_profile["user_name"] = known["name"]
     return named_profile
+
+
+def sync_profile_policy_names(conn, policy_config):
+    """Persist configured user names on their matching MAC profiles."""
+    rows = [
+        (device["name"], f"mac:{mac.lower()}")
+        for mac, device in policy_config.get("known_devices", {}).items()
+        if device.get("name")
+    ]
+    conn.executemany(
+        "UPDATE device_profiles SET user_name = ? WHERE identity_key = ?",
+        rows,
+    )
+    conn.commit()
+    return len(rows)
 
 
 def build_port_alert_summary(results, diff_summary):
@@ -651,6 +755,12 @@ def main():
         print(f"{Fore.RED}Error: {exc}{Style.RESET_ALL}", file=sys.stderr)
         sys.exit(1)
     if getattr(args, "check_config", False):
+        if not getattr(args, "config", None):
+            print(
+                f"{Fore.RED}Error: --check-config requires --config.{Style.RESET_ALL}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         print("Policy config is valid.")
         sys.exit(0)
     selected_profile = getattr(args, "network_profile", "home")
@@ -728,6 +838,7 @@ def main():
 
         scan_run_id = None
         previous_ports = []
+        port_baseline_available = False
         if persistent:
             scan_run_id = create_scan_run(
                 db_conn,
@@ -738,10 +849,19 @@ def main():
                 ports=ports_to_scan,
                 resolve_hostnames=args.resolve_hostnames,
             )
+            port_baseline_available = (
+                find_previous_compatible_port_scan_id(db_conn, scan_run_id)
+                is not None
+            )
             previous_ports = load_previous_scan_ports(db_conn, scan_run_id)
         if not devices_to_scan:
             diff_summary = (
-                build_port_scan_diff(previous_ports, [], observed_macs=[])
+                build_port_scan_diff(
+                    previous_ports,
+                    [],
+                    observed_macs=[],
+                    baseline_available=port_baseline_available,
+                )
                 if persistent
                 else None
             )
@@ -791,8 +911,12 @@ def main():
         if persistent:
             save_scan_run_ports(db_conn, scan_run_id, results)
             profiles = upsert_device_profiles(db_conn, results, scan_run_id)
+            if args.config:
+                sync_profile_policy_names(db_conn, policy_config)
         policy_findings = (
-            evaluate_device_policies(results, policy_config) if args.config else []
+            evaluate_device_policies(results, policy_config)
+            if args.config
+            else None
         )
         if args.write_baseline:
             save_policy_config(args.write_baseline, build_baseline_config(results))
@@ -803,8 +927,13 @@ def main():
                 previous_ports,
                 flatten_port_results(results),
                 observed_macs=[device["mac"] for device in results],
+                baseline_available=port_baseline_available,
             )
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
+            profiles = [
+                get_device_profile_by_ip(db_conn, device["ip"])
+                for device in results
+            ]
         if args.profile:
             print_device_profile(
                 apply_profile_policy_name(
@@ -812,7 +941,7 @@ def main():
                 ),
                 policy_findings,
             )
-            exit_code = 0
+            exit_code = 2 if policy_findings else 0
         else:
             exit_code = render_port_scan_outcome(
                 args,

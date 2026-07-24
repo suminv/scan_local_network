@@ -19,6 +19,9 @@ from arp_scanner import (
     get_local_ipv4_gateway,
     get_vendor,
 )
+from internet_speed import build_internet_speed_check
+from public_ip import build_public_ip_check
+from tailscale_diagnostics import build_tailscale_exit_node_check
 
 
 DEFAULT_DNS_DOMAINS = ["example.com", "openai.com"]
@@ -617,7 +620,7 @@ def parse_arp_cache_entries(raw_output):
 
 
 def parse_ipv6_neighbor_entries(raw_output):
-    """Parse macOS `ndp -an` and Linux `ip -6 neigh` cache output."""
+    """Parse macOS `ndp -an` and Linux `ip neigh` cache output."""
     entries = []
     mac_pattern = re.compile(r"^[0-9a-fA-F]{1,2}(?::[0-9a-fA-F]{1,2}){5}$")
     linux_pattern = re.compile(
@@ -630,17 +633,24 @@ def parse_ipv6_neighbor_entries(raw_output):
 
         linux_match = linux_pattern.match(line)
         if linux_match:
+            ip_text = linux_match.group("ip").split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(ip_text)
+            except ValueError:
+                continue
             mac = linux_match.group("mac")
             rest = linux_match.group("rest")
             if not mac or "FAILED" in rest or "INCOMPLETE" in rest:
                 continue
             entries.append(
                 {
-                    "ip": linux_match.group("ip").split("%", 1)[0],
+                    "ip": ip_text,
                     "mac": normalize_mac_address(mac),
                     "interface": linux_match.group("interface"),
                     "is_router": " router " in f" {rest.lower()} ",
-                    "address_family": "ipv6",
+                    "address_family": (
+                        "ipv6" if address.version == 6 else "ipv4"
+                    ),
                 }
             )
             continue
@@ -696,8 +706,8 @@ def collect_passive_neighbor_entries():
         available_sources.append("ndp")
     except (subprocess.CalledProcessError, FileNotFoundError):
         try:
-            ipv6_output = run_command(["ip", "-6", "neigh", "show"])
-            entries.extend(parse_ipv6_neighbor_entries(ipv6_output))
+            neighbor_output = run_command(["ip", "neigh", "show"])
+            entries.extend(parse_ipv6_neighbor_entries(neighbor_output))
             available_sources.append("ip-neigh")
         except (subprocess.CalledProcessError, FileNotFoundError):
             pass
@@ -3537,6 +3547,9 @@ def compose_network_health_checks(
     *,
     network_profile=DEFAULT_NETWORK_PROFILE,
     wifi_stability_check=None,
+    internet_speed_check=None,
+    public_ip_check=None,
+    tailscale_exit_node_check=None,
 ):
     """Compose collected check bundles into the stable report order."""
     active_path_check = wifi_path["active_path"]
@@ -3583,11 +3596,18 @@ def compose_network_health_checks(
         wifi_path["wifi_environment"],
         active_path_check,
         vpn_path_check,
+        *(
+            [tailscale_exit_node_check]
+            if tailscale_exit_node_check is not None
+            else []
+        ),
         *internet_path["dns_resolution_checks"],
         *internet_path["captive_checks"],
         internet_path["captive_trust_reasoning"],
         *internet_path["https_checks"],
         internet_path["https_trust_reasoning"],
+        *([public_ip_check] if public_ip_check is not None else []),
+        *([internet_speed_check] if internet_speed_check is not None else []),
         access_state_check,
         overall_trust_check,
     ]
@@ -3604,44 +3624,126 @@ def run_network_health_checks(
     wifi_stability_seconds=0,
     wifi_stability_progress_callback=None,
     progress_callback=None,
+    speedtest_enabled=False,
+    speedtest_download_bytes=10_000_000,
+    speedtest_upload_bytes=2_000_000,
+    speedtest_timeout=20,
+    public_ip_enabled=False,
+    public_ip_timeout=10,
+    tailscale_diagnostics_enabled=False,
+    tailscale_ping_count=5,
+    selected_checks=None,
 ):
     network_profile = normalize_network_profile(network_profile)
-    progress_steps = 5
-    if progress_callback:
-        progress_callback("local network", 1, progress_steps)
-    local_segment = collect_local_segment_checks(
-        timeout=timeout,
-        network_profile=network_profile,
+    selected_checks = set(selected_checks or {"core"})
+    core_enabled = "core" in selected_checks
+    wifi_stability_enabled = (
+        "wifi_stability" in selected_checks
+        and wifi_stability_seconds
+        and wifi_stability_seconds > 0
     )
-    if progress_callback:
-        progress_callback("gateway reachability", 2, progress_steps)
-    gateway_reachability_check = build_gateway_reachability_check()
-    if progress_callback:
-        progress_callback("internet and DNS", 3, progress_steps)
-    internet_path = collect_internet_path_checks(
-        dns_domains=dns_domains,
-        timeout=timeout,
-        network_profile=network_profile,
-    )
-    if progress_callback:
-        progress_callback("Wi-Fi environment", 4, progress_steps)
-    wifi_path = collect_wifi_path_checks()
+    stages = []
+    if core_enabled:
+        stages.extend(
+            ["local network", "gateway reachability", "internet and DNS", "Wi-Fi environment"]
+        )
+    if wifi_stability_enabled:
+        stages.append("Wi-Fi stability")
+    if tailscale_diagnostics_enabled:
+        stages.append("Tailscale exit node")
+    if public_ip_enabled:
+        stages.append("public IP and location")
+    if speedtest_enabled:
+        stages.append("internet speed")
+    progress_steps = len(stages) + 1
+    current_progress_step = 1
+
+    local_segment = None
+    gateway_reachability_check = None
+    internet_path = None
+    wifi_path = None
+    if core_enabled:
+        if progress_callback:
+            progress_callback("local network", current_progress_step, progress_steps)
+        current_progress_step += 1
+        local_segment = collect_local_segment_checks(
+            timeout=timeout,
+            network_profile=network_profile,
+        )
+        if progress_callback:
+            progress_callback("gateway reachability", current_progress_step, progress_steps)
+        current_progress_step += 1
+        gateway_reachability_check = build_gateway_reachability_check()
+        if progress_callback:
+            progress_callback("internet and DNS", current_progress_step, progress_steps)
+        current_progress_step += 1
+        internet_path = collect_internet_path_checks(
+            dns_domains=dns_domains,
+            timeout=timeout,
+            network_profile=network_profile,
+        )
+        if progress_callback:
+            progress_callback("Wi-Fi environment", current_progress_step, progress_steps)
+        current_progress_step += 1
+        wifi_path = collect_wifi_path_checks()
+
     stability_check = None
-    if wifi_stability_seconds and wifi_stability_seconds > 0:
+    if wifi_stability_enabled:
+        if progress_callback:
+            progress_callback("Wi-Fi stability", current_progress_step, progress_steps)
+        current_progress_step += 1
         stability_check = run_wifi_stability_diagnostics(
             duration_seconds=wifi_stability_seconds,
             progress_callback=wifi_stability_progress_callback,
         )
-    checks = compose_network_health_checks(
-        local_segment,
-        gateway_reachability_check,
-        internet_path,
-        wifi_path,
-        network_profile=network_profile,
-        wifi_stability_check=stability_check,
-    )
+    tailscale_check = None
+    if tailscale_diagnostics_enabled:
+        if progress_callback:
+            progress_callback("Tailscale exit node", current_progress_step, progress_steps)
+        tailscale_check = build_tailscale_exit_node_check(
+            count=tailscale_ping_count,
+        )
+        current_progress_step += 1
+    public_ip_check = None
+    if public_ip_enabled:
+        if progress_callback:
+            progress_callback("public IP and location", current_progress_step, progress_steps)
+        public_ip_check = build_public_ip_check(timeout=public_ip_timeout)
+        current_progress_step += 1
+    speed_check = None
+    if speedtest_enabled:
+        if progress_callback:
+            progress_callback("internet speed", current_progress_step, progress_steps)
+        speed_check = build_internet_speed_check(
+            download_bytes=speedtest_download_bytes,
+            upload_bytes=speedtest_upload_bytes,
+            timeout=speedtest_timeout,
+        )
+    if core_enabled:
+        checks = compose_network_health_checks(
+            local_segment,
+            gateway_reachability_check,
+            internet_path,
+            wifi_path,
+            network_profile=network_profile,
+            wifi_stability_check=stability_check,
+            internet_speed_check=speed_check,
+            public_ip_check=public_ip_check,
+            tailscale_exit_node_check=tailscale_check,
+        )
+    else:
+        checks = [
+            check
+            for check in (
+                stability_check,
+                tailscale_check,
+                public_ip_check,
+                speed_check,
+            )
+            if check is not None
+        ]
     if progress_callback:
-        progress_callback("finalizing report", 5, progress_steps)
+        progress_callback("finalizing report", progress_steps, progress_steps)
     return checks
 
 

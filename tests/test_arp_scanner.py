@@ -16,6 +16,22 @@ class ArpScannerTests(unittest.TestCase):
             args = arp_scanner.parse_args()
 
         self.assertEqual(args.network_profile, "untrusted")
+        self.assertEqual(args.missing_device_scans, 3)
+
+    def test_parser_accepts_missing_device_confirmation_threshold(self):
+        with mock.patch(
+            "sys.argv",
+            ["arp_scanner.py", "--missing-device-scans", "5"],
+        ):
+            args = arp_scanner.parse_args()
+
+        self.assertEqual(args.missing_device_scans, 5)
+
+        with mock.patch(
+            "sys.argv",
+            ["arp_scanner.py", "--missing-device-scans", "0"],
+        ), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            arp_scanner.parse_args()
 
     def test_process_scan_results_can_run_without_database(self):
         lookup = mock.Mock()
@@ -234,6 +250,9 @@ class ArpScannerTests(unittest.TestCase):
             self.assertIn(("scan_runs",), tables)
             self.assertIn(("scan_run_devices",), tables)
             self.assertIn(("scan_run_ports",), tables)
+            self.assertIn(("device_profiles",), tables)
+            self.assertIn(("device_profile_ips",), tables)
+            self.assertIn(("device_events",), tables)
             verify_conn = sqlite3.connect(path)
             scan_run_device_columns = verify_conn.execute(
                 "PRAGMA table_info(scan_run_devices)"
@@ -742,6 +761,24 @@ class ArpScannerTests(unittest.TestCase):
             ],
         )
 
+    def test_build_port_scan_diff_marks_new_coverage_as_first_observation(self):
+        observation = {
+            "mac": "aa:aa:aa:aa:aa:aa",
+            "ip": "192.168.2.10",
+            "port": 22,
+            "service": "OpenSSH",
+        }
+
+        diff = arp_scanner.build_port_scan_diff(
+            [],
+            [observation],
+            baseline_available=False,
+        )
+
+        self.assertEqual(diff["new_ports"], [])
+        self.assertEqual(diff["first_observed_ports"], [observation])
+        self.assertEqual(diff["closed_ports"], [])
+
     def test_build_port_scan_diff_detects_ssh_and_http_metadata_changes(self):
         diff = arp_scanner.build_port_scan_diff(
             [{
@@ -1096,6 +1133,182 @@ class ArpScannerTests(unittest.TestCase):
                 conn.close()
             self.assertEqual(profiles[0]["identity_key"], "ip:192.168.2.66")
             self.assertEqual(profiles[0]["identity_type"], "ip")
+        finally:
+            os.remove(path)
+
+    def test_upsert_device_profiles_promotes_ip_profile_without_losing_history(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                arp_scanner.upsert_device_profiles(
+                    conn,
+                    [
+                        {
+                            "mac": "00:00:00:00:00:00",
+                            "ip": "192.168.2.66",
+                            "hostname": "temporary-host",
+                            "open_ports": [
+                                {
+                                    "port": 22,
+                                    "service": "OpenSSH",
+                                    "ssh": {"fingerprint": "SHA256:temporary"},
+                                }
+                            ],
+                        }
+                    ],
+                )
+                conn.execute(
+                    """
+                    UPDATE device_profiles
+                    SET user_name = 'Storage server'
+                    WHERE identity_key = 'ip:192.168.2.66'
+                    """
+                )
+                conn.commit()
+
+                profiles = arp_scanner.upsert_device_profiles(
+                    conn,
+                    [
+                        {
+                            "mac": "aa:bb:cc:dd:ee:ff",
+                            "ip": "192.168.2.66",
+                            "vendor": "Example Vendor",
+                        }
+                    ],
+                )
+                stored_keys = conn.execute(
+                    "SELECT identity_key FROM device_profiles"
+                ).fetchall()
+                history_keys = conn.execute(
+                    "SELECT identity_key FROM device_profile_ips"
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(stored_keys, [("mac:aa:bb:cc:dd:ee:ff",)])
+            self.assertEqual(history_keys, [("mac:aa:bb:cc:dd:ee:ff",)])
+            self.assertEqual(profiles[0]["identity_type"], "mac")
+            self.assertEqual(profiles[0]["mac"], "aa:bb:cc:dd:ee:ff")
+            self.assertEqual(profiles[0]["user_name"], "Storage server")
+            self.assertEqual(profiles[0]["hostname"], "temporary-host")
+            self.assertEqual(profiles[0]["ip_history"], ["192.168.2.66"])
+            self.assertEqual(
+                profiles[0]["services"][0]["ssh"]["fingerprint"],
+                "SHA256:temporary",
+            )
+            self.assertEqual(profiles[0]["device_hint"], "Linux-like")
+            self.assertTrue(profiles[0]["first_seen"])
+            self.assertTrue(profiles[0]["last_seen"])
+        finally:
+            os.remove(path)
+
+    def test_device_event_history_includes_scope_source_and_before_after(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                run_id = arp_scanner.create_scan_run(
+                    conn,
+                    "en0",
+                    "192.168.2.0/24",
+                    scan_type=arp_scanner.SCAN_TYPE_PORT,
+                    target="192.168.2.10",
+                    ports=[22],
+                )
+                arp_scanner.upsert_device_profiles(
+                    conn,
+                    [
+                        {
+                            "mac": "aa:aa:aa:aa:aa:aa",
+                            "ip": "192.168.2.10",
+                        }
+                    ],
+                    run_id,
+                )
+                arp_scanner.save_device_events(
+                    conn,
+                    run_id,
+                    {
+                        "ssh_changes": [
+                            {
+                                "mac": "aa:aa:aa:aa:aa:aa",
+                                "ip": "192.168.2.10",
+                                "port": 22,
+                                "old_ssh": {"fingerprint": "SHA256:old"},
+                                "new_ssh": {"fingerprint": "SHA256:new"},
+                            }
+                        ]
+                    },
+                    arp_scanner.SCAN_TYPE_PORT,
+                )
+                profile = arp_scanner.get_device_profile_by_ip(
+                    conn,
+                    "192.168.2.10",
+                )
+                conn.close()
+
+            event = profile["events"][0]
+            self.assertEqual(event["source_scan_run_id"], run_id)
+            self.assertEqual(event["scan_type"], "port")
+            self.assertEqual(
+                event["network_scope"],
+                {
+                    "interface": "en0",
+                    "cidr": "192.168.2.0/24",
+                    "target": "192.168.2.10",
+                },
+            )
+            self.assertEqual(event["event_type"], "ssh_key_changed")
+            self.assertEqual(
+                event["before"],
+                {"fingerprint": "SHA256:old"},
+            )
+            self.assertEqual(
+                event["after"],
+                {"fingerprint": "SHA256:new"},
+            )
+            self.assertTrue(event["timestamp"])
+        finally:
+            os.remove(path)
+
+    def test_first_observed_port_is_not_recorded_as_confirmed_opening(self):
+        fd, path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        try:
+            with mock.patch.object(arp_scanner, "DB_FILE", path):
+                conn = arp_scanner.init_db()
+                run_id = arp_scanner.create_scan_run(
+                    conn,
+                    "en0",
+                    "192.168.2.0/24",
+                    scan_type=arp_scanner.SCAN_TYPE_PORT,
+                    ports=[22],
+                )
+                observation = {
+                    "mac": "aa:aa:aa:aa:aa:aa",
+                    "ip": "192.168.2.10",
+                    "port": 22,
+                    "service": "OpenSSH",
+                }
+                diff = arp_scanner.build_port_scan_diff(
+                    [],
+                    [observation],
+                    baseline_available=False,
+                )
+                arp_scanner.save_device_events(
+                    conn,
+                    run_id,
+                    diff,
+                    arp_scanner.SCAN_TYPE_PORT,
+                )
+                event_types = conn.execute(
+                    "SELECT event_type FROM device_events"
+                ).fetchall()
+                conn.close()
+
+            self.assertEqual(event_types, [("port_first_observed",)])
         finally:
             os.remove(path)
 

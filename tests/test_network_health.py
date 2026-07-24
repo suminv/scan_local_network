@@ -166,6 +166,189 @@ class NetworkHealthTests(unittest.TestCase):
         self.assertEqual(args.webhook_url, "https://example.test/webhook")
         self.assertEqual(args.webhook_timeout, 9.0)
 
+    def test_build_parser_supports_optional_speedtest(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(
+            [
+                "--speedtest",
+                "--speedtest-download-mb",
+                "20",
+                "--speedtest-upload-mb",
+                "4",
+                "--speedtest-timeout",
+                "30",
+            ]
+        )
+
+        self.assertTrue(args.speedtest)
+        self.assertEqual(args.speedtest_download_mb, 20)
+        self.assertEqual(args.speedtest_upload_mb, 4)
+        self.assertEqual(args.speedtest_timeout, 30)
+
+    def test_build_parser_supports_optional_public_ip_lookup(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(["--public-ip", "--public-ip-timeout", "12"])
+
+        self.assertTrue(args.public_ip)
+        self.assertEqual(args.public_ip_timeout, 12)
+
+    def test_build_parser_supports_tailscale_diagnostics(self):
+        parser = network_health_check.build_parser()
+
+        args = parser.parse_args(
+            ["--tailscale-diagnostics", "--tailscale-ping-count", "7"]
+        )
+
+        self.assertTrue(args.tailscale_diagnostics)
+        self.assertEqual(args.tailscale_ping_count, 7)
+
+    def test_tailscale_diagnostics_is_standalone_without_additive_checks(self):
+        args = mock.Mock(
+            tailscale_diagnostics=True,
+            public_ip=False,
+            speedtest=False,
+            wifi_stability_seconds=0,
+        )
+
+        self.assertTrue(network_health_check.is_tailscale_only_mode(args))
+        args.public_ip = True
+        self.assertFalse(network_health_check.is_tailscale_only_mode(args))
+
+    def test_no_selectors_choose_complete_suite(self):
+        args = network_health_check.build_parser().parse_args([])
+
+        selection = network_health_check.select_health_checks(args)
+
+        self.assertEqual(selection["mode"], "complete")
+        self.assertEqual(
+            selection["checks"],
+            ("core", "tailscale_exit_node", "public_ip", "internet_speed"),
+        )
+
+    def test_each_positive_selector_chooses_only_its_check(self):
+        parser = network_health_check.build_parser()
+        cases = [
+            (["--speedtest"], ("internet_speed",)),
+            (["--public-ip"], ("public_ip",)),
+            (["--tailscale-diagnostics"], ("tailscale_exit_node",)),
+            (["--wifi-stability-seconds", "5"], ("wifi_stability",)),
+        ]
+
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                selection = network_health_check.select_health_checks(
+                    parser.parse_args(argv)
+                )
+                self.assertEqual(selection, {"mode": "selected", "checks": expected})
+
+    def test_multiple_selectors_choose_their_stable_union(self):
+        args = network_health_check.build_parser().parse_args(
+            ["--speedtest", "--tailscale-diagnostics", "--public-ip"]
+        )
+
+        selection = network_health_check.select_health_checks(args)
+
+        self.assertEqual(
+            selection,
+            {
+                "mode": "selected",
+                "checks": (
+                    "tailscale_exit_node",
+                    "public_ip",
+                    "internet_speed",
+                ),
+            },
+        )
+
+    def test_modifiers_do_not_narrow_complete_selection(self):
+        args = network_health_check.build_parser().parse_args(
+            [
+                "--output",
+                "focus",
+                "--timeout",
+                "2",
+                "--network-profile",
+                "home",
+                "--json-out",
+                "health.json",
+                "--verbose",
+            ]
+        )
+
+        selection = network_health_check.select_health_checks(args)
+
+        self.assertEqual(selection["mode"], "complete")
+        self.assertIn("core", selection["checks"])
+        self.assertIn("internet_speed", selection["checks"])
+
+    def test_no_speedtest_excludes_only_speedtest_from_complete_suite(self):
+        args = network_health_check.build_parser().parse_args(["--no-speedtest"])
+
+        selection = network_health_check.select_health_checks(args)
+
+        self.assertEqual(
+            selection,
+            {
+                "mode": "complete",
+                "checks": ("core", "tailscale_exit_node", "public_ip"),
+            },
+        )
+
+    def test_wifi_duration_with_no_speedtest_tunes_complete_suite(self):
+        args = network_health_check.build_parser().parse_args(
+            ["--no-speedtest", "--wifi-stability-seconds", "5"]
+        )
+
+        selection = network_health_check.select_health_checks(args)
+
+        self.assertEqual(selection["mode"], "complete")
+        self.assertEqual(
+            selection["checks"],
+            ("core", "tailscale_exit_node", "public_ip", "wifi_stability"),
+        )
+
+    def test_tailscale_only_collection_skips_target_resolution(self):
+        args = mock.Mock(
+            iface=None,
+            cidr=None,
+            network_profile="untrusted",
+            tailscale_diagnostics=True,
+            tailscale_ping_count=3,
+            public_ip=False,
+            speedtest=False,
+            wifi_stability_seconds=0,
+        )
+        tailscale_check = {
+            "name": "tailscale_exit_node",
+            "status": "notice",
+            "summary": "DERP path",
+            "details": {"path": "derp"},
+        }
+
+        with mock.patch(
+            "network_health_check.resolve_scan_target"
+        ) as resolve_target:
+            with mock.patch(
+                "network_health_check.run_network_health_checks",
+                return_value=[tailscale_check],
+            ) as run_checks:
+                scan_context, checks, summary, payload = (
+                    network_health_check.run_health_check_collection(args)
+                )
+
+        resolve_target.assert_not_called()
+        self.assertEqual(
+            run_checks.call_args.kwargs["selected_checks"],
+            ("tailscale_exit_node",),
+        )
+        self.assertEqual(checks, [tailscale_check])
+        self.assertEqual(summary["notice_checks"], 1)
+        self.assertEqual(scan_context["mode"], "selected")
+        self.assertEqual(scan_context["selected_checks"], ["tailscale_exit_node"])
+        self.assertEqual(payload["health_checks"], [tailscale_check])
+
     def test_get_corewlan_module_returns_import_error_when_unavailable(self):
         original_import = __import__
 
@@ -506,6 +689,59 @@ fe80::44 dev eth0 FAILED
         self.assertEqual(linux_entries[0]["ip"], "fe80::33")
         self.assertEqual(linux_entries[0]["interface"], "eth0")
         self.assertEqual(len(linux_entries), 1)
+
+    def test_parse_linux_neighbor_entries_includes_ipv4_and_ipv6(self):
+        entries = network_health.parse_ipv6_neighbor_entries(
+            """
+192.168.2.22 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE
+fe80::22 dev eth0 lladdr aa:bb:cc:dd:ee:ff router REACHABLE
+192.168.2.23 dev eth0 INCOMPLETE
+            """
+        )
+
+        self.assertEqual(
+            entries,
+            [
+                {
+                    "ip": "192.168.2.22",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "interface": "eth0",
+                    "is_router": False,
+                    "address_family": "ipv4",
+                },
+                {
+                    "ip": "fe80::22",
+                    "mac": "aa:bb:cc:dd:ee:ff",
+                    "interface": "eth0",
+                    "is_router": True,
+                    "address_family": "ipv6",
+                },
+            ],
+        )
+
+    def test_passive_neighbor_collection_uses_combined_linux_cache(self):
+        def command_output(command):
+            if command[0] in {"arp", "ndp"}:
+                raise FileNotFoundError(command[0])
+            if command == ["ip", "neigh", "show"]:
+                return (
+                    "192.168.2.22 dev eth0 lladdr aa:bb:cc:dd:ee:ff STALE\n"
+                    "fe80::22 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE\n"
+                )
+            self.fail(f"Unexpected command: {command}")
+
+        with mock.patch(
+            "network_health.run_command",
+            side_effect=command_output,
+        ):
+            observation = network_health.collect_passive_neighbor_entries()
+
+        self.assertTrue(observation["available"])
+        self.assertEqual(observation["sources"], ["ip-neigh"])
+        self.assertEqual(
+            [entry["address_family"] for entry in observation["entries"]],
+            ["ipv4", "ipv6"],
+        )
 
     def test_build_local_peer_visibility_check_marks_visible_private_peers_as_notice(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
@@ -2136,6 +2372,55 @@ Wi-Fi:
         self.assertTrue(any(check["name"] == "https_trust_reasoning" for check in checks))
         self.assertTrue(any(check["name"] == "overall_trust_explanation" for check in checks))
 
+    def test_selected_only_checks_skip_unrelated_core_collectors(self):
+        public_check = {
+            "name": "public_ip",
+            "status": "ok",
+            "summary": "public IP",
+            "details": {},
+        }
+        speed_check = {
+            "name": "internet_speed",
+            "status": "ok",
+            "summary": "speed",
+            "details": {},
+        }
+        progress = mock.Mock()
+        with mock.patch("network_health.collect_local_segment_checks") as local:
+            with mock.patch("network_health.build_gateway_reachability_check") as gateway:
+                with mock.patch("network_health.collect_internet_path_checks") as internet:
+                    with mock.patch("network_health.collect_wifi_path_checks") as wifi:
+                        with mock.patch(
+                            "network_health.build_public_ip_check",
+                            return_value=public_check,
+                        ) as public:
+                            with mock.patch(
+                                "network_health.build_internet_speed_check",
+                                return_value=speed_check,
+                            ) as speed:
+                                checks = network_health.run_network_health_checks(
+                                    public_ip_enabled=True,
+                                    speedtest_enabled=True,
+                                    selected_checks=("public_ip", "internet_speed"),
+                                    progress_callback=progress,
+                                )
+
+        local.assert_not_called()
+        gateway.assert_not_called()
+        internet.assert_not_called()
+        wifi.assert_not_called()
+        public.assert_called_once()
+        speed.assert_called_once()
+        self.assertEqual(checks, [public_check, speed_check])
+        self.assertEqual(
+            [call.args for call in progress.call_args_list],
+            [
+                ("public IP and location", 1, 3),
+                ("internet speed", 2, 3),
+                ("finalizing report", 3, 3),
+            ],
+        )
+
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
             with mock.patch("network_health.socket.gethostbyaddr", side_effect=OSError):
@@ -2801,6 +3086,9 @@ Wi-Fi:
             "active_path": check("active_path"),
         }
         stability = check("wifi_stability")
+        speed = check("internet_speed")
+        public_ip_check = check("public_ip")
+        tailscale_check = check("tailscale_exit_node")
         overall = check("overall_trust_explanation")
 
         with mock.patch(
@@ -2814,6 +3102,9 @@ Wi-Fi:
                 wifi_path,
                 network_profile="travel",
                 wifi_stability_check=stability,
+                internet_speed_check=speed,
+                public_ip_check=public_ip_check,
+                tailscale_exit_node_check=tailscale_check,
             )
 
         self.assertEqual(
@@ -2830,11 +3121,14 @@ Wi-Fi:
                 "wifi_environment",
                 "active_path",
                 "vpn_path",
+                "tailscale_exit_node",
                 "dns_example.com",
                 "captive_gstatic",
                 "captive_trust_reasoning",
                 "https_example",
                 "https_trust_reasoning",
+                "public_ip",
+                "internet_speed",
                 "access_state",
                 "overall_trust_explanation",
                 "wifi_stability",
@@ -3001,6 +3295,23 @@ Wi-Fi:
         self.assertEqual(summary["alert_checks"], 0)
         self.assertEqual(payload["scan_context"]["cidr"], "192.168.2.0/24")
         self.assertEqual(run_checks.call_args.kwargs["network_profile"], "untrusted")
+        self.assertTrue(run_checks.call_args.kwargs["speedtest_enabled"])
+        self.assertTrue(run_checks.call_args.kwargs["public_ip_enabled"])
+        self.assertTrue(run_checks.call_args.kwargs["tailscale_diagnostics_enabled"])
+        self.assertEqual(scan_context["mode"], "complete")
+        self.assertEqual(
+            scan_context["selected_checks"],
+            [
+                "network",
+                "gateway",
+                "dns",
+                "https",
+                "wifi",
+                "public_ip",
+                "tailscale_exit_node",
+                "internet_speed",
+            ],
+        )
         self.assertGreaterEqual(scan_context["duration_seconds"], 0)
         self.assertEqual(payload["scan_context"]["duration_seconds"], scan_context["duration_seconds"])
 

@@ -156,6 +156,8 @@ Focus:
 
 Completed:
 
+- Passive peer visibility now reads the combined IPv4/IPv6 `ip neigh` cache on Linux/Synology when legacy `arp`/macOS `ndp` tools are unavailable, without generating discovery traffic.
+
 - `scan-arp` and `scan-ports` now separate home inventory from untrusted-network observations: persistence is explicit with `--network-profile home`, while the safe `untrusted` default is ephemeral and does not contaminate device history.
 
 - All three CLI tools now use one shared progress renderer with consistent bars, percentages, counters, terminal-safe in-place updates, and clean redirected output.
