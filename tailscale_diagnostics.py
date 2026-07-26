@@ -187,6 +187,19 @@ def analyze_tailscale_exit_node(status, ping=None):
                 "reason": status.get("reason"),
             },
         }
+    backend_state = status.get("backend_state")
+    if backend_state != "Running":
+        state_text = backend_state or "unknown"
+        return {
+            "name": "tailscale_exit_node",
+            "status": "notice",
+            "summary": f"Tailscale is not running (backend state: {state_text})",
+            "details": {
+                "available": True,
+                "backend_state": backend_state,
+                "exit_node_active": False,
+            },
+        }
     exit_node = status.get("exit_node")
     if not exit_node:
         return {
@@ -195,7 +208,7 @@ def analyze_tailscale_exit_node(status, ping=None):
             "summary": "Tailscale is running without an active exit node",
             "details": {
                 "available": True,
-                "backend_state": status.get("backend_state"),
+                "backend_state": backend_state,
                 "exit_node_active": False,
             },
         }

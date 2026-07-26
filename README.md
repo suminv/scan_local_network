@@ -48,20 +48,22 @@ Current milestone: `v1.0.0`
     pip install -r requirements.txt
     ```
 
-5.  **Optional macOS Wi-Fi backend for nearby SSID/BSSID discovery:**
+4.  **Optional macOS Wi-Fi backend for nearby SSID/BSSID discovery:**
     ```bash
     pip install -r requirements-macos.txt
     ```
     This enables the `PyObjC/CoreWLAN` backend used by `network-health-check` on modern macOS.
 
-4.  **Run the test suite:**
+5.  **Run the test suite:**
     ```bash
     python -m unittest discover -s tests -v
     ```
 
 ## 🚀 Usage
 
-Helper scripts are provided for convenience. They ensure that the tools are run with the correct Python interpreter from the virtual environment and with the necessary `sudo` privileges.
+Helper scripts are provided for convenience. They use the virtual-environment
+interpreter and apply `sudo` only to the ARP and port scanners that need raw
+network access.
 
 ### Recommended Direct Invocation
 
@@ -912,7 +914,8 @@ scan_local_network/
 
 ## ⚠️ Notes
 
--   **Root Privileges**: These tools will not work without `sudo`.
+-   **Root Privileges**: `scan-arp` and `scan-ports` require `sudo`;
+    `scan-health` does not.
 -   **Network Interface**: If you encounter issues, ensure the script is detecting the correct network interface. The automatic detection relies on the default gateway setting.
 -   **Synology**: Explicit interface selection such as `--iface ovs_eth0` is the most reliable mode on Synology NAS.
 

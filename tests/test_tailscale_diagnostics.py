@@ -140,6 +140,22 @@ class TailscaleDiagnosticsTests(unittest.TestCase):
         self.assertEqual(check["status"], "ok")
         self.assertFalse(check["details"]["exit_node_active"])
 
+    def test_stopped_backend_is_notice(self):
+        check = tailscale_diagnostics.analyze_tailscale_exit_node(
+            {
+                "available": True,
+                "backend_state": "Stopped",
+                "exit_node": None,
+            }
+        )
+
+        self.assertEqual(check["status"], "notice")
+        self.assertEqual(
+            check["summary"],
+            "Tailscale is not running (backend state: Stopped)",
+        )
+        self.assertFalse(check["details"]["exit_node_active"])
+
 
 if __name__ == "__main__":
     unittest.main()
