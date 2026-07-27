@@ -5,12 +5,63 @@ import unittest
 from unittest import mock
 import json
 from contextlib import redirect_stderr, redirect_stdout
-from io import StringIO
+from io import BytesIO, StringIO
 
 import arp_scanner
 
 
 class ArpScannerTests(unittest.TestCase):
+    def test_download_vendor_database_writes_mac_lookup_cache_atomically(self):
+        class VendorResponse(BytesIO):
+            status = 200
+
+            def getcode(self):
+                return self.status
+
+        payload = (
+            b"001122     (base 16)\t\tExample Vendor\n"
+            b"not a vendor line\n"
+            b"AABBCC     (base 16)\t\tAnother Vendor\n"
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = os.path.join(temp_dir, "mac-vendors.txt")
+            with mock.patch(
+                "arp_scanner.urlopen",
+                return_value=VendorResponse(payload),
+            ), mock.patch("arp_scanner.MIN_VENDOR_DB_RECORDS", 2):
+                count = arp_scanner.download_vendor_database(cache_path)
+
+            self.assertEqual(count, 2)
+            with open(cache_path, "rb") as cache_file:
+                self.assertEqual(
+                    cache_file.read(),
+                    b"001122:Example Vendor\nAABBCC:Another Vendor\n",
+                )
+
+    def test_download_vendor_database_preserves_cache_if_response_is_incomplete(self):
+        class VendorResponse(BytesIO):
+            status = 200
+
+            def getcode(self):
+                return self.status
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = os.path.join(temp_dir, "mac-vendors.txt")
+            with open(cache_path, "wb") as cache_file:
+                cache_file.write(b"ABCDEF:Existing Vendor\n")
+
+            with mock.patch(
+                "arp_scanner.urlopen",
+                return_value=VendorResponse(
+                    b"001122     (base 16)\t\tOnly One Vendor\n"
+                ),
+            ), mock.patch("arp_scanner.MIN_VENDOR_DB_RECORDS", 2):
+                with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                    arp_scanner.download_vendor_database(cache_path)
+
+            with open(cache_path, "rb") as cache_file:
+                self.assertEqual(cache_file.read(), b"ABCDEF:Existing Vendor\n")
+
     def test_parser_defaults_to_ephemeral_untrusted_profile(self):
         with mock.patch("sys.argv", ["arp_scanner.py"]):
             args = arp_scanner.parse_args()

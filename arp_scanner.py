@@ -6,8 +6,10 @@ import json
 import os
 import sqlite3
 import sys
+import tempfile
 import time
 from datetime import datetime
+from urllib.request import Request, urlopen
 
 import netifaces
 from mac_vendor_lookup import MacLookup
@@ -43,6 +45,9 @@ SCAN_TYPE_ARP = "arp"
 SCAN_TYPE_PORT = "port"
 MISSING_DEVICE_CONFIRMATION_SCANS = 3
 VENDOR_DB_CACHE_DAYS = 7
+VENDOR_DB_URL = "https://standards-oui.ieee.org/oui/oui.txt"
+VENDOR_DB_USER_AGENT = "scan-local-network/1.0"
+MIN_VENDOR_DB_RECORDS = 1000
 TUNNEL_INTERFACE_PREFIXES = ("utun", "tun", "tap", "wg", "ppp", "ipsec")
 
 
@@ -201,6 +206,81 @@ class LocalMacVendorLookup:
                 return vendor
         raise KeyError(mac)
 
+
+def download_vendor_database(cache_path):
+    """Download and atomically replace the cache used by mac-vendor-lookup."""
+    if not cache_path:
+        raise RuntimeError("MAC vendor cache path is unavailable")
+
+    cache_dir = os.path.dirname(cache_path)
+    os.makedirs(cache_dir, exist_ok=True)
+    request = Request(
+        VENDOR_DB_URL,
+        headers={
+            "Accept": "text/plain",
+            "User-Agent": VENDOR_DB_USER_AGENT,
+        },
+    )
+    temporary_path = None
+    record_count = 0
+    try:
+        with urlopen(request, timeout=30) as response:
+            status = getattr(response, "status", response.getcode())
+            if status != 200:
+                raise RuntimeError(f"IEEE vendor database returned HTTP {status}")
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=cache_dir,
+                prefix=".mac-vendors-",
+                delete=False,
+            ) as temporary_file:
+                temporary_path = temporary_file.name
+                for raw_line in response:
+                    if b"(base 16)" not in raw_line:
+                        continue
+                    prefix, vendor = (
+                        value.strip()
+                        for value in raw_line.split(b"(base 16)", 1)
+                    )
+                    if len(prefix) != 6 or not vendor:
+                        continue
+                    try:
+                        int(prefix, 16)
+                    except ValueError:
+                        continue
+                    temporary_file.write(prefix.upper() + b":" + vendor + b"\n")
+                    record_count += 1
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+
+        if record_count < MIN_VENDOR_DB_RECORDS:
+            raise RuntimeError(
+                "Downloaded IEEE vendor database is incomplete "
+                f"({record_count} records)"
+            )
+        os.replace(temporary_path, cache_path)
+        temporary_path = None
+        return record_count
+    finally:
+        if temporary_path:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+
+
+def refresh_vendor_database(mac_lookup, update_marker_file):
+    """Refresh and load a validated vendor cache."""
+    record_count = download_vendor_database(mac_lookup.cache_path)
+    mac_lookup.load_vendors()
+    prefixes = getattr(mac_lookup.async_lookup, "prefixes", {})
+    if not prefixes:
+        raise RuntimeError("Downloaded vendor database could not be loaded")
+    with open(update_marker_file, "w", encoding="utf-8") as marker:
+        marker.write(datetime.now().isoformat())
+    return record_count
+
+
 def update_vendor_database():
     """Updates the MAC address vendor database if necessary and returns a MacLookup instance."""
     print_section_heading("Vendor Database", leading_blank=True)
@@ -232,10 +312,8 @@ def update_vendor_database():
             need_update = True
         if need_update:
             print("Updating vendor database... This may take a few moments...")
-            mac_lookup.update_vendors()
-            with open(update_marker_file, "w", encoding="utf-8") as f:
-                f.write(datetime.now().isoformat())
-            print("Vendor database updated successfully!")
+            record_count = refresh_vendor_database(mac_lookup, update_marker_file)
+            print(f"Vendor database updated successfully ({record_count} records)!")
         prefixes_loaded = False
         try:
             mac_lookup.load_vendors()
@@ -246,12 +324,9 @@ def update_vendor_database():
             if not need_update:
                 print("Vendor database appears empty; attempting a refresh...")
                 try:
-                    mac_lookup.update_vendors()
-                    mac_lookup.load_vendors()
-                    prefixes_loaded = bool(getattr(mac_lookup.async_lookup, "prefixes", {}))
-                    with open(update_marker_file, "w", encoding="utf-8") as f:
-                        f.write(datetime.now().isoformat())
-                    print("Vendor database refreshed successfully!")
+                    record_count = refresh_vendor_database(mac_lookup, update_marker_file)
+                    prefixes_loaded = True
+                    print(f"Vendor database refreshed successfully ({record_count} records)!")
                 except Exception as refresh_error:
                     print(f"Warning: Failed to refresh vendor database: {refresh_error}", file=sys.stderr)
                     prefixes_loaded = False
