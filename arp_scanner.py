@@ -1992,9 +1992,34 @@ def parse_positive_int(value):
     return number
 
 
+def parse_network_profile(value):
+    """Parse a profile name and explain that help-text braces are not literal."""
+    if value in NETWORK_PROFILES:
+        return value
+
+    without_braces = value.strip("{}")
+    if without_braces in NETWORK_PROFILES and without_braces != value:
+        raise argparse.ArgumentTypeError(
+            f"do not include braces: use '{without_braces}' "
+            f"(example: --network-profile {without_braces})"
+        )
+    raise argparse.ArgumentTypeError(
+        "must be 'home' or 'untrusted' (without braces)"
+    )
+
+
 def parse_args():
     """Parse CLI arguments for the ARP scanner."""
-    parser = argparse.ArgumentParser(description="ARP Network Scanner")
+    parser = argparse.ArgumentParser(
+        prog="./scan-arp",
+        description="Discover devices on the local network using ARP.",
+        epilog=(
+            "Examples:\n"
+            "  ./scan-arp --network-profile home\n"
+            "  ./scan-arp --network-profile untrusted"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--iface",
         type=str,
@@ -2012,11 +2037,14 @@ def parse_args():
     )
     parser.add_argument(
         "--network-profile",
+        type=parse_network_profile,
         choices=NETWORK_PROFILES,
+        metavar="PROFILE",
         default=DEFAULT_NETWORK_PROFILE,
         help=(
-            "Storage policy: 'home' records device history in SQLite; "
-            "'untrusted' keeps the scan ephemeral. Defaults to untrusted."
+            "Choose home or untrusted (without braces): home records device "
+            "history in SQLite; untrusted keeps the scan ephemeral. "
+            "Default: untrusted."
         ),
     )
     parser.add_argument(

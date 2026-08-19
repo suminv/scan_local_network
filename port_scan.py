@@ -335,7 +335,14 @@ def run_port_scan(
 def build_parser():
     """Build the CLI parser for the port scanner."""
     parser = argparse.ArgumentParser(
-        description="Network Port Scanner with Service Detection"
+        prog="./scan-ports",
+        description="Scan local devices for open ports and detected services.",
+        epilog=(
+            "Examples:\n"
+            "  ./scan-ports --network-profile home\n"
+            "  ./scan-ports --network-profile untrusted"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "-t", "--target", type=str, help="A specific IP address to scan."
@@ -368,11 +375,14 @@ def build_parser():
     )
     parser.add_argument(
         "--network-profile",
+        type=arp_scanner.parse_network_profile,
         choices=NETWORK_PROFILES,
+        metavar="PROFILE",
         default=DEFAULT_NETWORK_PROFILE,
         help=(
-            "Storage policy: 'home' records scan history and device profiles; "
-            "'untrusted' keeps the scan ephemeral. Defaults to untrusted."
+            "Choose home or untrusted (without braces): home records scan "
+            "history and device profiles; untrusted keeps the scan ephemeral. "
+            "Default: untrusted."
         ),
     )
     parser.add_argument(

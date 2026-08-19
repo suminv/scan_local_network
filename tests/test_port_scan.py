@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import sqlite3
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from io import StringIO
 from unittest import mock
@@ -28,6 +28,16 @@ class PortScanTests(unittest.TestCase):
         )
 
         self.assertEqual(args.network_profile, "home")
+
+    def test_parser_explains_that_network_profile_braces_are_not_literal(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            port_scan.build_parser().parse_args(
+                ["--network-profile", "{untrusted}"]
+            )
+
+        self.assertIn("do not include braces: use 'untrusted'", stderr.getvalue())
+        self.assertIn("--network-profile PROFILE", stderr.getvalue())
 
     def test_check_config_validates_and_exits_without_root_or_scanning(self):
         with tempfile.NamedTemporaryFile(

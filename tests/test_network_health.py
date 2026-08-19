@@ -156,6 +156,16 @@ class NetworkHealthTests(unittest.TestCase):
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["--network-profile", "typo"])
 
+    def test_parser_explains_that_network_profile_braces_are_not_literal(self):
+        stderr = StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            network_health_check.build_parser().parse_args(
+                ["--network-profile", "{home}"]
+            )
+
+        self.assertIn("do not include braces: use 'home'", stderr.getvalue())
+        self.assertIn("--network-profile PROFILE", stderr.getvalue())
+
     def test_build_parser_supports_webhook_flags(self):
         parser = network_health_check.build_parser()
 

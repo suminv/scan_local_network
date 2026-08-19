@@ -59,8 +59,18 @@ DERIVED_FINDING_NAMES = {"access_state", "overall_trust_explanation", "client_is
 
 def parse_network_profile(value):
     """Accept two supported profiles plus deprecated aliases with strict typo handling."""
-    if value not in NETWORK_PROFILES and value not in NETWORK_PROFILE_ALIASES:
-        raise argparse.ArgumentTypeError("network profile must be home or untrusted")
+    accepted_profiles = (*NETWORK_PROFILES, *NETWORK_PROFILE_ALIASES)
+    if value not in accepted_profiles:
+        without_braces = value.strip("{}")
+        if without_braces in accepted_profiles and without_braces != value:
+            profile = normalize_network_profile(without_braces)
+            raise argparse.ArgumentTypeError(
+                f"do not include braces: use '{profile}' "
+                f"(example: --network-profile {profile})"
+            )
+        raise argparse.ArgumentTypeError(
+            "must be 'home' or 'untrusted' (without braces)"
+        )
     return normalize_network_profile(value)
 
 
@@ -1390,7 +1400,14 @@ def build_health_markdown_report(scan_context, checks, summary):
 def build_parser():
     """Build the CLI parser for network health checks."""
     parser = argparse.ArgumentParser(
-        description="Safe network health checks for trusted home and untrusted networks."
+        prog="./scan-health",
+        description="Run safe health checks on trusted home or untrusted networks.",
+        epilog=(
+            "Examples:\n"
+            "  ./scan-health --network-profile home\n"
+            "  ./scan-health --network-profile untrusted"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--iface",
@@ -1407,7 +1424,11 @@ def build_parser():
         default=DEFAULT_NETWORK_PROFILE,
         type=parse_network_profile,
         choices=NETWORK_PROFILES,
-        help="Interpret the network as home or untrusted. Defaults to untrusted.",
+        metavar="PROFILE",
+        help=(
+            "Choose home or untrusted (without braces) to set how results are "
+            "interpreted. Default: untrusted."
+        ),
     )
     parser.add_argument(
         "--json-out",

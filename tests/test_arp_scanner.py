@@ -84,6 +84,17 @@ class ArpScannerTests(unittest.TestCase):
         ), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             arp_scanner.parse_args()
 
+    def test_parser_explains_that_network_profile_braces_are_not_literal(self):
+        stderr = StringIO()
+        with mock.patch(
+            "sys.argv",
+            ["arp_scanner.py", "--network-profile", "{home}"],
+        ), redirect_stderr(stderr), self.assertRaises(SystemExit):
+            arp_scanner.parse_args()
+
+        self.assertIn("do not include braces: use 'home'", stderr.getvalue())
+        self.assertIn("--network-profile PROFILE", stderr.getvalue())
+
     def test_process_scan_results_can_run_without_database(self):
         lookup = mock.Mock()
         with mock.patch("arp_scanner.get_vendor", return_value="Example Vendor"):
