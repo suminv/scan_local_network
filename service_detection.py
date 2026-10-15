@@ -7,6 +7,9 @@ import ssl
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+
 BANNER_TIMEOUT_SECONDS = 2
 CERT_EXPIRY_WARNING_DAYS = 30
 HTTP_BODY_LIMIT_BYTES = 64 * 1024
@@ -116,11 +119,11 @@ def get_http_service_details(ip, port, *, use_tls=False):
         connection.close()
 
 
-def get_ssh_host_key_details(ip):
+def get_ssh_host_key_details(ip, port=22):
     """Read SSH host keys with OpenSSH ssh-keyscan; no authentication is attempted."""
     try:
         completed = subprocess.run(
-            ["ssh-keyscan", "-T", str(BANNER_TIMEOUT_SECONDS), "-t", "ed25519,ecdsa,rsa", ip],
+            ["ssh-keyscan", "-p", str(port), "-T", str(BANNER_TIMEOUT_SECONDS), "-t", "ed25519,ecdsa,rsa", ip],
             check=False,
             capture_output=True,
             text=True,
@@ -128,17 +131,53 @@ def get_ssh_host_key_details(ip):
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+    keys = {}
     for line in completed.stdout.splitlines():
         parts = line.split()
-        if len(parts) < 3:
+        if len(parts) < 3 or line.startswith("#"):
             continue
         try:
-            digest = hashlib.sha256(base64.b64decode(parts[2])).digest()
+            digest = hashlib.sha256(base64.b64decode(parts[2], validate=True)).digest()
         except (ValueError, TypeError):
             continue
         fingerprint = base64.b64encode(digest).decode("ascii").rstrip("=")
-        return {"key_type": parts[1], "fingerprint_sha256": f"SHA256:{fingerprint}"}
-    return None
+        keys[parts[1]] = f"SHA256:{fingerprint}"
+    if not keys:
+        return None
+    preferred = next((key for key in ("ssh-ed25519", "ecdsa-sha2-nistp256", "ssh-rsa") if key in keys), sorted(keys)[0])
+    return {"key_type": preferred, "fingerprint_sha256": keys[preferred], "host_keys": dict(sorted(keys.items()))}
+
+
+def decode_peer_certificate(der):
+    """Decode metadata independently of certificate trust verification."""
+    cert = x509.load_der_x509_certificate(der)
+    def names(name, oid, label):
+        return tuple(((label, attr.value),) for attr in name.get_attributes_for_oid(oid))
+    return {
+        "subject": names(cert.subject, NameOID.COMMON_NAME, "commonName"),
+        "issuer": names(cert.issuer, NameOID.ORGANIZATION_NAME, "organizationName"),
+        "notBefore": cert.not_valid_before_utc.strftime("%b %d %H:%M:%S %Y GMT"),
+        "notAfter": cert.not_valid_after_utc.strftime("%b %d %H:%M:%S %Y GMT"),
+    }
+
+
+def ssh_key_map(observation):
+    """Normalize current and legacy SSH observations by algorithm."""
+    observation = observation or {}
+    if "host_keys" in observation:
+        return observation["host_keys"]
+    if observation.get("key_type") and observation.get("fingerprint_sha256"):
+        return {observation["key_type"]: observation["fingerprint_sha256"]}
+    return {}
+
+
+def ssh_identity_changed(previous, current):
+    """Only compare keys observed with the same algorithm in both scans."""
+    old, new = ssh_key_map(previous), ssh_key_map(current)
+    if old or new:
+        return any(old[key] != new[key] for key in old.keys() & new.keys())
+    # Preserve comparison for older, nonstandard stored observations.
+    return bool(previous and current and previous != current)
 
 
 def get_tls_service_details(ip, port):
@@ -157,7 +196,7 @@ def get_tls_service_details(ip, port):
                 tls_details = {}
                 if version:
                     tls_details["protocol"] = version
-                peer_cert = tls_socket.getpeercert()
+                peer_cert = decode_peer_certificate(tls_socket.getpeercert(binary_form=True))
                 cert_common_name = extract_certificate_common_name(peer_cert)
                 if cert_common_name:
                     details.append(f"CN={cert_common_name}")
@@ -262,7 +301,7 @@ def get_service_details(ip, port):
 
     banner = get_plaintext_service_banner(ip, port)
     if banner.startswith("SSH"):
-        return build_service_result(banner, ssh=get_ssh_host_key_details(ip))
+        return build_service_result(banner, ssh=get_ssh_host_key_details(ip, port))
     if banner == "Unknown":
         http_result = get_http_service_details(ip, port)
         if http_result:

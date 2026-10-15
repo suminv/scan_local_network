@@ -26,7 +26,7 @@ Current milestone: `v1.0.0`
 
 ## 🛠 Requirements
 
-- Python 3.7+
+- Python 3.10+
 - Administrative/root privileges to send ARP packets and open raw sockets.
 
 ## 📦 Installation
@@ -58,6 +58,10 @@ Current milestone: `v1.0.0`
     ```bash
     python -m unittest discover -s tests -v
     ```
+    GitHub Actions runs this suite on Ubuntu and macOS with Python 3.10 and 3.14.
+
+When updating an existing installation, rerun `pip install -r requirements.txt`
+to install the `cryptography` dependency used for TLS certificate decoding.
 
 ## 🚀 Usage
 
@@ -80,6 +84,41 @@ sudo ./venv/bin/python port_scan.py
 ```bash
 ./venv/bin/python network_health_check.py
 ```
+
+### Reliability and incomplete scans
+
+Port probes distinguish `open`, `closed` (TCP RST), `filtered` (no conclusive
+TCP response), and `error`. A silent or failed probe never confirms closure.
+JSON reports include `scan_status` and per-device `port_observations`.
+
+A scan with any filtered or failed probe is conservatively marked `partial`
+and exits with code `1`, including in `--alerts-only` mode. Its observations
+are still exported, but it does not replace the last successful comparison
+baseline or overwrite device profiles. `--write-baseline` is skipped with a
+warning. Networks that silently drop probes may therefore consistently produce
+partial scans; select the ports you need when establishing a baseline.
+Confirmed observations can still generate change and policy findings.
+
+SYN and service probes share a pool of 20 workers across hosts, with at most
+20 pending tasks per active host. Reset packets are sent without waiting for
+an answer. System diagnostic commands have a 10-second timeout. System DNS
+lookups run in cancellable child processes with a 3-second timeout each;
+reverse lookups use batches of up to eight. These are per-operation bounds,
+not a total deadline for an entire network scan.
+
+TLS certificate metadata is decoded from DER using `cryptography`, including
+for self-signed certificates. Expiry status describes the certificate's dates,
+not verification of its issuer or hostname.
+
+SSH keys are collected from the actual scanned port and stored by algorithm in
+`host_keys`. Newly generated policy baselines include `expected_ssh_keys`, keyed
+by port and then algorithm. Comparisons use algorithms present in both
+observations; an unavailable key is not evidence of a changed key. Legacy
+`expected_ssh_fingerprint` configurations remain supported.
+
+JSON, CSV, and Markdown reports replace the previous file atomically after a
+complete write. Webhook logs show only the destination hostname, omitting
+credentials, paths, query strings, and exception text that could contain them.
 
 ### Consistent Progress Indicators
 
@@ -373,7 +412,8 @@ target with a previous scan of the same IP and the same port set, add
 For an open HTTP/HTTPS port, the scanner performs one bounded, unauthenticated
 request and reports the status, redirect, server header, content type, and page
 title when available. For SSH it records the pre-authentication banner and a
-host-key SHA-256 fingerprint. It never attempts passwords or logins.
+host-key SHA-256 fingerprints by algorithm from the scanned port, including
+nonstandard SSH ports. It never attempts passwords or logins.
 
 To inspect one device using the stored profile (MAC/vendor, hostname, IP
 history, first/last seen, observed services, and confidence evidence):
@@ -386,7 +426,9 @@ The profile view is observation-only: it does not authenticate to SSH or HTTP.
 Its compact service section includes SSH key fingerprints, HTTP
 status/redirect/title/server fields, and TLS identity/expiry metadata when
 observed. With `--config`, the card ends with explicit compliant/review policy
-status and active findings; review findings produce exit code `2`.
+status and active findings; review findings produce exit code `2` for a complete
+scan. An incomplete scan takes precedence and exits with code `1`; the stored
+profile remains unchanged.
 Home-profile JSON reports include the same coherent `device_profiles` records,
 including user name, MAC/vendor, hostname, IP history, service observations,
 conservative hint evidence, and recent event history. Each event identifies its
@@ -408,6 +450,9 @@ For a first policy baseline, create a JSON file from a full LAN scan:
 ```bash
 ./scan-ports --network-profile home --write-baseline data/network_policy.json
 ```
+
+`--write-baseline` requires a complete scan. If any port is filtered or a probe
+fails, the baseline file is left unchanged and the command exits with code `1`.
 
 Review the generated file, then use it on later scans:
 
@@ -479,8 +524,9 @@ tested. Configured names are copied into matching stored device profiles.
 
 With `--alerts-only`, the process exits with:
 
-- `0` when no actionable alerts are detected
-- `2` when TLS alerts, new open ports, service/SSH/HTTP changes, policy findings, or TLS metadata changes are detected
+- `0` when the scan is complete and no actionable alerts are detected
+- `1` when the scan is incomplete or fails, even if actionable alerts are also present
+- `2` when the scan is complete and TLS alerts, new open ports, service/SSH/HTTP changes, policy findings, or TLS metadata changes are detected
 
 For a target scan, historical changes affect this report and its exit code only
 when `--show-changes` is also present. Findings from the current target, such as
@@ -525,14 +571,14 @@ No port-level changes detected since last scan.
 
 - scan metadata in `scan_runs`
 - open-port snapshots in `scan_run_ports`
-- full JSON export at the configured `--json-out` path with `devices` and `port_diff_summary`
+- full JSON export at the configured `--json-out` path with `scan_status`, `devices` (including `port_observations`), and `port_diff_summary`
 - optional CSV export at the configured `--csv-out` path
 - optional Markdown export at the configured `--md-out` path
 
 **What the port diff summary currently reports:**
 
 - new open ports since the previous successful port scan
-- closed ports since the previous successful port scan
+- ports confirmed closed by TCP RST since the previous successful port scan
 - service label changes on the same `(MAC, port)`
 - SSH banner or host-key fingerprint changes
 - HTTP status/server/title/content-type identity changes
@@ -891,7 +937,7 @@ The standard report now also includes a top-level trust assessment:
 -   **`port_scan.py --csv-out`**: Optional CSV snapshot export path.
 -   **`port_scan.py --md-out`**: Optional Markdown snapshot and diff export path.
 -   **`port_scan.py --network-profile`**: `untrusted` (default) keeps the scan ephemeral; `home` enables SQLite history, device profiles, policy baselines, and historical changes.
--   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when actionable port-level changes are detected.
+-   **`port_scan.py --alerts-only`**: Alert-only console output with exit code `2` when a complete scan detects actionable port-level findings; incomplete or failed scans exit with code `1`.
 -   **`port_scan.py --webhook-url`**: Optional webhook URL for actionable port alerts.
 -   **`port_scan.py --webhook-timeout`**: Webhook timeout in seconds. Defaults to `10`.
 -   **`port_scan.py --output`**: Console output mode. One of `"grouped"`, `"table"`, or `"focus"`.

@@ -20,6 +20,7 @@ from tabulate import tabulate
 from alert_delivery import build_alert_payload, send_webhook_payload
 from cli_progress import ProgressIndicator
 from hostname_lookup import enrich_devices_with_hostnames
+from service_detection import ssh_identity_changed
 from models import build_device_snapshot, build_port_snapshot
 from reporting import (
     build_report_payload,
@@ -1336,6 +1337,7 @@ def build_port_scan_diff(
     observed_macs=None,
     *,
     baseline_available=True,
+    confirmed_closed_ports=None,
 ):
     """Compare two port scan snapshots and return port-level changes."""
     previous_by_key = {(row["mac"], row["port"]): row for row in previous_ports}
@@ -1351,7 +1353,8 @@ def build_port_scan_diff(
     closed_ports = [
         previous_by_key[key]
         for key in sorted(previous_by_key.keys() - current_by_key.keys())
-        if observed_macs is None or key[0] in observed_macs
+        if (observed_macs is None or key[0] in observed_macs)
+        and (confirmed_closed_ports is None or key in confirmed_closed_ports)
     ]
     service_changes = []
     tls_changes = []
@@ -1380,7 +1383,7 @@ def build_port_scan_diff(
                     "new_tls": current_port.get("tls"),
                 }
             )
-        if previous_port.get("ssh") != current_port.get("ssh"):
+        if ssh_identity_changed(previous_port.get("ssh"), current_port.get("ssh")):
             ssh_changes.append(
                 {
                     "mac": current_port["mac"],

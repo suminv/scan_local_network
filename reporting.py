@@ -3,6 +3,9 @@ import json
 import os
 import shutil
 import sys
+import stat
+import uuid
+from contextlib import contextmanager
 
 
 STATUS_MARKERS = {
@@ -101,20 +104,45 @@ def build_report_payload(snapshot_key, snapshot, diff_key, diff_summary):
     }
 
 
+@contextmanager
+def atomic_report_file(file_path, *, newline=None):
+    """Replace a report only after its entire new contents reach disk."""
+    destination = os.path.abspath(file_path)
+    directory = os.path.dirname(destination)
+    os.makedirs(directory, exist_ok=True)
+    temporary = os.path.join(directory, f".report-{uuid.uuid4().hex}")
+    try:
+        previous = os.stat(destination)
+    except FileNotFoundError:
+        previous = None
+    # Match normal file creation permissions (including the caller's umask).
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline=newline) as handle:
+            if previous is not None:
+                if os.geteuid() == 0:
+                    os.fchown(handle.fileno(), previous.st_uid, previous.st_gid)
+                os.fchmod(handle.fileno(), stat.S_IMODE(previous.st_mode))
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+
 def save_json_report(file_path, payload, label="Results"):
     """Persist a JSON payload and print where it was written."""
-    directory = os.path.dirname(os.path.abspath(file_path))
-    os.makedirs(directory, exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as handle:
+    with atomic_report_file(file_path) as handle:
         json.dump(payload, handle, indent=4)
     print(f"{label} saved to {file_path}")
 
 
 def save_csv_report(file_path, headers, rows, label="Results"):
     """Persist tabular rows as CSV and print where it was written."""
-    directory = os.path.dirname(os.path.abspath(file_path))
-    os.makedirs(directory, exist_ok=True)
-    with open(file_path, "w", encoding="utf-8", newline="") as handle:
+    with atomic_report_file(file_path, newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(headers)
         writer.writerows(rows)
@@ -135,9 +163,7 @@ def render_markdown_table(headers, rows):
 
 def save_markdown_report(file_path, content, label="Results"):
     """Persist Markdown content and print where it was written."""
-    directory = os.path.dirname(os.path.abspath(file_path))
-    os.makedirs(directory, exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as handle:
+    with atomic_report_file(file_path) as handle:
         handle.write(content)
     print(f"{label} saved to {file_path}")
 

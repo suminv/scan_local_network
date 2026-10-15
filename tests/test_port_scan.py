@@ -353,12 +353,10 @@ class PortScanTests(unittest.TestCase):
         tls_socket.__enter__.return_value = tls_socket
         tls_socket.__exit__.return_value = None
         tls_socket.version.return_value = "TLSv1.3"
-        tls_socket.getpeercert.return_value = {
-            "subject": ((("commonName", "example.local"),),),
-            "issuer": ((("organizationName", "Example CA"),),),
-            "notBefore": "Apr 25 00:00:00 2026 GMT",
-            "notAfter": "Apr 25 00:00:00 2027 GMT",
-        }
+        from test_service_detection import make_certificate
+        from cryptography.hazmat.primitives import serialization
+        _, cert = make_certificate()
+        tls_socket.getpeercert.return_value = cert.public_bytes(serialization.Encoding.DER)
         tls_socket.cipher.return_value = ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
 
         context = mock.MagicMock()
@@ -397,7 +395,7 @@ class PortScanTests(unittest.TestCase):
         }
         progress_calls = []
 
-        with mock.patch("port_scan.scan_single_port", return_value=443):
+        with mock.patch("port_scan.scan_single_port", return_value={"port": 443, "state": "open"}):
             with mock.patch(
                 "port_scan.get_service_details",
                 return_value={

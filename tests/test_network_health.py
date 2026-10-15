@@ -2433,7 +2433,7 @@ Wi-Fi:
 
     def test_resolve_gateway_identity_marks_private_gateway_ok(self):
         with mock.patch("network_health.get_default_gateway", return_value=("192.168.2.1", "en0")):
-            with mock.patch("network_health.socket.gethostbyaddr", side_effect=OSError):
+            with mock.patch("network_health.resolve_hostname", return_value=None):
                 result = network_health.resolve_gateway_identity()
 
         self.assertEqual(result["status"], "ok")

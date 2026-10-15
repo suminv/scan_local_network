@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 
 import netifaces
 
+from hostname_lookup import resolve_hostname, system_dns_lookup
+
 from arp_scanner import (
     LocalMacVendorLookup,
     get_effective_default_route,
@@ -122,12 +124,13 @@ def is_tunnel_interface(interface):
     return bool(interface) and interface.lower().startswith(TUNNEL_INTERFACE_PREFIXES)
 
 
-def run_command(command):
+def run_command(command, timeout=10):
     completed = subprocess.run(
         command,
         check=True,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
     return completed.stdout
 
@@ -292,10 +295,7 @@ def get_default_gateway():
 
 def resolve_gateway_identity():
     gateway_ip, interface = get_default_gateway()
-    try:
-        hostname, _, _ = socket.gethostbyaddr(gateway_ip)
-    except (socket.herror, socket.gaierror, OSError):
-        hostname = None
+    hostname = resolve_hostname(gateway_ip)
 
     return build_check(
         "gateway_identity",
@@ -697,19 +697,19 @@ def collect_passive_neighbor_entries():
     try:
         entries.extend(parse_arp_cache_entries(run_command(["arp", "-an"])))
         available_sources.append("arp")
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
     try:
         ipv6_output = run_command(["ndp", "-an"])
         entries.extend(parse_ipv6_neighbor_entries(ipv6_output))
         available_sources.append("ndp")
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         try:
             neighbor_output = run_command(["ip", "neigh", "show"])
             entries.extend(parse_ipv6_neighbor_entries(neighbor_output))
             available_sources.append("ip-neigh")
-        except (subprocess.CalledProcessError, FileNotFoundError):
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
             pass
 
     return {
@@ -1071,7 +1071,7 @@ def build_client_isolation_hint_check(
 def lookup_arp_mac(ip, interface=None):
     try:
         output = run_command(["arp", "-an"])
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return None
 
     pattern = re.compile(
@@ -1118,9 +1118,7 @@ def resolve_gateway_fingerprint(mac_lookup=None):
 
 
 def resolve_domain_ips(domain):
-    infos = socket.getaddrinfo(domain, None)
-    ips = sorted({item[4][0] for item in infos})
-    return ips
+    return system_dns_lookup(domain, "forward")
 
 
 def collect_dns_resolution_observations(domains=None):
@@ -1225,7 +1223,7 @@ def collect_dns_configuration():
                 "nameservers": nameservers,
                 "resolvers": resolvers,
             }
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         pass
 
     try:
@@ -1890,7 +1888,7 @@ def collect_macos_current_wifi_details():
         }
     try:
         parsed = parse_wdutil_info(run_command(["wdutil", "info"]))
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
         return {
             "available": False,
             "reason": str(exc),
@@ -2215,8 +2213,10 @@ def parse_ping_summary(raw_text):
 def ping_host(host, count=3):
     try:
         output = run_command(["ping", "-n", "-c", str(count), host])
-    except subprocess.CalledProcessError as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         output = exc.stdout or exc.output or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
     return parse_ping_summary(output)
 
 
@@ -2631,7 +2631,7 @@ def collect_macos_nearby_wifi_networks():
         }
     try:
         output = run_command([MACOS_AIRPORT_SCAN_PATH, "-s"])
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
         return {
             "available": False,
             "reason": f"{corewlan_result['reason']}; {exc}",
@@ -2972,7 +2972,11 @@ def analyze_wifi_environment(wifi_environment, platform_name=None):
 
 def build_wifi_environment_check():
     """Collect and interpret the current Wi-Fi environment."""
-    wifi_environment = collect_wifi_environment()
+    try:
+        wifi_environment = collect_wifi_environment()
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError, OSError) as exc:
+        return build_check("wifi_environment", "notice", "Wi-Fi inspection unavailable",
+                           {"available": False, "error": str(exc)})
     return analyze_wifi_environment(
         wifi_environment,
         platform_name=platform.system(),

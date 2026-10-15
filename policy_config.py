@@ -4,6 +4,8 @@ import json
 import os
 import re
 
+from service_detection import ssh_key_map
+
 
 DEFAULT_CONFIG = {
     "known_devices": {},
@@ -81,6 +83,15 @@ def validate_policy_config(config):
         fingerprint = device.get("expected_ssh_fingerprint")
         if fingerprint is not None and not isinstance(fingerprint, str):
             raise ValueError(f"expected_ssh_fingerprint for {mac} must be a string.")
+        expected_keys = device.get("expected_ssh_keys", {})
+        if not isinstance(expected_keys, dict):
+            raise ValueError(f"expected_ssh_keys for {mac} must map ports to key algorithms.")
+        for port, keys in expected_keys.items():
+            if (not str(port).isdigit() or not 1 <= int(port) <= 65535
+                    or not isinstance(keys, dict) or not keys
+                    or any(not isinstance(algorithm, str) or not isinstance(value, str)
+                           for algorithm, value in keys.items())):
+                raise ValueError(f"Invalid expected_ssh_keys for {mac}.")
         expected_http = device.get("expected_http", {})
         if not isinstance(expected_http, dict):
             raise ValueError(f"expected_http for {mac} must be an object keyed by port.")
@@ -154,11 +165,18 @@ def evaluate_device_policies(devices, config):
         expected_fingerprint = known.get("expected_ssh_fingerprint")
         for port_info in device.get("open_ports", []):
             fingerprint = (port_info.get("ssh") or {}).get("fingerprint_sha256")
+            observed_keys = ssh_key_map(port_info.get("ssh"))
+            expected_keys = known.get("expected_ssh_keys", {}).get(str(port_info["port"]))
+            key_changed = (
+                any(expected_keys[key] != observed_keys[key]
+                    for key in expected_keys.keys() & observed_keys.keys())
+                if expected_keys is not None else
+                bool(expected_fingerprint and fingerprint and fingerprint != expected_fingerprint
+                     and expected_fingerprint not in observed_keys.values())
+            )
             if (
                 policies.get("alert_on_ssh_key_change", True)
-                and expected_fingerprint
-                and fingerprint
-                and fingerprint != expected_fingerprint
+                and key_changed
             ):
                 findings.append(
                     {
@@ -225,6 +243,9 @@ def build_baseline_config(devices):
         }
         for port_info in device.get("open_ports", []):
             ssh_info = port_info.get("ssh") or {}
+            keys = ssh_key_map(ssh_info)
+            if keys:
+                known_devices[mac].setdefault("expected_ssh_keys", {})[str(port_info["port"])] = dict(keys)
             if ssh_info.get("fingerprint_sha256"):
                 known_devices[mac]["expected_ssh_fingerprint"] = ssh_info[
                     "fingerprint_sha256"

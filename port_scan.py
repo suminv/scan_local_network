@@ -6,7 +6,7 @@ import os
 import socket
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 
 import arp_scanner
 from alert_delivery import build_alert_payload, send_webhook_payload
@@ -22,7 +22,7 @@ from policy_config import (
 from reporting import print_output_files, print_section_heading, should_use_color
 from scapy.layers.inet import IP, TCP
 from scapy.error import Scapy_Exception
-from scapy.sendrecv import sr1
+from scapy.sendrecv import sr1, send
 
 from arp_scanner import (
     DEFAULT_NETWORK_PROFILE,
@@ -114,72 +114,81 @@ def arp_scan(ip_range, interface):
     return arp_scanner.arp_scan(ip_range, interface)
 
 def scan_single_port(ip, port):
-    """Scans a single port on a given IP using a SYN scan.
-
-    Args:
-        ip (str): The IP address to scan.
-        port (int): The port to scan.
-
-    Returns:
-        int: The port number if it's open, otherwise None.
-    """
+    """Return a port observation without conflating silence and refusal."""
     try:
         packet = IP(dst=ip) / TCP(dport=port, flags="S")
         response = sr1(packet, timeout=1, verbose=False)
-        if response and response.haslayer(TCP) and response.getlayer(TCP).flags == 0x12:
-            # Send RST to close the connection gracefully
-            rst_packet = IP(dst=ip) / TCP(
-                dport=port,
-                sport=response[TCP].dport,
-                seq=response[TCP].ack,
-                ack=response[TCP].seq + 1,
-                flags="R",
-            )
-            sr1(rst_packet, timeout=1, verbose=False)
-            return port
-    except (Scapy_Exception, socket.timeout, OSError):
-        # Handle known network-related and Scapy errors explicitly
-        return None
-    return None
+        if response is not None and response.haslayer(TCP):
+            flags = int(response[TCP].flags)
+            if flags & 0x12 == 0x12:
+                rst_packet = IP(dst=ip) / TCP(
+                    dport=port, sport=response[TCP].dport,
+                    seq=response[TCP].ack, ack=response[TCP].seq + 1, flags="R",
+                )
+                # RST has no expected response. Cleanup failure does not undo SYN-ACK.
+                try:
+                    send(rst_packet, verbose=False)
+                except (Scapy_Exception, OSError):
+                    pass
+                return {"port": port, "state": "open"}
+            if flags & 0x04:
+                return {"port": port, "state": "closed"}
+        return {"port": port, "state": "filtered"}
+    except (Scapy_Exception, OSError) as exc:
+        return {"port": port, "state": "error", "error": str(exc)}
 
 
-def scan_ports_for_device(device, ports, progress_callback=None):
+def bounded_results(executor, function, items, limit=MAX_WORKERS):
+    """Keep only a small window of futures pending for each producer."""
+    iterator = iter(items)
+    pending = set()
+    while True:
+        while len(pending) < limit:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                break
+            pending.add(executor.submit(function, item))
+        if not pending:
+            return
+        finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+        for future in finished:
+            yield future.result()
+
+
+def scan_ports_for_device(device, ports, progress_callback=None, probe_executor=None):
     """Scans ports, and for open ones, tries to identify the service."""
     ip = device["ip"]
     open_ports_info = []
+    observations = []
 
-    # Step 1: Find open ports quickly using SYN scan
-    with ThreadPoolExecutor(
-        max_workers=MAX_WORKERS, thread_name_prefix="SYN_Scan"
-    ) as executor:
-        future_to_port = {
-            executor.submit(scan_single_port, ip, port): port for port in ports
-        }
+    # Share the probe pool across hosts and bound queued work per host.
+    pool_context = (nullcontext(probe_executor) if probe_executor is not None else
+                    ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="SYN_Scan"))
+    with pool_context as executor:
         open_ports = []
-        for completed, future in enumerate(as_completed(future_to_port), start=1):
-            result = future.result()
-            if result is not None:
-                open_ports.append(result)
+        for completed, result in enumerate(bounded_results(
+                executor, lambda port: scan_single_port(ip, port), ports), start=1):
+            observations.append(result)
+            if result["state"] == "open":
+                open_ports.append(result["port"])
             if progress_callback is not None:
-                progress_callback(completed, len(future_to_port), ip)
+                progress_callback(completed, len(ports), ip)
 
     # Step 2: For open ports, try to get service banners
     if open_ports:
-        with ThreadPoolExecutor(
-            max_workers=MAX_WORKERS, thread_name_prefix="Banner_Grab"
-        ) as executor:
-            future_to_service = {
-                executor.submit(get_service_details, ip, port): port
-                for port in open_ports
-            }
-            for future in as_completed(future_to_service):
-                port = future_to_service[future]
-                try:
-                    service_info = future.result()
-                except Exception:
-                    service_info = build_service_result("Error")
-                open_ports_info.append({"port": port, **service_info})
+        pool_context = (nullcontext(probe_executor) if probe_executor is not None else
+                        ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="Banner_Grab"))
+        def identify(port):
+            try:
+                service_info = get_service_details(ip, port)
+            except Exception:
+                service_info = build_service_result("Error")
+            return {"port": port, **service_info}
+        with pool_context as executor:
+            open_ports_info.extend(bounded_results(executor, identify, open_ports))
 
+    device["port_observations"] = sorted(observations, key=lambda x: x["port"])
     device["open_ports"] = sorted(open_ports_info, key=lambda x: x["port"])
     return device
 
@@ -314,13 +323,14 @@ def run_port_scan(
 ):
     """Run port scanning for all selected devices."""
     results = []
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as probes, ThreadPoolExecutor(max_workers=10) as executor:
         future_to_device = {
             executor.submit(
                 scan_ports_for_device,
                 device,
                 ports_to_scan,
                 progress_callback=(progress_callback if progress_by_port else None),
+                probe_executor=probes,
             ): device
             for device in devices_to_scan
         }
@@ -917,10 +927,18 @@ def main():
             raise
         elapsed = time.monotonic() - started_at
         progress.finish(f"completed in {elapsed:.1f}s")
+        incomplete = any(
+            item["state"] in {"filtered", "error"}
+            for device in results for item in device.get("port_observations", [])
+        )
+        if incomplete:
+            print("Warning: Scan is incomplete: some ports did not respond or probes failed. "
+                  "Results will not replace the successful comparison baseline.", file=sys.stderr)
         profiles = []
         if persistent:
             save_scan_run_ports(db_conn, scan_run_id, results)
-            profiles = upsert_device_profiles(db_conn, results, scan_run_id)
+            if not incomplete:
+                profiles = upsert_device_profiles(db_conn, results, scan_run_id)
             if args.config:
                 sync_profile_policy_names(db_conn, policy_config)
         policy_findings = (
@@ -928,7 +946,9 @@ def main():
             if args.config
             else None
         )
-        if args.write_baseline:
+        if args.write_baseline and incomplete:
+            print("Warning: Policy baseline was not written because the scan is incomplete.", file=sys.stderr)
+        if args.write_baseline and not incomplete:
             save_policy_config(args.write_baseline, build_baseline_config(results))
             print(f"Baseline saved to {args.write_baseline}")
         diff_summary = None
@@ -938,6 +958,11 @@ def main():
                 flatten_port_results(results),
                 observed_macs=[device["mac"] for device in results],
                 baseline_available=port_baseline_available,
+                confirmed_closed_ports={
+                    (device["mac"], item["port"])
+                    for device in results for item in device.get("port_observations", [])
+                    if item["state"] == "closed"
+                },
             )
             save_device_events(db_conn, scan_run_id, diff_summary, SCAN_TYPE_PORT)
             profiles = [
@@ -961,6 +986,8 @@ def main():
                 target=target_label,
                 duration_seconds=elapsed,
             )
+        if incomplete:
+            exit_code = 1
         should_save_reports = persistent or any(
             [args.json_out, args.csv_out, args.md_out]
         )
@@ -987,7 +1014,7 @@ def main():
             finalize_scan_run(
                 db_conn,
                 scan_run_id,
-                status="success",
+                status="partial" if incomplete else "success",
                 device_count=len(devices_to_scan),
             )
     except Exception:
@@ -1006,7 +1033,7 @@ def main():
                 ("JSON", output_paths["json"] if persistent or args.json_out else None),
                 ("CSV", CSV_OUTPUT_FILE),
                 ("Markdown", MARKDOWN_OUTPUT_FILE),
-                ("Baseline", args.write_baseline),
+                ("Baseline", args.write_baseline if not incomplete else None),
             ]
         )
         print(f"Storage: {'home history' if persistent else 'ephemeral'}")

@@ -279,6 +279,10 @@ def save_port_scan_results(
 ):
     """Save the port scan snapshot and diff summary to JSON/CSV."""
     payload = build_report_payload("devices", results, "port_diff_summary", diff_summary)
+    payload["scan_status"] = "partial" if any(
+        observation["state"] in {"filtered", "error"}
+        for device in results for observation in device.get("port_observations", [])
+    ) else "success"
     if profiles is not None:
         payload["device_profiles"] = profiles
     if policy_findings is not None:
@@ -611,6 +615,10 @@ def print_port_scan_summary(
     """Print the shared top-line summary for all console formats."""
     open_device_count = sum(1 for device in results if device.get("open_ports"))
     open_port_count = count_open_ports(results)
+    uncertain_count = sum(
+        item["state"] in {"filtered", "error"}
+        for device in results for item in device.get("port_observations", [])
+    )
     change_parts = []
     if diff_summary is not None:
         change_specs = [
@@ -639,6 +647,7 @@ def print_port_scan_summary(
                 f"{len(results)} scanned · {open_device_count} with open ports",
             ),
             ("Findings", f"{open_port_count} open ports"),
+            ("Uncertain", f"{uncertain_count} ports" if uncertain_count else None),
             (
                 "Changes",
                 " · ".join(change_parts) if change_parts else (
@@ -647,6 +656,7 @@ def print_port_scan_summary(
             ),
         ],
         status=(
+            ("notice", "incomplete scan; review uncertain ports") if uncertain_count else
             ("notice", "no devices discovered")
             if not results
             else (

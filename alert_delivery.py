@@ -1,6 +1,7 @@
 import json
 import sys
 import urllib.request
+from urllib.parse import urlsplit
 from datetime import datetime, timezone
 
 
@@ -17,6 +18,10 @@ def build_alert_payload(*, source, scan_context=None, alert_summary=None, alerts
 
 def send_webhook_payload(webhook_url, payload, timeout=10, label="Webhook alert"):
     """Send a JSON payload to a webhook endpoint and return True on success."""
+    try:
+        destination = urlsplit(webhook_url).hostname or "configured endpoint"
+    except ValueError:
+        destination = "configured endpoint"
     request = urllib.request.Request(
         webhook_url,
         data=json.dumps(payload).encode("utf-8"),
@@ -26,8 +31,8 @@ def send_webhook_payload(webhook_url, payload, timeout=10, label="Webhook alert"
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = getattr(response, "status", None) or response.getcode()
-        print(f"{label} delivered to {webhook_url} (HTTP {status})")
+        print(f"{label} delivered to {destination} (HTTP {status})")
         return True
     except Exception as exc:
-        print(f"Warning: Failed to deliver {label.lower()}: {exc}", file=sys.stderr)
+        print(f"Warning: Failed to deliver {label.lower()} to {destination}: {type(exc).__name__}", file=sys.stderr)
         return False

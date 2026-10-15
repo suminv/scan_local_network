@@ -6,7 +6,7 @@ import hostname_lookup
 
 class HostnameLookupTests(unittest.TestCase):
     def test_resolve_hostname_returns_none_on_lookup_error(self):
-        with mock.patch("hostname_lookup.socket.gethostbyaddr", side_effect=OSError):
+        with mock.patch("hostname_lookup.system_dns_lookup", side_effect=OSError):
             self.assertIsNone(hostname_lookup.resolve_hostname("192.168.2.10"))
 
     def test_enrich_devices_with_hostnames_sets_hostname_when_found(self):
